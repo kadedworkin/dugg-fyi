@@ -64,6 +64,7 @@ class DuggDB:
                 description TEXT DEFAULT '',
                 thumbnail TEXT DEFAULT '',
                 source_type TEXT DEFAULT 'unknown',
+                author TEXT DEFAULT '',
                 transcript TEXT DEFAULT '',
                 raw_metadata TEXT DEFAULT '{}',
                 note TEXT DEFAULT '',
@@ -105,26 +106,26 @@ class DuggDB:
             );
 
             CREATE VIRTUAL TABLE IF NOT EXISTS resources_fts USING fts5(
-                title, description, transcript, note,
+                title, description, author, transcript, note,
                 content='resources',
                 content_rowid='rowid'
             );
 
             CREATE TRIGGER IF NOT EXISTS resources_ai AFTER INSERT ON resources BEGIN
-                INSERT INTO resources_fts(rowid, title, description, transcript, note)
-                VALUES (new.rowid, new.title, new.description, new.transcript, new.note);
+                INSERT INTO resources_fts(rowid, title, description, author, transcript, note)
+                VALUES (new.rowid, new.title, new.description, new.author, new.transcript, new.note);
             END;
 
             CREATE TRIGGER IF NOT EXISTS resources_ad AFTER DELETE ON resources BEGIN
-                INSERT INTO resources_fts(resources_fts, rowid, title, description, transcript, note)
-                VALUES ('delete', old.rowid, old.title, old.description, old.transcript, old.note);
+                INSERT INTO resources_fts(resources_fts, rowid, title, description, author, transcript, note)
+                VALUES ('delete', old.rowid, old.title, old.description, old.author, old.transcript, old.note);
             END;
 
             CREATE TRIGGER IF NOT EXISTS resources_au AFTER UPDATE ON resources BEGIN
-                INSERT INTO resources_fts(resources_fts, rowid, title, description, transcript, note)
-                VALUES ('delete', old.rowid, old.title, old.description, old.transcript, old.note);
-                INSERT INTO resources_fts(rowid, title, description, transcript, note)
-                VALUES (new.rowid, new.title, new.description, new.transcript, new.note);
+                INSERT INTO resources_fts(resources_fts, rowid, title, description, author, transcript, note)
+                VALUES ('delete', old.rowid, old.title, old.description, old.author, old.transcript, old.note);
+                INSERT INTO resources_fts(rowid, title, description, author, transcript, note)
+                VALUES (new.rowid, new.title, new.description, new.author, new.transcript, new.note);
             END;
         """)
         self.conn.commit()
@@ -202,6 +203,7 @@ class DuggDB:
         description: str = "",
         thumbnail: str = "",
         source_type: str = "unknown",
+        author: str = "",
         transcript: str = "",
         raw_metadata: Optional[dict] = None,
         tags: Optional[list[str]] = None,
@@ -212,9 +214,9 @@ class DuggDB:
         meta_json = json.dumps(raw_metadata or {})
         self.conn.execute(
             """INSERT INTO resources
-               (id, url, title, description, thumbnail, source_type, transcript, raw_metadata, note, submitted_by, collection_id, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (res_id, url, title, description, thumbnail, source_type, transcript, meta_json, note, submitted_by, collection_id, now, now),
+               (id, url, title, description, thumbnail, source_type, author, transcript, raw_metadata, note, submitted_by, collection_id, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (res_id, url, title, description, thumbnail, source_type, author, transcript, meta_json, note, submitted_by, collection_id, now, now),
         )
         if tags:
             for tag in tags:
@@ -222,12 +224,12 @@ class DuggDB:
         self.conn.commit()
         return {
             "id": res_id, "url": url, "title": title, "description": description,
-            "source_type": source_type, "note": note, "submitted_by": submitted_by,
+            "source_type": source_type, "author": author, "note": note, "submitted_by": submitted_by,
             "collection_id": collection_id, "tags": tags or [], "created_at": now,
         }
 
     def update_resource(self, resource_id: str, **fields) -> Optional[dict]:
-        allowed = {"title", "description", "thumbnail", "source_type", "transcript", "raw_metadata", "note", "enriched_at"}
+        allowed = {"title", "description", "thumbnail", "source_type", "author", "transcript", "raw_metadata", "note", "enriched_at"}
         updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
         if not updates:
             return self.get_resource(resource_id)

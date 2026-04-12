@@ -295,6 +295,9 @@ async def _handle_add(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
     # Enrich the URL
     enriched = await enrich_url(url)
 
+    # Extract author from enrichment metadata
+    author = enriched.get("raw_metadata", {}).get("author", "")
+
     resource = d.add_resource(
         url=url,
         collection_id=coll_id,
@@ -304,11 +307,17 @@ async def _handle_add(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
         description=provided_desc or enriched.get("description", ""),
         thumbnail=enriched.get("thumbnail", ""),
         source_type=enriched.get("source_type", "unknown"),
+        author=author,
         transcript=provided_transcript or enriched.get("transcript", ""),
         raw_metadata=enriched.get("raw_metadata"),
         tags=tags,
         tag_source="human" if tags else "agent",
     )
+
+    # Auto-tag with channel/author name for YouTube
+    if author:
+        author_tag = author.lower().strip()
+        d.tag_resource(resource["id"], [author_tag], source="agent")
 
     # Mark enriched
     from dugg.db import _now
@@ -317,6 +326,8 @@ async def _handle_add(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
     summary = f"Added: {resource.get('title') or url}\n"
     summary += f"ID: {resource['id']}\n"
     summary += f"Type: {resource['source_type']}\n"
+    if author:
+        summary += f"Author: {author}\n"
     if resource.get("tags"):
         summary += f"Tags: {', '.join(resource['tags'])}\n"
     if enriched.get("transcript"):
@@ -372,7 +383,8 @@ def _handle_feed(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
         submitter_name = submitter["name"] if submitter else submitted_by
 
         lines.append(f"- [{r['id']}] {r.get('title') or r['url']}")
-        lines.append(f"  By: {submitter_name} | Type: {r['source_type']}")
+        author_str = f" | Author: {r['author']}" if r.get("author") else ""
+        lines.append(f"  By: {submitter_name} | Type: {r['source_type']}{author_str}")
         if tags_str:
             lines.append(f"  Tags: {tags_str}")
         if r.get("note"):
@@ -460,6 +472,9 @@ async def _handle_enrich(d: DuggDB, args: dict) -> list[TextContent]:
         updates["transcript"] = enriched["transcript"]
     if enriched.get("source_type") and resource.get("source_type") == "unknown":
         updates["source_type"] = enriched["source_type"]
+    enriched_author = enriched.get("raw_metadata", {}).get("author", "")
+    if enriched_author and not resource.get("author"):
+        updates["author"] = enriched_author
     if enriched.get("raw_metadata"):
         updates["raw_metadata"] = enriched["raw_metadata"]
     updates["enriched_at"] = _now()
@@ -521,9 +536,13 @@ def _handle_get(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
         f"ID: {resource['id']}",
         f"URL: {resource['url']}",
         f"Type: {resource['source_type']}",
+    ]
+    if resource.get("author"):
+        lines.append(f"Author: {resource['author']}")
+    lines.extend([
         f"By: {submitter_name}",
         f"Added: {resource['created_at']}",
-    ]
+    ])
     if tags_str:
         lines.append(f"Tags: {tags_str}")
     if resource.get("note"):
