@@ -54,7 +54,27 @@ class DuggDB:
                 collection_id TEXT NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
                 user_id TEXT NOT NULL REFERENCES users(id),
                 role TEXT DEFAULT 'member' CHECK(role IN ('owner', 'member')),
+                invited_by TEXT REFERENCES users(id),
+                status TEXT DEFAULT 'active' CHECK(status IN ('active', 'banned', 'appealing')),
+                joined_at TEXT NOT NULL DEFAULT '2024-01-01T00:00:00Z',
                 PRIMARY KEY (collection_id, user_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS dugg_instances (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                topic TEXT DEFAULT '',
+                access_mode TEXT DEFAULT 'invite' CHECK(access_mode IN ('public', 'invite')),
+                owner_id TEXT NOT NULL REFERENCES users(id),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS instance_subscribers (
+                instance_id TEXT NOT NULL REFERENCES dugg_instances(id) ON DELETE CASCADE,
+                user_id TEXT NOT NULL REFERENCES users(id),
+                subscribed_at TEXT NOT NULL,
+                PRIMARY KEY (instance_id, user_id)
             );
 
             CREATE TABLE IF NOT EXISTS resources (
@@ -103,6 +123,23 @@ class DuggDB:
                 created_by TEXT REFERENCES users(id),
                 created_at TEXT NOT NULL,
                 UNIQUE(resource_a, resource_b, relationship_type)
+            );
+
+            CREATE TABLE IF NOT EXISTS publish_targets (
+                id TEXT PRIMARY KEY,
+                resource_id TEXT NOT NULL REFERENCES resources(id) ON DELETE CASCADE,
+                target TEXT NOT NULL,
+                published_at TEXT NOT NULL,
+                UNIQUE(resource_id, target)
+            );
+
+            CREATE TABLE IF NOT EXISTS reactions (
+                id TEXT PRIMARY KEY,
+                resource_id TEXT NOT NULL REFERENCES resources(id) ON DELETE CASCADE,
+                user_id TEXT NOT NULL REFERENCES users(id),
+                reaction_type TEXT DEFAULT 'tap' CHECK(reaction_type IN ('tap', 'star', 'thumbsup')),
+                created_at TEXT NOT NULL,
+                UNIQUE(resource_id, user_id, reaction_type)
             );
 
             CREATE VIRTUAL TABLE IF NOT EXISTS resources_fts USING fts5(
@@ -168,8 +205,8 @@ class DuggDB:
             (coll_id, name, description, user_id, visibility, now, now),
         )
         self.conn.execute(
-            "INSERT INTO collection_members (collection_id, user_id, role) VALUES (?, ?, 'owner')",
-            (coll_id, user_id),
+            "INSERT INTO collection_members (collection_id, user_id, role, status, joined_at) VALUES (?, ?, 'owner', 'active', ?)",
+            (coll_id, user_id, now),
         )
         self.conn.commit()
         return {"id": coll_id, "name": name, "description": description, "visibility": visibility, "created_by": user_id, "created_at": now}
@@ -184,10 +221,11 @@ class DuggDB:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def add_collection_member(self, collection_id: str, user_id: str, role: str = "member"):
+    def add_collection_member(self, collection_id: str, user_id: str, role: str = "member", invited_by: Optional[str] = None):
+        now = _now()
         self.conn.execute(
-            "INSERT OR IGNORE INTO collection_members (collection_id, user_id, role) VALUES (?, ?, ?)",
-            (collection_id, user_id, role),
+            "INSERT OR IGNORE INTO collection_members (collection_id, user_id, role, invited_by, status, joined_at) VALUES (?, ?, ?, ?, 'active', ?)",
+            (collection_id, user_id, role, invited_by, now),
         )
         self.conn.commit()
 
@@ -413,10 +451,350 @@ class DuggDB:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    # --- Publishing ---
+
+    def publish_resource(self, resource_id: str, targets: list[str]) -> list[dict]:
+        """Publish a resource to one or more named targets."""
+        now = _now()
+        results = []
+        for target in targets:
+            pub_id = _uuid()
+            self.conn.execute(
+                """INSERT OR IGNORE INTO publish_targets (id, resource_id, target, published_at)
+                   VALUES (?, ?, ?, ?)""",
+                (pub_id, resource_id, target.lower().strip(), now),
+            )
+            results.append({"resource_id": resource_id, "target": target.lower().strip(), "published_at": now})
+        self.conn.commit()
+        return results
+
+    def unpublish_resource(self, resource_id: str, targets: Optional[list[str]] = None):
+        """Remove a resource from specific targets, or all targets if none specified."""
+        if targets:
+            placeholders = ",".join("?" for _ in targets)
+            self.conn.execute(
+                f"DELETE FROM publish_targets WHERE resource_id = ? AND target IN ({placeholders})",
+                [resource_id] + [t.lower().strip() for t in targets],
+            )
+        else:
+            self.conn.execute("DELETE FROM publish_targets WHERE resource_id = ?", (resource_id,))
+        self.conn.commit()
+
+    def get_publish_targets(self, resource_id: str) -> list[dict]:
+        """Get all publish targets for a resource."""
+        rows = self.conn.execute(
+            "SELECT target, published_at FROM publish_targets WHERE resource_id = ?", (resource_id,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_published_resources(self, target: str, limit: int = 50) -> list[dict]:
+        """Get all resources published to a specific target."""
+        rows = self.conn.execute(
+            """SELECT r.* FROM resources r
+               JOIN publish_targets pt ON r.id = pt.resource_id
+               WHERE pt.target = ?
+               ORDER BY pt.published_at DESC LIMIT ?""",
+            (target.lower().strip(), limit),
+        ).fetchall()
+        results = []
+        for r in rows:
+            d = dict(r)
+            d["tags"] = self._get_tags(d["id"])
+            results.append(d)
+        return results
+
+    # --- Reactions ---
+
+    def react_to_resource(self, resource_id: str, user_id: str, reaction_type: str = "tap") -> dict:
+        """Add a silent reaction to a resource. Idempotent — same user+type is a no-op."""
+        react_id = _uuid()
+        now = _now()
+        self.conn.execute(
+            """INSERT OR IGNORE INTO reactions (id, resource_id, user_id, reaction_type, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (react_id, resource_id, user_id, reaction_type, now),
+        )
+        self.conn.commit()
+        return {"resource_id": resource_id, "user_id": user_id, "reaction_type": reaction_type, "created_at": now}
+
+    def get_reactions(self, resource_id: str, requester_id: str) -> Optional[dict]:
+        """Get reaction counts for a resource. Only the resource's submitter can see aggregates."""
+        resource = self.get_resource(resource_id)
+        if not resource:
+            return None
+        if resource["submitted_by"] != requester_id:
+            return None  # Only publisher sees reactions
+
+        rows = self.conn.execute(
+            "SELECT reaction_type, COUNT(*) as count FROM reactions WHERE resource_id = ? GROUP BY reaction_type",
+            (resource_id,),
+        ).fetchall()
+        total = sum(dict(r)["count"] for r in rows)
+        breakdown = {dict(r)["reaction_type"]: dict(r)["count"] for r in rows}
+        return {"resource_id": resource_id, "total": total, "breakdown": breakdown}
+
+    def get_my_reactions_summary(self, user_id: str) -> list[dict]:
+        """Get reaction totals across all resources submitted by this user."""
+        rows = self.conn.execute(
+            """SELECT r.id, r.title, r.url, re.reaction_type, COUNT(*) as count
+               FROM reactions re
+               JOIN resources r ON re.resource_id = r.id
+               WHERE r.submitted_by = ?
+               GROUP BY r.id, re.reaction_type
+               ORDER BY count DESC""",
+            (user_id,),
+        ).fetchall()
+        # Aggregate by resource
+        by_resource: dict[str, dict] = {}
+        for row in rows:
+            d = dict(row)
+            rid = d["id"]
+            if rid not in by_resource:
+                by_resource[rid] = {"resource_id": rid, "title": d["title"], "url": d["url"], "total": 0, "breakdown": {}}
+            by_resource[rid]["breakdown"][d["reaction_type"]] = d["count"]
+            by_resource[rid]["total"] += d["count"]
+        return sorted(by_resource.values(), key=lambda x: x["total"], reverse=True)
+
+    # --- Instances ---
+
+    def create_instance(self, name: str, owner_id: str, topic: str = "", access_mode: str = "invite") -> dict:
+        inst_id = _uuid()
+        now = _now()
+        self.conn.execute(
+            "INSERT INTO dugg_instances (id, name, topic, access_mode, owner_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (inst_id, name, topic, access_mode, owner_id, now, now),
+        )
+        # Owner is auto-subscribed
+        self.conn.execute(
+            "INSERT INTO instance_subscribers (instance_id, user_id, subscribed_at) VALUES (?, ?, ?)",
+            (inst_id, owner_id, now),
+        )
+        self.conn.commit()
+        return {"id": inst_id, "name": name, "topic": topic, "access_mode": access_mode, "owner_id": owner_id, "created_at": now}
+
+    def get_instance(self, instance_id: str) -> Optional[dict]:
+        row = self.conn.execute("SELECT * FROM dugg_instances WHERE id = ?", (instance_id,)).fetchone()
+        return dict(row) if row else None
+
+    def list_instances(self, user_id: str) -> list[dict]:
+        rows = self.conn.execute(
+            """SELECT di.* FROM dugg_instances di
+               JOIN instance_subscribers isub ON di.id = isub.instance_id
+               WHERE isub.user_id = ?
+               ORDER BY di.updated_at DESC""",
+            (user_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_instance(self, instance_id: str, owner_id: str, **fields) -> Optional[dict]:
+        inst = self.get_instance(instance_id)
+        if not inst or inst["owner_id"] != owner_id:
+            return None
+        allowed = {"name", "topic", "access_mode"}
+        updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
+        if not updates:
+            return inst
+        updates["updated_at"] = _now()
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        values = list(updates.values()) + [instance_id]
+        self.conn.execute(f"UPDATE dugg_instances SET {set_clause} WHERE id = ?", values)
+        self.conn.commit()
+        return self.get_instance(instance_id)
+
+    def subscribe_to_instance(self, instance_id: str, user_id: str) -> dict:
+        now = _now()
+        self.conn.execute(
+            "INSERT OR IGNORE INTO instance_subscribers (instance_id, user_id, subscribed_at) VALUES (?, ?, ?)",
+            (instance_id, user_id, now),
+        )
+        self.conn.commit()
+        return {"instance_id": instance_id, "user_id": user_id, "subscribed_at": now}
+
+    # --- Invite Tree ---
+
+    def invite_member(self, collection_id: str, inviter_id: str, invitee_id: str) -> dict:
+        """Add a member via invitation, tracking who invited them."""
+        now = _now()
+        self.conn.execute(
+            """INSERT OR IGNORE INTO collection_members (collection_id, user_id, role, invited_by, status, joined_at)
+               VALUES (?, ?, 'member', ?, 'active', ?)""",
+            (collection_id, invitee_id, inviter_id, now),
+        )
+        self.conn.commit()
+        return {"collection_id": collection_id, "user_id": invitee_id, "invited_by": inviter_id, "joined_at": now}
+
+    def get_invite_tree(self, collection_id: str, user_id: str) -> list[dict]:
+        """Get all members in the invite subtree below a user (recursive)."""
+        rows = self.conn.execute(
+            """WITH RECURSIVE tree AS (
+                SELECT user_id, invited_by, role, status, joined_at, 1 as depth
+                FROM collection_members
+                WHERE collection_id = ? AND invited_by = ?
+                UNION ALL
+                SELECT cm.user_id, cm.invited_by, cm.role, cm.status, cm.joined_at, t.depth + 1
+                FROM collection_members cm
+                JOIN tree t ON cm.invited_by = t.user_id
+                WHERE cm.collection_id = ?
+            )
+            SELECT * FROM tree""",
+            (collection_id, user_id, collection_id),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_member_status(self, collection_id: str, user_id: str) -> Optional[dict]:
+        row = self.conn.execute(
+            "SELECT * FROM collection_members WHERE collection_id = ? AND user_id = ?",
+            (collection_id, user_id),
+        ).fetchone()
+        return dict(row) if row else None
+
+    # --- Ban Cascade ---
+
+    def get_member_credit_score(self, collection_id: str, user_id: str) -> dict:
+        """Calculate credit score: submissions + reactions received in this collection."""
+        submissions = self.conn.execute(
+            "SELECT COUNT(*) as count FROM resources WHERE collection_id = ? AND submitted_by = ?",
+            (collection_id, user_id),
+        ).fetchone()["count"]
+
+        reactions_received = self.conn.execute(
+            """SELECT COUNT(*) as count FROM reactions re
+               JOIN resources r ON re.resource_id = r.id
+               WHERE r.collection_id = ? AND r.submitted_by = ?""",
+            (collection_id, user_id),
+        ).fetchone()["count"]
+
+        return {"user_id": user_id, "submissions": submissions, "reactions_received": reactions_received, "total": submissions + reactions_received}
+
+    def ban_member(self, collection_id: str, user_id: str, cascade: bool = True, credit_threshold: int = 5) -> dict:
+        """Ban a user. With cascade, prunes invite tree: depth 1 = hard ban, depth 2+ = credit score decides."""
+        # Ban the target user
+        self.conn.execute(
+            "UPDATE collection_members SET status = 'banned' WHERE collection_id = ? AND user_id = ?",
+            (collection_id, user_id),
+        )
+
+        banned = [user_id]
+        survived = []
+
+        if cascade:
+            tree = self.get_invite_tree(collection_id, user_id)
+            for member in tree:
+                mid = member["user_id"]
+                depth = member["depth"]
+                if depth == 1:
+                    # Hard prune — directly invited by banned user
+                    self.conn.execute(
+                        "UPDATE collection_members SET status = 'banned' WHERE collection_id = ? AND user_id = ?",
+                        (collection_id, mid),
+                    )
+                    banned.append(mid)
+                else:
+                    # Depth 2+: credit score decides
+                    score = self.get_member_credit_score(collection_id, mid)
+                    if score["total"] >= credit_threshold:
+                        # Survivor — re-root under collection owner
+                        owner_row = self.conn.execute(
+                            "SELECT user_id FROM collection_members WHERE collection_id = ? AND role = 'owner'",
+                            (collection_id,),
+                        ).fetchone()
+                        if owner_row:
+                            self.conn.execute(
+                                "UPDATE collection_members SET invited_by = ? WHERE collection_id = ? AND user_id = ?",
+                                (owner_row["user_id"], collection_id, mid),
+                            )
+                        survived.append(mid)
+                    else:
+                        self.conn.execute(
+                            "UPDATE collection_members SET status = 'banned' WHERE collection_id = ? AND user_id = ?",
+                            (collection_id, mid),
+                        )
+                        banned.append(mid)
+
+        self.conn.commit()
+        return {"banned": banned, "survived": survived}
+
+    # --- Appeals ---
+
+    def appeal_ban(self, collection_id: str, user_id: str) -> Optional[dict]:
+        """Submit an appeal. Only banned members can appeal."""
+        member = self.get_member_status(collection_id, user_id)
+        if not member or member["status"] != "banned":
+            return None
+        self.conn.execute(
+            "UPDATE collection_members SET status = 'appealing' WHERE collection_id = ? AND user_id = ?",
+            (collection_id, user_id),
+        )
+        self.conn.commit()
+        score = self.get_member_credit_score(collection_id, user_id)
+        return {"user_id": user_id, "status": "appealing", **score}
+
+    def get_appeals(self, collection_id: str) -> list[dict]:
+        """List all pending appeals with credit scores."""
+        rows = self.conn.execute(
+            "SELECT user_id, joined_at FROM collection_members WHERE collection_id = ? AND status = 'appealing'",
+            (collection_id,),
+        ).fetchall()
+        results = []
+        for row in rows:
+            d = dict(row)
+            user = self.get_user(d["user_id"])
+            score = self.get_member_credit_score(collection_id, d["user_id"])
+            results.append({
+                "user_id": d["user_id"],
+                "name": user["name"] if user else d["user_id"],
+                "joined_at": d["joined_at"],
+                **score,
+            })
+        return results
+
+    def approve_appeal(self, collection_id: str, user_id: str) -> Optional[dict]:
+        """Approve an appeal — re-root under owner, set active."""
+        member = self.get_member_status(collection_id, user_id)
+        if not member or member["status"] != "appealing":
+            return None
+        owner_row = self.conn.execute(
+            "SELECT user_id FROM collection_members WHERE collection_id = ? AND role = 'owner'",
+            (collection_id,),
+        ).fetchone()
+        owner_id = owner_row["user_id"] if owner_row else None
+        self.conn.execute(
+            "UPDATE collection_members SET status = 'active', invited_by = ? WHERE collection_id = ? AND user_id = ?",
+            (owner_id, collection_id, user_id),
+        )
+        self.conn.commit()
+        return {"user_id": user_id, "status": "active", "invited_by": owner_id}
+
+    def deny_appeal(self, collection_id: str, user_id: str) -> Optional[dict]:
+        """Deny an appeal — set back to banned."""
+        member = self.get_member_status(collection_id, user_id)
+        if not member or member["status"] != "appealing":
+            return None
+        self.conn.execute(
+            "UPDATE collection_members SET status = 'banned' WHERE collection_id = ? AND user_id = ?",
+            (collection_id, user_id),
+        )
+        self.conn.commit()
+        return {"user_id": user_id, "status": "banned"}
+
+    # --- Routing Manifest ---
+
+    def get_routing_manifest(self, user_id: str) -> list[dict]:
+        """Get topic descriptors for all instances the user is subscribed to — used by agents for auto-routing."""
+        rows = self.conn.execute(
+            """SELECT di.id, di.name, di.topic, di.access_mode
+               FROM dugg_instances di
+               JOIN instance_subscribers isub ON di.id = isub.instance_id
+               WHERE isub.user_id = ?
+               ORDER BY di.name""",
+            (user_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     # --- Helpers ---
 
     def _accessible_collection_ids(self, user_id: str) -> list[str]:
         rows = self.conn.execute(
-            "SELECT collection_id FROM collection_members WHERE user_id = ?", (user_id,)
+            "SELECT collection_id FROM collection_members WHERE user_id = ? AND status = 'active'", (user_id,)
         ).fetchall()
         return [r["collection_id"] for r in rows]

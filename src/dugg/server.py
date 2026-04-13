@@ -215,6 +215,171 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="dugg_publish",
+            description="Publish a resource to one or more named targets (e.g. 'public', 'aev-team', 'inner-circle'). Published resources become available on remote Dugg instances matching those targets. Use dugg_unpublish to retract.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "resource_id": {"type": "string", "description": "The resource to publish"},
+                    "targets": {"type": "array", "items": {"type": "string"}, "description": "Named publish targets (e.g. ['public', 'aev-team'])"},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+                "required": ["resource_id", "targets"],
+            },
+        ),
+        Tool(
+            name="dugg_unpublish",
+            description="Remove a resource from publish targets. Omit targets to unpublish from all.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "resource_id": {"type": "string", "description": "The resource to unpublish"},
+                    "targets": {"type": "array", "items": {"type": "string"}, "description": "Specific targets to remove from (omit for all)", "default": []},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+                "required": ["resource_id"],
+            },
+        ),
+        Tool(
+            name="dugg_react",
+            description="Silently react to a resource. Only the publisher will see aggregate reaction counts — no one else knows you reacted. Reaction types: tap (default), star, thumbsup.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "resource_id": {"type": "string", "description": "The resource to react to"},
+                    "reaction": {"type": "string", "enum": ["tap", "star", "thumbsup"], "description": "Type of reaction", "default": "tap"},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+                "required": ["resource_id"],
+            },
+        ),
+        Tool(
+            name="dugg_reactions",
+            description="View silent reaction counts for your published resources. Only the resource submitter can see these — no one else.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "resource_id": {"type": "string", "description": "Specific resource to check (omit for summary across all your resources)", "default": ""},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+            },
+        ),
+        Tool(
+            name="dugg_instance_create",
+            description="Create a hosted Dugg instance with a topic and access mode (public or invite-only).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Instance name (e.g. 'Chino Bandito', 'AEV Team')"},
+                    "topic": {"type": "string", "description": "What belongs in this Dugg — used by agents for auto-routing", "default": ""},
+                    "access_mode": {"type": "string", "enum": ["public", "invite"], "description": "public = anyone can subscribe, invite = member-invites-member", "default": "invite"},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+                "required": ["name"],
+            },
+        ),
+        Tool(
+            name="dugg_instance_list",
+            description="List all Dugg instances you're subscribed to, with their topics and access modes.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+            },
+        ),
+        Tool(
+            name="dugg_instance_update",
+            description="Update a Dugg instance's topic or access mode. Owner only.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "instance_id": {"type": "string", "description": "Instance to update"},
+                    "name": {"type": "string", "description": "New name", "default": ""},
+                    "topic": {"type": "string", "description": "New topic description", "default": ""},
+                    "access_mode": {"type": "string", "enum": ["public", "invite"], "description": "New access mode", "default": ""},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+                "required": ["instance_id"],
+            },
+        ),
+        Tool(
+            name="dugg_invite",
+            description="Invite a user to a collection. Tracks who invited whom for the invite tree.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "collection_id": {"type": "string", "description": "Collection to invite to"},
+                    "user_id": {"type": "string", "description": "User to invite"},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+                "required": ["collection_id", "user_id"],
+            },
+        ),
+        Tool(
+            name="dugg_ban",
+            description="Ban a user from a collection. Cascades through their invite tree: depth 1 = hard ban, depth 2+ = credit score decides survival. Owner only.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "collection_id": {"type": "string", "description": "Collection to ban from"},
+                    "user_id": {"type": "string", "description": "User to ban"},
+                    "cascade": {"type": "boolean", "description": "Whether to cascade through invite tree", "default": True},
+                    "credit_threshold": {"type": "integer", "description": "Minimum credit score (submissions + reactions) to survive cascade at depth 2+", "default": 5},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+                "required": ["collection_id", "user_id"],
+            },
+        ),
+        Tool(
+            name="dugg_appeal",
+            description="Appeal a ban. Only banned members can appeal. Shows your credit score to the collection owner.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "collection_id": {"type": "string", "description": "Collection to appeal ban from"},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+                "required": ["collection_id"],
+            },
+        ),
+        Tool(
+            name="dugg_appeals",
+            description="List pending appeals for a collection with credit scores. Owner only.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "collection_id": {"type": "string", "description": "Collection to check appeals for"},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+                "required": ["collection_id"],
+            },
+        ),
+        Tool(
+            name="dugg_appeal_resolve",
+            description="Approve or deny a ban appeal. Approved users are re-rooted under the owner. Owner only.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "collection_id": {"type": "string", "description": "Collection"},
+                    "user_id": {"type": "string", "description": "User whose appeal to resolve"},
+                    "action": {"type": "string", "enum": ["approve", "deny"], "description": "Whether to approve or deny"},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+                "required": ["collection_id", "user_id", "action"],
+            },
+        ),
+        Tool(
+            name="dugg_routing_manifest",
+            description="Get topic descriptors for all subscribed Dugg instances. Agents use this to auto-route published content to the right targets.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+            },
+        ),
+        Tool(
             name="dugg_get",
             description="Get full details for a specific resource by ID.",
             inputSchema={
@@ -259,6 +424,32 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return _handle_link(d, user_id, arguments)
         elif name == "dugg_related":
             return _handle_related(d, user_id, arguments)
+        elif name == "dugg_publish":
+            return _handle_publish(d, user_id, arguments)
+        elif name == "dugg_unpublish":
+            return _handle_unpublish(d, user_id, arguments)
+        elif name == "dugg_react":
+            return _handle_react(d, user_id, arguments)
+        elif name == "dugg_reactions":
+            return _handle_reactions(d, user_id, arguments)
+        elif name == "dugg_instance_create":
+            return _handle_instance_create(d, user_id, arguments)
+        elif name == "dugg_instance_list":
+            return _handle_instance_list(d, user_id)
+        elif name == "dugg_instance_update":
+            return _handle_instance_update(d, user_id, arguments)
+        elif name == "dugg_invite":
+            return _handle_invite(d, user_id, arguments)
+        elif name == "dugg_ban":
+            return _handle_ban(d, user_id, arguments)
+        elif name == "dugg_appeal":
+            return _handle_appeal(d, user_id, arguments)
+        elif name == "dugg_appeals":
+            return _handle_appeals(d, user_id, arguments)
+        elif name == "dugg_appeal_resolve":
+            return _handle_appeal_resolve(d, user_id, arguments)
+        elif name == "dugg_routing_manifest":
+            return _handle_routing_manifest(d, user_id)
         elif name == "dugg_get":
             return _handle_get(d, user_id, arguments)
         else:
@@ -516,6 +707,208 @@ def _handle_related(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
     return [TextContent(type="text", text="\n".join(lines))]
 
 
+def _handle_publish(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    resource_id = args["resource_id"]
+    targets = args["targets"]
+    resource = d.get_resource(resource_id)
+    if not resource:
+        return [TextContent(type="text", text=f"Resource {resource_id} not found")]
+    if resource["submitted_by"] != user_id:
+        return [TextContent(type="text", text=f"Only the submitter can publish a resource")]
+    results = d.publish_resource(resource_id, targets)
+    target_list = ", ".join(r["target"] for r in results)
+    title = resource.get("title") or resource["url"]
+    return [TextContent(type="text", text=f"Published: {title}\nTargets: {target_list}")]
+
+
+def _handle_unpublish(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    resource_id = args["resource_id"]
+    targets = args.get("targets", [])
+    resource = d.get_resource(resource_id)
+    if not resource:
+        return [TextContent(type="text", text=f"Resource {resource_id} not found")]
+    if resource["submitted_by"] != user_id:
+        return [TextContent(type="text", text=f"Only the submitter can unpublish a resource")]
+    d.unpublish_resource(resource_id, targets if targets else None)
+    if targets:
+        return [TextContent(type="text", text=f"Unpublished {resource_id} from: {', '.join(targets)}")]
+    return [TextContent(type="text", text=f"Unpublished {resource_id} from all targets")]
+
+
+def _handle_react(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    resource_id = args["resource_id"]
+    reaction_type = args.get("reaction", "tap")
+    resource = d.get_resource(resource_id)
+    if not resource:
+        return [TextContent(type="text", text=f"Resource {resource_id} not found")]
+    # Check user has access to the resource's collection
+    accessible = d._accessible_collection_ids(user_id)
+    if resource["collection_id"] not in accessible:
+        return [TextContent(type="text", text=f"Access denied to resource {resource_id}")]
+    d.react_to_resource(resource_id, user_id, reaction_type)
+    return [TextContent(type="text", text=f"Reacted to {resource_id} with {reaction_type}")]
+
+
+def _handle_reactions(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    resource_id = args.get("resource_id", "")
+    if resource_id:
+        result = d.get_reactions(resource_id, user_id)
+        if result is None:
+            return [TextContent(type="text", text=f"No reactions found (or you're not the publisher of this resource)")]
+        if result["total"] == 0:
+            return [TextContent(type="text", text=f"No reactions yet on {resource_id}")]
+        lines = [f"Reactions on {resource_id}: {result['total']} total"]
+        for rtype, count in result["breakdown"].items():
+            lines.append(f"  {rtype}: {count}")
+        return [TextContent(type="text", text="\n".join(lines))]
+    else:
+        summary = d.get_my_reactions_summary(user_id)
+        if not summary:
+            return [TextContent(type="text", text="No reactions on any of your resources yet.")]
+        lines = [f"Reactions across your resources:\n"]
+        for item in summary:
+            title = item["title"] or item["url"]
+            breakdown = ", ".join(f"{k}: {v}" for k, v in item["breakdown"].items())
+            lines.append(f"- {title} ({item['resource_id']}): {item['total']} total ({breakdown})")
+        return [TextContent(type="text", text="\n".join(lines))]
+
+
+def _handle_instance_create(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    name = args["name"]
+    topic = args.get("topic", "")
+    access_mode = args.get("access_mode", "invite")
+    result = d.create_instance(name, user_id, topic=topic, access_mode=access_mode)
+    lines = [f"Created Dugg instance: {result['name']} [{result['id']}]"]
+    lines.append(f"Access: {result['access_mode']}")
+    if topic:
+        lines.append(f"Topic: {topic}")
+    return [TextContent(type="text", text="\n".join(lines))]
+
+
+def _handle_instance_list(d: DuggDB, user_id: str) -> list[TextContent]:
+    instances = d.list_instances(user_id)
+    if not instances:
+        return [TextContent(type="text", text="Not subscribed to any Dugg instances.")]
+    lines = [f"{len(instances)} instance(s):\n"]
+    for inst in instances:
+        lines.append(f"- [{inst['id']}] {inst['name']} ({inst['access_mode']})")
+        if inst.get("topic"):
+            lines.append(f"  Topic: {inst['topic']}")
+    return [TextContent(type="text", text="\n".join(lines))]
+
+
+def _handle_instance_update(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    instance_id = args["instance_id"]
+    updates = {}
+    if args.get("name"):
+        updates["name"] = args["name"]
+    if args.get("topic"):
+        updates["topic"] = args["topic"]
+    if args.get("access_mode"):
+        updates["access_mode"] = args["access_mode"]
+    result = d.update_instance(instance_id, user_id, **updates)
+    if not result:
+        return [TextContent(type="text", text=f"Instance {instance_id} not found or you're not the owner")]
+    return [TextContent(type="text", text=f"Updated instance: {result['name']} [{result['id']}]\nTopic: {result['topic']}\nAccess: {result['access_mode']}")]
+
+
+def _handle_invite(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    collection_id = args["collection_id"]
+    invitee_id = args["user_id"]
+    # Check inviter is an active member
+    member = d.get_member_status(collection_id, user_id)
+    if not member or member["status"] != "active":
+        return [TextContent(type="text", text="You must be an active member to invite others")]
+    result = d.invite_member(collection_id, user_id, invitee_id)
+    invitee = d.get_user(invitee_id)
+    invitee_name = invitee["name"] if invitee else invitee_id
+    return [TextContent(type="text", text=f"Invited {invitee_name} to collection {collection_id}")]
+
+
+def _handle_ban(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    collection_id = args["collection_id"]
+    target_user_id = args["user_id"]
+    cascade = args.get("cascade", True)
+    credit_threshold = args.get("credit_threshold", 5)
+    # Only owner can ban
+    member = d.get_member_status(collection_id, user_id)
+    if not member or member["role"] != "owner":
+        return [TextContent(type="text", text="Only the collection owner can ban members")]
+    result = d.ban_member(collection_id, target_user_id, cascade=cascade, credit_threshold=credit_threshold)
+    lines = [f"Banned {len(result['banned'])} member(s)"]
+    if result["survived"]:
+        lines.append(f"Survived via credit score: {len(result['survived'])} member(s) (re-rooted under owner)")
+    for uid in result["banned"]:
+        user = d.get_user(uid)
+        name = user["name"] if user else uid
+        lines.append(f"  Banned: {name} ({uid})")
+    for uid in result["survived"]:
+        user = d.get_user(uid)
+        name = user["name"] if user else uid
+        score = d.get_member_credit_score(collection_id, uid)
+        lines.append(f"  Survived: {name} ({uid}) — score: {score['total']}")
+    return [TextContent(type="text", text="\n".join(lines))]
+
+
+def _handle_appeal(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    collection_id = args["collection_id"]
+    result = d.appeal_ban(collection_id, user_id)
+    if not result:
+        return [TextContent(type="text", text="You can only appeal if you are currently banned")]
+    return [TextContent(type="text", text=f"Appeal submitted. Your credit score: {result['submissions']} submissions, {result['reactions_received']} reactions received ({result['total']} total)")]
+
+
+def _handle_appeals(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    collection_id = args["collection_id"]
+    # Only owner can view appeals
+    member = d.get_member_status(collection_id, user_id)
+    if not member or member["role"] != "owner":
+        return [TextContent(type="text", text="Only the collection owner can view appeals")]
+    appeals = d.get_appeals(collection_id)
+    if not appeals:
+        return [TextContent(type="text", text="No pending appeals.")]
+    lines = [f"{len(appeals)} pending appeal(s):\n"]
+    for a in appeals:
+        lines.append(f"- {a['name']} ({a['user_id']})")
+        lines.append(f"  Submissions: {a['submissions']} | Reactions received: {a['reactions_received']} | Total score: {a['total']}")
+        lines.append(f"  Joined: {a['joined_at']}")
+    return [TextContent(type="text", text="\n".join(lines))]
+
+
+def _handle_appeal_resolve(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    collection_id = args["collection_id"]
+    target_user_id = args["user_id"]
+    action = args["action"]
+    # Only owner can resolve
+    member = d.get_member_status(collection_id, user_id)
+    if not member or member["role"] != "owner":
+        return [TextContent(type="text", text="Only the collection owner can resolve appeals")]
+    if action == "approve":
+        result = d.approve_appeal(collection_id, target_user_id)
+        if not result:
+            return [TextContent(type="text", text="No pending appeal found for this user")]
+        return [TextContent(type="text", text=f"Appeal approved. {target_user_id} is now active and re-rooted under owner.")]
+    else:
+        result = d.deny_appeal(collection_id, target_user_id)
+        if not result:
+            return [TextContent(type="text", text="No pending appeal found for this user")]
+        return [TextContent(type="text", text=f"Appeal denied. {target_user_id} remains banned.")]
+
+
+def _handle_routing_manifest(d: DuggDB, user_id: str) -> list[TextContent]:
+    manifest = d.get_routing_manifest(user_id)
+    if not manifest:
+        return [TextContent(type="text", text="No subscribed instances. Create one with dugg_instance_create.")]
+    lines = ["Routing manifest — your agent uses these topics to auto-route published content:\n"]
+    for inst in manifest:
+        lines.append(f"- {inst['name']} [{inst['id']}] ({inst['access_mode']})")
+        if inst.get("topic"):
+            lines.append(f"  Topic: {inst['topic']}")
+        else:
+            lines.append(f"  Topic: (none set — set one with dugg_instance_update)")
+    return [TextContent(type="text", text="\n".join(lines))]
+
+
 def _handle_get(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
     resource_id = args["resource_id"]
     resource = d.get_resource(resource_id)
@@ -545,6 +938,11 @@ def _handle_get(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
     ])
     if tags_str:
         lines.append(f"Tags: {tags_str}")
+    # Show publish targets if the requester is the submitter
+    pub_targets = d.get_publish_targets(resource_id)
+    if pub_targets:
+        targets_str = ", ".join(t["target"] for t in pub_targets)
+        lines.append(f"Published to: {targets_str}")
     if resource.get("note"):
         lines.append(f"\nNote: {resource['note']}")
     if resource.get("description"):
