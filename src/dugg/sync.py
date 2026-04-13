@@ -132,6 +132,18 @@ async def process_webhooks_for_event(db, event: dict):
     await asyncio.gather(*tasks, return_exceptions=True)
 
 
+async def run_storage_eviction(db):
+    """Check all instances and evict content if storage cap exceeded."""
+    try:
+        rows = db.conn.execute("SELECT id FROM dugg_instances").fetchall()
+        for row in rows:
+            evicted = db.run_eviction(row["id"])
+            if evicted > 0:
+                logger.info(f"Evicted {evicted} resource(s) for instance {row['id']}")
+    except Exception as e:
+        logger.error(f"Storage eviction error: {e}")
+
+
 async def sync_loop(db, interval: int = 30):
     """Main sync daemon loop. Runs forever, processing pending publishes.
 
@@ -141,6 +153,7 @@ async def sync_loop(db, interval: int = 30):
     """
     logger.info(f"Publish sync daemon started (interval: {interval}s)")
 
+    eviction_counter = 0
     while True:
         try:
             pending = db.get_pending_publishes(limit=20)
@@ -159,6 +172,12 @@ async def sync_loop(db, interval: int = 30):
                         await process_webhooks_for_event(db, event)
         except Exception as e:
             logger.error(f"Sync loop error: {e}")
+
+        # Run storage eviction every ~10 cycles (5 minutes at default 30s interval)
+        eviction_counter += 1
+        if eviction_counter >= 10:
+            eviction_counter = 0
+            await run_storage_eviction(db)
 
         await asyncio.sleep(interval)
 

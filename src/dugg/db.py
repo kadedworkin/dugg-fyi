@@ -72,6 +72,7 @@ class DuggDB:
                 read_horizon_base_days INTEGER DEFAULT 30,
                 read_horizon_growth INTEGER DEFAULT 7,
                 index_mode TEXT DEFAULT 'summary' CHECK(index_mode IN ('summary', 'full', 'metadata_only')),
+                local_storage_cap_mb INTEGER DEFAULT 512,
                 owner_id TEXT NOT NULL REFERENCES users(id),
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -96,6 +97,8 @@ class DuggDB:
                 raw_metadata TEXT DEFAULT '{}',
                 note TEXT DEFAULT '',
                 summary TEXT DEFAULT '',
+                content_bytes INTEGER DEFAULT 0,
+                content_evicted INTEGER DEFAULT 0,
                 submitted_by TEXT NOT NULL REFERENCES users(id),
                 collection_id TEXT NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
                 created_at TEXT NOT NULL,
@@ -249,10 +252,16 @@ class DuggDB:
             self.conn.execute("ALTER TABLE dugg_instances ADD COLUMN read_horizon_growth INTEGER DEFAULT 7")
         if "index_mode" not in inst_cols:
             self.conn.execute("ALTER TABLE dugg_instances ADD COLUMN index_mode TEXT DEFAULT 'summary'")
+        if "local_storage_cap_mb" not in inst_cols:
+            self.conn.execute("ALTER TABLE dugg_instances ADD COLUMN local_storage_cap_mb INTEGER DEFAULT 512")
 
         res_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(resources)").fetchall()}
         if "summary" not in res_cols:
             self.conn.execute("ALTER TABLE resources ADD COLUMN summary TEXT DEFAULT ''")
+        if "content_bytes" not in res_cols:
+            self.conn.execute("ALTER TABLE resources ADD COLUMN content_bytes INTEGER DEFAULT 0")
+        if "content_evicted" not in res_cols:
+            self.conn.execute("ALTER TABLE resources ADD COLUMN content_evicted INTEGER DEFAULT 0")
 
         # Rebuild FTS5 triggers if summary column was added (triggers reference summary now)
         # This is safe — DROP TRIGGER IF EXISTS is idempotent
@@ -401,11 +410,12 @@ class DuggDB:
         res_id = _uuid()
         now = _now()
         meta_json = json.dumps(raw_metadata or {})
+        content_bytes = len((transcript or "").encode("utf-8")) + len((description or "").encode("utf-8")) + len((summary or "").encode("utf-8"))
         self.conn.execute(
             """INSERT INTO resources
-               (id, url, title, description, thumbnail, source_type, author, transcript, raw_metadata, note, summary, submitted_by, collection_id, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (res_id, url, title, description, thumbnail, source_type, author, transcript, meta_json, note, summary, submitted_by, collection_id, now, now),
+               (id, url, title, description, thumbnail, source_type, author, transcript, raw_metadata, note, summary, content_bytes, submitted_by, collection_id, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (res_id, url, title, description, thumbnail, source_type, author, transcript, meta_json, note, summary, content_bytes, submitted_by, collection_id, now, now),
         )
         if tags:
             for tag in tags:
@@ -421,13 +431,21 @@ class DuggDB:
         return result
 
     def update_resource(self, resource_id: str, **fields) -> Optional[dict]:
-        allowed = {"title", "description", "thumbnail", "source_type", "author", "transcript", "raw_metadata", "note", "enriched_at", "summary"}
+        allowed = {"title", "description", "thumbnail", "source_type", "author", "transcript", "raw_metadata", "note", "enriched_at", "summary", "content_evicted"}
         updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
         if not updates:
             return self.get_resource(resource_id)
         updates["updated_at"] = _now()
         if "raw_metadata" in updates and isinstance(updates["raw_metadata"], dict):
             updates["raw_metadata"] = json.dumps(updates["raw_metadata"])
+        # Recompute content_bytes if text fields changed
+        text_fields = {"transcript", "description", "summary"}
+        if text_fields.intersection(updates.keys()):
+            current = self.get_resource(resource_id) or {}
+            transcript = updates.get("transcript", current.get("transcript", "")) or ""
+            description = updates.get("description", current.get("description", "")) or ""
+            summary = updates.get("summary", current.get("summary", "")) or ""
+            updates["content_bytes"] = len(transcript.encode("utf-8")) + len(description.encode("utf-8")) + len(summary.encode("utf-8"))
         set_clause = ", ".join(f"{k} = ?" for k in updates)
         values = list(updates.values()) + [resource_id]
         self.conn.execute(f"UPDATE resources SET {set_clause} WHERE id = ?", values)
@@ -764,15 +782,15 @@ class DuggDB:
     def create_instance(self, name: str, owner_id: str, topic: str = "", access_mode: str = "invite",
                         rate_limit_initial: int = 5, rate_limit_growth: int = 2,
                         read_horizon_base_days: int = 30, read_horizon_growth: int = 7,
-                        index_mode: str = "summary") -> dict:
+                        index_mode: str = "summary", local_storage_cap_mb: int = 512) -> dict:
         inst_id = _uuid()
         now = _now()
         self.conn.execute(
             """INSERT INTO dugg_instances (id, name, topic, access_mode, rate_limit_initial, rate_limit_growth,
-               read_horizon_base_days, read_horizon_growth, index_mode, owner_id, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               read_horizon_base_days, read_horizon_growth, index_mode, local_storage_cap_mb, owner_id, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (inst_id, name, topic, access_mode, rate_limit_initial, rate_limit_growth,
-             read_horizon_base_days, read_horizon_growth, index_mode, owner_id, now, now),
+             read_horizon_base_days, read_horizon_growth, index_mode, local_storage_cap_mb, owner_id, now, now),
         )
         # Owner is auto-subscribed
         self.conn.execute(
@@ -783,7 +801,8 @@ class DuggDB:
         return {"id": inst_id, "name": name, "topic": topic, "access_mode": access_mode,
                 "rate_limit_initial": rate_limit_initial, "rate_limit_growth": rate_limit_growth,
                 "read_horizon_base_days": read_horizon_base_days, "read_horizon_growth": read_horizon_growth,
-                "index_mode": index_mode, "owner_id": owner_id, "created_at": now}
+                "index_mode": index_mode, "local_storage_cap_mb": local_storage_cap_mb,
+                "owner_id": owner_id, "created_at": now}
 
     def get_instance(self, instance_id: str) -> Optional[dict]:
         row = self.conn.execute("SELECT * FROM dugg_instances WHERE id = ?", (instance_id,)).fetchone()
@@ -804,7 +823,7 @@ class DuggDB:
         if not inst or inst["owner_id"] != owner_id:
             return None
         allowed = {"name", "topic", "access_mode", "endpoint_url", "rate_limit_initial", "rate_limit_growth",
-                   "read_horizon_base_days", "read_horizon_growth", "index_mode"}
+                   "read_horizon_base_days", "read_horizon_growth", "index_mode", "local_storage_cap_mb"}
         updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
         if not updates:
             return inst
@@ -1197,6 +1216,74 @@ class DuggDB:
             self.update_resource(resource_id, summary=summary, transcript="", description=summary)
         elif mode == "metadata_only":
             self.update_resource(resource_id, transcript="", description="", summary="")
+
+    # --- Storage Cap & Eviction ---
+
+    def get_total_content_bytes(self, owner_id: str) -> int:
+        """Get total content_bytes across all collections owned by a user."""
+        row = self.conn.execute(
+            """SELECT COALESCE(SUM(r.content_bytes), 0) as total
+               FROM resources r
+               JOIN collections c ON r.collection_id = c.id
+               WHERE c.created_by = ?""",
+            (owner_id,),
+        ).fetchone()
+        return row["total"]
+
+    def run_eviction(self, instance_id: str) -> int:
+        """Evict coldest content when total storage exceeds cap.
+
+        Returns the number of resources evicted.
+        User's own contributions are NEVER evicted.
+        """
+        inst = self.get_instance(instance_id)
+        if not inst:
+            return 0
+
+        cap_mb = inst.get("local_storage_cap_mb", 512)
+        if cap_mb == -1:
+            return 0  # Unlimited
+
+        cap_bytes = cap_mb * 1024 * 1024
+        owner_id = inst["owner_id"]
+        total = self.get_total_content_bytes(owner_id)
+
+        if total <= cap_bytes:
+            return 0
+
+        # Find eviction candidates: oldest, non-evicted, not submitted by owner
+        # Order by created_at ASC (oldest first) — coldest content
+        rows = self.conn.execute(
+            """SELECT r.id, r.content_bytes
+               FROM resources r
+               JOIN collections c ON r.collection_id = c.id
+               WHERE c.created_by = ?
+                 AND r.content_evicted = 0
+                 AND r.submitted_by != ?
+                 AND r.content_bytes > 0
+               ORDER BY r.created_at ASC""",
+            (owner_id, owner_id),
+        ).fetchall()
+
+        evicted_count = 0
+        for row in rows:
+            if total <= cap_bytes:
+                break
+            rid = row["id"]
+            freed = row["content_bytes"]
+            # Evict: clear full text, keep summary + URL + metadata
+            self.conn.execute(
+                """UPDATE resources SET transcript = '', description = '',
+                   content_evicted = 1, content_bytes = 0, updated_at = ?
+                   WHERE id = ?""",
+                (_now(), rid),
+            )
+            total -= freed
+            evicted_count += 1
+
+        if evicted_count > 0:
+            self.conn.commit()
+        return evicted_count
 
     # --- Rate Limiting ---
 

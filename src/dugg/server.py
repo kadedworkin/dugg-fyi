@@ -293,6 +293,7 @@ async def list_tools() -> list[Tool]:
                     "read_horizon_base_days": {"type": "integer", "description": "Days of content history visible to new members (default: 30, -1 for full history)", "default": 30},
                     "read_horizon_growth": {"type": "integer", "description": "Extra days of visibility earned per week of membership (default: 7)", "default": 7},
                     "index_mode": {"type": "string", "enum": ["summary", "full", "metadata_only"], "description": "How ingested content is stored: summary (default), full, or metadata_only", "default": "summary"},
+                    "local_storage_cap_mb": {"type": "integer", "description": "Max local content storage in MB (default: 512, -1 for unlimited)", "default": 512},
                     "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
                 },
                 "required": ["name"],
@@ -322,6 +323,7 @@ async def list_tools() -> list[Tool]:
                     "read_horizon_base_days": {"type": "integer", "description": "Days of content history visible to new members (-1 for full history)"},
                     "read_horizon_growth": {"type": "integer", "description": "Extra days of visibility earned per week of membership"},
                     "index_mode": {"type": "string", "enum": ["summary", "full", "metadata_only"], "description": "How ingested content is stored"},
+                    "local_storage_cap_mb": {"type": "integer", "description": "Max local content storage in MB (-1 for unlimited)"},
                     "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
                 },
                 "required": ["instance_id"],
@@ -1053,10 +1055,11 @@ def _handle_instance_create(d: DuggDB, user_id: str, args: dict) -> list[TextCon
     read_horizon_base_days = args.get("read_horizon_base_days", 30)
     read_horizon_growth = args.get("read_horizon_growth", 7)
     index_mode = args.get("index_mode", "summary")
+    local_storage_cap_mb = args.get("local_storage_cap_mb", 512)
     result = d.create_instance(name, user_id, topic=topic, access_mode=access_mode,
                                rate_limit_initial=rate_limit_initial, rate_limit_growth=rate_limit_growth,
                                read_horizon_base_days=read_horizon_base_days, read_horizon_growth=read_horizon_growth,
-                               index_mode=index_mode)
+                               index_mode=index_mode, local_storage_cap_mb=local_storage_cap_mb)
     lines = [f"Created Dugg instance: {result['name']} [{result['id']}]"]
     lines.append(f"Access: {result['access_mode']}")
     if topic:
@@ -1065,6 +1068,8 @@ def _handle_instance_create(d: DuggDB, user_id: str, args: dict) -> list[TextCon
     horizon_desc = "full history" if result['read_horizon_base_days'] == -1 else f"{result['read_horizon_base_days']}d base, +{result['read_horizon_growth']}d/week"
     lines.append(f"Read horizon: {horizon_desc}")
     lines.append(f"Index mode: {result.get('index_mode', 'summary')}")
+    cap = result.get('local_storage_cap_mb', 512)
+    lines.append(f"Storage cap: {'unlimited' if cap == -1 else f'{cap} MB'}")
     return [TextContent(type="text", text="\n".join(lines))]
 
 
@@ -1097,6 +1102,8 @@ def _handle_instance_update(d: DuggDB, user_id: str, args: dict) -> list[TextCon
         updates["read_horizon_growth"] = args["read_horizon_growth"]
     if args.get("index_mode"):
         updates["index_mode"] = args["index_mode"]
+    if "local_storage_cap_mb" in args and args["local_storage_cap_mb"] is not None:
+        updates["local_storage_cap_mb"] = args["local_storage_cap_mb"]
     result = d.update_instance(instance_id, user_id, **updates)
     if not result:
         return [TextContent(type="text", text=f"Instance {instance_id} not found or you're not the owner")]
@@ -1109,6 +1116,8 @@ def _handle_instance_update(d: DuggDB, user_id: str, args: dict) -> list[TextCon
     horizon_desc = "full history" if horizon_base == -1 else f"{horizon_base}d base, +{horizon_growth}d/week"
     lines.append(f"Read horizon: {horizon_desc}")
     lines.append(f"Index mode: {result.get('index_mode', 'summary')}")
+    cap = result.get('local_storage_cap_mb', 512)
+    lines.append(f"Storage cap: {'unlimited' if cap == -1 else f'{cap} MB'}")
     return [TextContent(type="text", text="\n".join(lines))]
 
 
