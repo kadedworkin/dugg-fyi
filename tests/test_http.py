@@ -206,3 +206,38 @@ def test_messages_endpoint_rejects_get(client):
     c, user = client
     resp = c.get("/messages")
     assert resp.status_code == 405  # Method not allowed — POST only
+
+
+# --- Welcome tool via HTTP ---
+
+def test_tool_dispatch_welcome(client):
+    c, user = client
+    resp = c.post("/tools/dugg_welcome", json={},
+                  headers={"X-Dugg-Key": user["api_key"]})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "Welcome to Dugg" in data["result"]
+    assert user["name"] in data["result"]
+
+
+# --- Compact format ---
+
+def test_tool_dispatch_compact_format(client):
+    c, user = client
+    resp = c.post("/tools/dugg_welcome", json={},
+                  headers={"X-Dugg-Key": user["api_key"], "X-Dugg-Format": "compact"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["format"] == "compact"
+    # Compact mode strips blank lines
+    lines = data["result"].split("\n")
+    assert all(ln.strip() for ln in lines)
+
+
+def test_tool_dispatch_rich_format_default(client):
+    c, user = client
+    resp = c.post("/tools/dugg_welcome", json={},
+                  headers={"X-Dugg-Key": user["api_key"]})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["format"] == "rich"

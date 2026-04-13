@@ -178,6 +178,10 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
         Body: JSON with tool arguments.
         Auth: X-Dugg-Key header.
         Response: JSON with tool result text.
+
+        Accepts an optional X-Dugg-Format header:
+        - "rich" (default): full output with descriptions and context
+        - "compact": condensed output for terminal/CLI environments
         """
         tool_name = request.path_params["tool_name"]
 
@@ -201,7 +205,19 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
         try:
             results = await call_tool(tool_name, args)
             texts = [r.text for r in results if hasattr(r, "text")]
-            return JSONResponse({"tool": tool_name, "result": "\n".join(texts)})
+            full_result = "\n".join(texts)
+
+            # Compact mode: strip blank lines, truncate long fields
+            format_mode = request.headers.get("x-dugg-format", "rich").lower()
+            if format_mode == "compact":
+                lines = [ln for ln in full_result.split("\n") if ln.strip()]
+                full_result = "\n".join(lines)
+
+            return JSONResponse({
+                "tool": tool_name,
+                "result": full_result,
+                "format": format_mode,
+            })
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 

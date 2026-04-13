@@ -511,6 +511,16 @@ async def list_tools() -> list[Tool]:
                 "required": ["resource_id"],
             },
         ),
+        Tool(
+            name="dugg_welcome",
+            description="Orientation for new connections. Returns instance topic(s), recent activity, and your rate limit status in one call. Run this first when connecting to a Dugg instance.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+            },
+        ),
     ]
 
 
@@ -523,75 +533,82 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         d = get_db()
 
         if name == "dugg_add":
-            return await _handle_add(d, user_id, arguments)
+            result = await _handle_add(d, user_id, arguments)
         elif name == "dugg_search":
-            return _handle_search(d, user_id, arguments)
+            result = _handle_search(d, user_id, arguments)
         elif name == "dugg_feed":
-            return _handle_feed(d, user_id, arguments)
+            result = _handle_feed(d, user_id, arguments)
         elif name == "dugg_tag":
-            return _handle_tag(d, arguments)
+            result = _handle_tag(d, arguments)
         elif name == "dugg_collections":
-            return _handle_collections(d, user_id)
+            result = _handle_collections(d, user_id)
         elif name == "dugg_share":
-            return _handle_share(d, user_id, arguments)
+            result = _handle_share(d, user_id, arguments)
         elif name == "dugg_create_collection":
-            return _handle_create_collection(d, user_id, arguments)
+            result = _handle_create_collection(d, user_id, arguments)
         elif name == "dugg_create_user":
-            return _handle_create_user(d, arguments)
+            result = _handle_create_user(d, arguments)
         elif name == "dugg_enrich":
-            return await _handle_enrich(d, arguments)
+            result = await _handle_enrich(d, arguments)
         elif name == "dugg_link":
-            return _handle_link(d, user_id, arguments)
+            result = _handle_link(d, user_id, arguments)
         elif name == "dugg_related":
-            return _handle_related(d, user_id, arguments)
+            result = _handle_related(d, user_id, arguments)
         elif name == "dugg_publish":
-            return _handle_publish(d, user_id, arguments)
+            result = _handle_publish(d, user_id, arguments)
         elif name == "dugg_unpublish":
-            return _handle_unpublish(d, user_id, arguments)
+            result = _handle_unpublish(d, user_id, arguments)
         elif name == "dugg_react":
-            return _handle_react(d, user_id, arguments)
+            result = _handle_react(d, user_id, arguments)
         elif name == "dugg_reactions":
-            return _handle_reactions(d, user_id, arguments)
+            result = _handle_reactions(d, user_id, arguments)
         elif name == "dugg_instance_create":
-            return _handle_instance_create(d, user_id, arguments)
+            result = _handle_instance_create(d, user_id, arguments)
         elif name == "dugg_instance_list":
-            return _handle_instance_list(d, user_id)
+            result = _handle_instance_list(d, user_id)
         elif name == "dugg_instance_update":
-            return _handle_instance_update(d, user_id, arguments)
+            result = _handle_instance_update(d, user_id, arguments)
         elif name == "dugg_invite":
-            return _handle_invite(d, user_id, arguments)
+            result = _handle_invite(d, user_id, arguments)
         elif name == "dugg_ban":
-            return _handle_ban(d, user_id, arguments)
+            result = _handle_ban(d, user_id, arguments)
         elif name == "dugg_appeal":
-            return _handle_appeal(d, user_id, arguments)
+            result = _handle_appeal(d, user_id, arguments)
         elif name == "dugg_appeals":
-            return _handle_appeals(d, user_id, arguments)
+            result = _handle_appeals(d, user_id, arguments)
         elif name == "dugg_appeal_resolve":
-            return _handle_appeal_resolve(d, user_id, arguments)
+            result = _handle_appeal_resolve(d, user_id, arguments)
         elif name == "dugg_routing_manifest":
-            return _handle_routing_manifest(d, user_id)
+            result = _handle_routing_manifest(d, user_id)
         elif name == "dugg_publish_status":
-            return _handle_publish_status(d, user_id)
+            result = _handle_publish_status(d, user_id)
         elif name == "dugg_publish_retry":
-            return _handle_publish_retry(d)
+            result = _handle_publish_retry(d)
         elif name == "dugg_events":
-            return _handle_events(d, user_id, arguments)
+            result = _handle_events(d, user_id, arguments)
         elif name == "dugg_webhook_subscribe":
-            return _handle_webhook_subscribe(d, user_id, arguments)
+            result = _handle_webhook_subscribe(d, user_id, arguments)
         elif name == "dugg_webhook_list":
-            return _handle_webhook_list(d, user_id)
+            result = _handle_webhook_list(d, user_id)
         elif name == "dugg_webhook_delete":
-            return _handle_webhook_delete(d, user_id, arguments)
+            result = _handle_webhook_delete(d, user_id, arguments)
         elif name == "dugg_ingest":
-            return _handle_ingest(d, user_id, arguments)
+            result = _handle_ingest(d, user_id, arguments)
         elif name == "dugg_rate_limit":
-            return _handle_rate_limit(d, user_id, arguments)
+            result = _handle_rate_limit(d, user_id, arguments)
         elif name == "dugg_rate_limit_status":
-            return _handle_rate_limit_status(d, user_id, arguments)
+            result = _handle_rate_limit_status(d, user_id, arguments)
         elif name == "dugg_get":
-            return _handle_get(d, user_id, arguments)
+            result = _handle_get(d, user_id, arguments)
+        elif name == "dugg_welcome":
+            # Welcome already provides full orientation — no banner needed
+            _welcomed_keys.add(api_key or "dugg_local_default")
+            return _handle_welcome(d, user_id, user)
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
+
+        # Prepend first-call banner for new API keys
+        return _maybe_prepend_banner(user, api_key, result)
     except Exception as e:
         return [TextContent(type="text", text=f"Error: {e}")]
 
@@ -1241,6 +1258,98 @@ def _handle_get(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
         # Show first 500 chars of transcript
         preview = resource["transcript"][:500]
         lines.append(f"\nTranscript ({word_count} words): {preview}...")
+    return [TextContent(type="text", text="\n".join(lines))]
+
+
+# Track which API keys have already seen the first-call banner
+_welcomed_keys: set[str] = set()
+
+
+def _maybe_prepend_banner(user: dict, api_key: Optional[str], result: list[TextContent]) -> list[TextContent]:
+    """Prepend a one-line orientation banner on the first tool call from a new API key."""
+    key = api_key or "dugg_local_default"
+    if key in _welcomed_keys:
+        return result
+    _welcomed_keys.add(key)
+
+    d = get_db()
+    instances = d.list_instances(user["id"])
+    if instances:
+        topics = [f"{inst['name']}: {inst['topic']}" for inst in instances if inst.get("topic")]
+        banner = f"Welcome to Dugg, {user['name']}. "
+        if topics:
+            banner += f"Connected instance(s): {'; '.join(topics)}. "
+        banner += "Run dugg_welcome for full orientation."
+    else:
+        banner = f"Welcome to Dugg, {user['name']}. Run dugg_welcome for orientation."
+
+    return [TextContent(type="text", text=f"[{banner}]\n\n{result[0].text}")] + result[1:]
+
+
+def _handle_welcome(d: DuggDB, user_id: str, user: dict) -> list[TextContent]:
+    """One-call orientation: instances, recent feed, rate limits, and resource count."""
+    lines = [f"Welcome to Dugg, {user['name']}!\n"]
+
+    # Instance topics (routing manifest)
+    instances = d.list_instances(user_id)
+    if instances:
+        lines.append("Instances you're connected to:")
+        for inst in instances:
+            mode = f" [{inst['access_mode']}]" if inst.get("access_mode") else ""
+            topic = f" — {inst['topic']}" if inst.get("topic") else ""
+            lines.append(f"  - {inst['name']}{mode}{topic}")
+        lines.append("")
+    else:
+        lines.append("No instances yet. You're running in local mode.\n")
+
+    # Collections summary
+    collections = d.list_collections(user_id)
+    total_resources = 0
+    if collections:
+        lines.append(f"Collections: {len(collections)}")
+        for c in collections:
+            count = d.conn.execute(
+                "SELECT COUNT(*) FROM resources WHERE collection_id = ?", (c["id"],)
+            ).fetchone()[0]
+            total_resources += count
+            lines.append(f"  - {c['name']} ({count} resources)")
+        lines.append("")
+    else:
+        lines.append("No collections yet.\n")
+
+    lines.append(f"Total resources: {total_resources}\n")
+
+    # Recent feed (last 3 items)
+    feed = d.get_feed(user_id, limit=3)
+    if feed:
+        lines.append("Recent activity:")
+        for r in feed:
+            title = r.get("title") or r["url"]
+            lines.append(f"  - {title}")
+            lines.append(f"    {r['url']}")
+        lines.append("")
+    else:
+        lines.append("No resources yet. Try: dugg_add(url=\"...\", note=\"...\")\n")
+
+    # Rate limit status for each collection
+    rate_info = []
+    for c in collections:
+        status = d.check_rate_limit(c["id"], user_id)
+        if status["cap"] != -1:
+            rate_info.append(f"  - {c['name']}: {status['current']}/{status['cap']} posts today (member {status['days_member']}d)")
+    if rate_info:
+        lines.append("Rate limits:")
+        lines.extend(rate_info)
+        lines.append("")
+
+    # Tip based on state
+    if total_resources == 0:
+        lines.append("Get started: share a link with dugg_add(url=\"...\", note=\"why this matters\")")
+    elif not instances:
+        lines.append("Tip: create an instance with dugg_instance_create to start publishing.")
+    else:
+        lines.append("Tip: search with dugg_search(query=\"...\") or browse with dugg_feed().")
+
     return [TextContent(type="text", text="\n".join(lines))]
 
 
