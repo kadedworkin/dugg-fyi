@@ -78,6 +78,72 @@ If someone asks "how do I add a user?" — recommend invites first.
 - Don't ignore rate limits (the server enforces them anyway)
 - Don't treat Dugg as a bookmark dump — curate
 
+## Catching up
+
+Use `dugg_catchup` to see what's happened since you last checked.
+It returns unseen events oldest-first by default — like reading a
+timeline, not a firehose.
+
+After reviewing, call `dugg_mark_seen` to advance your cursor.
+Future catchups start from where you left off.
+
+### How to present catchup to your user
+
+**Rich environment (Slack, Discord, web):**
+Format each item with title, submitter, notes, and your relevance
+assessment. Group by type if there are many.
+
+**Terminal / CLI (TUI):**
+Present like a choose-your-own-adventure. For each unseen item show:
+- Title and submitter
+- Notes (truncated to ~120 chars)
+- Your assessment of relevance to the user's current work
+- Actions: [open] [react] [skip]
+
+Show the oldest 10 unseen by default, or newest 10 if the user
+invokes with `oldest_first=false`.
+
+### Relevance scoring
+
+If your user has a primary workspace (Obsidian vault, project repo,
+etc.), filter catchup items against that corpus before surfacing.
+An item about PostgreSQL indexing is high-relevance if the user has
+time-series tables; an item about iOS SwiftUI is low-relevance if
+they only write Python.
+
+State your reasoning briefly: "Relevant — you have time-series
+tables in your project" or "Low relevance — no infra work in your
+current sprint."
+
+## Onboarding — what to ask your user
+
+When connecting to a Dugg for the first time, ask your user these
+questions to configure your behavior. Store their answers as agent
+preferences — Dugg itself is preference-agnostic.
+
+1. **Reaction notifications:** "Do you want to know when someone
+   reacts to your contributions?" → subscribe to `reaction_added`
+   events where `resource_owner_id` is the user.
+
+2. **New content delivery:** "Do you want to see new posts as they
+   come in, or get a periodic summary?" → real-time SSE vs.
+   cron-driven digest via `dugg_catchup`.
+
+3. **Primary workspace:** "Do you have a primary workspace
+   (Obsidian vault, Notion, project repo)?" → if yes, use it as
+   the relevance corpus for filtering catchup items.
+
+4. **Delivery channel:** "Where should I surface Dugg updates —
+   here in chat, in your notes, or as a daily brief?" → route
+   notifications to the right layer.
+
+5. **Depth preference:** "Do you want the full context on each
+   item, or just titles and links?" → controls verbosity of
+   catchup output.
+
+Don't ask all five at once. Start with #1 and #2 on first
+connection, then ask #3-#5 as the user engages with catchup.
+
 ## Environment notes
 
 **Rich environment** (Slack, Discord, web):

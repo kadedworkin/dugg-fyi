@@ -1028,3 +1028,93 @@ def test_routing_manifest_only_subscribed(db):
     manifest = db.get_routing_manifest(kade["id"])
     assert len(manifest) == 1
     assert manifest[0]["topic"] == "Kade stuff"
+
+
+# --- Reaction Events ---
+
+def test_reaction_emits_event(db):
+    kade = db.create_user("Kade")
+    rocco = db.create_user("Rocco")
+    coll = db.create_collection("AI", kade["id"], visibility="shared")
+    db.add_collection_member(coll["id"], rocco["id"])
+    res = db.add_resource(url="https://example.com/1", collection_id=coll["id"], submitted_by=kade["id"], title="Cool thing")
+    db.react_to_resource(res["id"], rocco["id"], "tap")
+    events = db.get_events(kade["id"])
+    reaction_events = [e for e in events if e["event_type"] == "reaction_added"]
+    assert len(reaction_events) == 1
+    assert reaction_events[0]["actor_id"] == rocco["id"]
+    assert reaction_events[0]["payload"]["resource_id"] == res["id"]
+    assert reaction_events[0]["payload"]["reaction_type"] == "tap"
+    assert reaction_events[0]["payload"]["resource_owner_id"] == kade["id"]
+
+
+def test_duplicate_reaction_no_event(db):
+    kade = db.create_user("Kade")
+    rocco = db.create_user("Rocco")
+    coll = db.create_collection("AI", kade["id"], visibility="shared")
+    db.add_collection_member(coll["id"], rocco["id"])
+    res = db.add_resource(url="https://example.com/1", collection_id=coll["id"], submitted_by=kade["id"])
+    db.react_to_resource(res["id"], rocco["id"], "tap")
+    db.react_to_resource(res["id"], rocco["id"], "tap")  # duplicate
+    events = db.get_events(kade["id"])
+    reaction_events = [e for e in events if e["event_type"] == "reaction_added"]
+    assert len(reaction_events) == 1  # only one event, not two
+
+
+# --- User Cursors ---
+
+def test_cursor_starts_none(db):
+    kade = db.create_user("Kade")
+    assert db.get_cursor(kade["id"]) is None
+
+
+def test_update_and_get_cursor(db):
+    kade = db.create_user("Kade")
+    result = db.update_cursor(kade["id"])
+    assert result["cursor_type"] == "events"
+    assert result["last_seen_at"] is not None
+    cursor = db.get_cursor(kade["id"])
+    assert cursor == result["last_seen_at"]
+
+
+def test_cursor_advances(db):
+    kade = db.create_user("Kade")
+    db.update_cursor(kade["id"], last_seen_at="2026-01-01T00:00:00+00:00")
+    first = db.get_cursor(kade["id"])
+    db.update_cursor(kade["id"], last_seen_at="2026-06-01T00:00:00+00:00")
+    second = db.get_cursor(kade["id"])
+    assert second > first
+
+
+def test_get_unseen_events(db):
+    kade = db.create_user("Kade")
+    rocco = db.create_user("Rocco")
+    coll = db.create_collection("AI", kade["id"], visibility="shared")
+    db.add_collection_member(coll["id"], rocco["id"])
+
+    # Add a resource — this emits resource_added
+    res = db.add_resource(url="https://example.com/1", collection_id=coll["id"], submitted_by=kade["id"], title="First")
+
+    # Kade catches up and marks seen
+    unseen = db.get_unseen_events(kade["id"])
+    assert len(unseen) >= 1
+    db.update_cursor(kade["id"])
+
+    # Add another resource — new event after cursor
+    db.add_resource(url="https://example.com/2", collection_id=coll["id"], submitted_by=kade["id"], title="Second")
+
+    # Only the new event should be unseen
+    unseen = db.get_unseen_events(kade["id"])
+    assert len(unseen) >= 1
+    assert all(e["payload"].get("url") != "https://example.com/1" for e in unseen)
+
+
+def test_unseen_events_oldest_first(db):
+    kade = db.create_user("Kade")
+    coll = db.create_collection("AI", kade["id"])
+    db.add_resource(url="https://example.com/1", collection_id=coll["id"], submitted_by=kade["id"], title="First")
+    db.add_resource(url="https://example.com/2", collection_id=coll["id"], submitted_by=kade["id"], title="Second")
+    unseen = db.get_unseen_events(kade["id"], oldest_first=True)
+    assert len(unseen) >= 2
+    # Oldest first means first event's timestamp <= last event's timestamp
+    assert unseen[0]["created_at"] <= unseen[-1]["created_at"]

@@ -173,7 +173,7 @@ class DuggDB:
 
             CREATE TABLE IF NOT EXISTS event_log (
                 id TEXT PRIMARY KEY,
-                event_type TEXT NOT NULL CHECK(event_type IN ('resource_added', 'resource_published', 'member_joined', 'member_banned', 'publish_delivered', 'invite_created', 'invite_redeemed')),
+                event_type TEXT NOT NULL CHECK(event_type IN ('resource_added', 'resource_published', 'member_joined', 'member_banned', 'publish_delivered', 'invite_created', 'invite_redeemed', 'reaction_added')),
                 instance_id TEXT REFERENCES dugg_instances(id),
                 collection_id TEXT REFERENCES collections(id),
                 actor_id TEXT REFERENCES users(id),
@@ -193,6 +193,14 @@ class DuggDB:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 UNIQUE(instance_id, user_id, callback_url)
+            );
+
+            CREATE TABLE IF NOT EXISTS user_cursors (
+                user_id TEXT NOT NULL REFERENCES users(id),
+                cursor_type TEXT NOT NULL DEFAULT 'events',
+                last_seen_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(user_id, cursor_type)
             );
 
             CREATE VIRTUAL TABLE IF NOT EXISTS resources_fts USING fts5(
@@ -574,12 +582,21 @@ class DuggDB:
         """Add a silent reaction to a resource. Idempotent — same user+type is a no-op."""
         react_id = _uuid()
         now = _now()
-        self.conn.execute(
+        cursor = self.conn.execute(
             """INSERT OR IGNORE INTO reactions (id, resource_id, user_id, reaction_type, created_at)
                VALUES (?, ?, ?, ?, ?)""",
             (react_id, resource_id, user_id, reaction_type, now),
         )
         self.conn.commit()
+        if cursor.rowcount == 1:
+            resource = self.get_resource(resource_id)
+            self.emit_event("reaction_added", actor_id=user_id,
+                            collection_id=resource["collection_id"] if resource else None,
+                            payload={
+                                "resource_id": resource_id,
+                                "reaction_type": reaction_type,
+                                "resource_owner_id": resource["submitted_by"] if resource else None,
+                            })
         return {"resource_id": resource_id, "user_id": user_id, "reaction_type": reaction_type, "created_at": now}
 
     def get_reactions(self, resource_id: str, requester_id: str) -> Optional[dict]:
@@ -1214,6 +1231,45 @@ class DuggDB:
             d["payload"] = json.loads(d["payload"]) if d["payload"] else {}
             results.append(d)
         return results
+
+    # --- User Cursors ---
+
+    def get_cursor(self, user_id: str, cursor_type: str = "events") -> Optional[str]:
+        """Get the last-seen timestamp for a user's cursor. Returns ISO timestamp or None."""
+        row = self.conn.execute(
+            "SELECT last_seen_at FROM user_cursors WHERE user_id = ? AND cursor_type = ?",
+            (user_id, cursor_type),
+        ).fetchone()
+        return row["last_seen_at"] if row else None
+
+    def update_cursor(self, user_id: str, cursor_type: str = "events",
+                      last_seen_at: Optional[str] = None) -> dict:
+        """Advance the user's read cursor. Defaults to now."""
+        now = _now()
+        ts = last_seen_at or now
+        self.conn.execute(
+            """INSERT INTO user_cursors (user_id, cursor_type, last_seen_at, updated_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(user_id, cursor_type) DO UPDATE SET
+               last_seen_at = ?, updated_at = ?""",
+            (user_id, cursor_type, ts, now, ts, now),
+        )
+        self.conn.commit()
+        return {"user_id": user_id, "cursor_type": cursor_type, "last_seen_at": ts}
+
+    def get_unseen_events(self, user_id: str, limit: int = 10,
+                          oldest_first: bool = True) -> list[dict]:
+        """Get events the user hasn't seen yet, based on their cursor."""
+        cursor_ts = self.get_cursor(user_id)
+        return self.get_events(
+            user_id,
+            since=cursor_ts,
+            limit=limit,
+        ) if not oldest_first else list(reversed(self.get_events(
+            user_id,
+            since=cursor_ts,
+            limit=limit,
+        )))
 
     # --- Webhook Subscriptions ---
 

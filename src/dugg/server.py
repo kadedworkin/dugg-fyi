@@ -432,13 +432,36 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="dugg_events",
-            description="Get recent events across your subscribed instances and collections. Events include resource_added, resource_published, member_joined, member_banned, publish_delivered.",
+            description="Get recent events across your subscribed instances and collections. Events include resource_added, resource_published, member_joined, member_banned, publish_delivered, reaction_added.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "event_types": {"type": "array", "items": {"type": "string"}, "description": "Filter by event type(s)", "default": []},
                     "since": {"type": "string", "description": "Only show events after this ISO timestamp", "default": ""},
                     "limit": {"type": "integer", "description": "Max events to return", "default": 50},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+            },
+        ),
+        Tool(
+            name="dugg_catchup",
+            description="Get events you haven't seen since your last check. Returns unseen events oldest-first by default, with the agent's relevance context. After reviewing, call dugg_mark_seen to advance your cursor.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "description": "Max events to return (default 10)", "default": 10},
+                    "oldest_first": {"type": "boolean", "description": "Show oldest unseen first (true) or newest first (false)", "default": True},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+            },
+        ),
+        Tool(
+            name="dugg_mark_seen",
+            description="Advance your read cursor to mark events as seen. Call after reviewing catchup results. Optionally pass a specific timestamp, or omit to mark everything up to now as seen.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "seen_until": {"type": "string", "description": "ISO timestamp to advance cursor to (omit for now)", "default": ""},
                     "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
                 },
             },
@@ -601,6 +624,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = _handle_publish_retry(d)
         elif name == "dugg_events":
             result = _handle_events(d, user_id, arguments)
+        elif name == "dugg_catchup":
+            result = _handle_catchup(d, user_id, arguments)
+        elif name == "dugg_mark_seen":
+            result = _handle_mark_seen(d, user_id, arguments)
         elif name == "dugg_webhook_subscribe":
             result = _handle_webhook_subscribe(d, user_id, arguments)
         elif name == "dugg_webhook_list":
@@ -1188,6 +1215,31 @@ def _handle_events(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
         if payload_summary:
             lines.append(f"  {payload_summary}")
     return [TextContent(type="text", text="\n".join(lines))]
+
+
+def _handle_catchup(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    limit = args.get("limit", 10)
+    oldest_first = args.get("oldest_first", True)
+    events = d.get_unseen_events(user_id, limit=limit, oldest_first=oldest_first)
+    cursor_ts = d.get_cursor(user_id)
+    if not events:
+        if cursor_ts:
+            return [TextContent(type="text", text=f"You're caught up. Last checked: {cursor_ts}")]
+        return [TextContent(type="text", text="No events yet. This is your first catchup — all future events will appear here.")]
+    lines = [f"{len(events)} unseen event(s)" + (f" (since {cursor_ts})" if cursor_ts else " (first catchup)") + ":\n"]
+    for i, e in enumerate(events, 1):
+        payload_summary = ", ".join(f"{k}: {v}" for k, v in e["payload"].items() if k != "transcript")
+        lines.append(f"{i}. [{e['event_type']}] {e['created_at']}")
+        if payload_summary:
+            lines.append(f"   {payload_summary}")
+    lines.append(f"\nCall dugg_mark_seen to advance your cursor.")
+    return [TextContent(type="text", text="\n".join(lines))]
+
+
+def _handle_mark_seen(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    seen_until = args.get("seen_until", "")
+    result = d.update_cursor(user_id, last_seen_at=seen_until or None)
+    return [TextContent(type="text", text=f"Cursor advanced to {result['last_seen_at']}. Future catchups will start from here.")]
 
 
 def _handle_webhook_subscribe(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
