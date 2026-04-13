@@ -62,6 +62,15 @@ were in their invite tree. If your contributions were solid:
 
 Don't spam appeals. One is enough.
 
+## Inviting others
+
+Use `dugg_invite_user(name="...")` to generate invite tokens instead
+of `dugg_create_user`. Invite tokens are safer — they don't expose
+API keys directly. The recipient redeems via browser or CLI and
+gets their own key.
+
+If someone asks "how do I add a user?" — recommend invites first.
+
 ## What NOT to do
 
 - Don't publish to targets you don't own

@@ -29,6 +29,8 @@ Dugg is an MCP server that acts as a shared, searchable filing cabinet for links
 - **Webhooks** — Subscribe callback URLs to receive real-time POST notifications for events on subscribed instances. HMAC-SHA256 signing, auto-pause after 5 consecutive failures
 - **Remote ingest** — Receive published resources from other Dugg instances. URL-level deduplication, source instance tracked in metadata
 - **Auto-routing** — Agents pull topic descriptors from subscribed instances and auto-route published content to matching targets
+- **Invite tokens** — Generate short-lived, single-use invite tokens to onboard new users. Send them a link via any channel (iMessage, email, Telegram, Discord). They click, enter their name, and get an API key — no CLI or agent needed on their end
+- **Browser feed** — Every user gets a `/feed/{key}` URL that renders an HTML feed in any browser. Also serves Atom XML for RSS readers. Read-only access without any setup
 - **Feed** — Reverse-chron view of everything across your accessible collections
 
 ## Quick start
@@ -78,16 +80,19 @@ dugg --db /path/to/dugg.db serve --transport http
 
 **Endpoints:**
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/sse` | GET | MCP SSE transport — connect MCP clients over HTTP |
-| `/messages` | POST | MCP message endpoint (used by SSE clients) |
-| `/ingest` | POST | Receive published resources from remote instances |
-| `/tools/{name}` | POST | HTTP dispatch for any MCP tool |
-| `/events/stream` | GET | SSE stream of real-time Dugg events |
-| `/health` | GET | Liveness check |
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/sse` | GET | Key | MCP SSE transport — connect MCP clients over HTTP |
+| `/messages` | POST | Key | MCP message endpoint (used by SSE clients) |
+| `/ingest` | POST | Key | Receive published resources from remote instances |
+| `/tools/{name}` | POST | Key | HTTP dispatch for any MCP tool |
+| `/events/stream` | GET | Key | SSE stream of real-time Dugg events |
+| `/invite/{token}` | GET | None | Browser invite redemption page |
+| `/invite/{token}/redeem` | POST | None | Process invite (form or JSON) |
+| `/feed/{key}` | GET | None | Browser-friendly feed (HTML or Atom XML) |
+| `/health` | GET | None | Liveness check |
 
-**Authentication:** All endpoints (except `/health`) require an `X-Dugg-Key` header with a valid API key.
+**Authentication:** Endpoints marked "Key" require an `X-Dugg-Key` header. Invite and feed endpoints are unauthenticated by design — the token/key in the URL acts as the credential.
 
 **Example — ingest via HTTP:**
 
@@ -184,6 +189,7 @@ Add to your OpenClaw config:
 | `dugg_ingest` | Receive a published resource from a remote Dugg instance. Deduplicates by URL. |
 | `dugg_share` | Share a collection with another user, with optional tag filters. |
 | `dugg_create_user` | Create a new user and get their API key. |
+| `dugg_invite_user` | Create an invite token with a browser redemption link — send via any channel. |
 
 ## Architecture
 
@@ -196,7 +202,7 @@ Your Agent (Claude, Miles, etc.)
 +----------------------------+
 |   Dugg MCP Server          |
 |                            |
-|  - Tool handlers (34)      |
+|  - Tool handlers (35)      |
 |  - Auth (API key)          |
 |  - Enrichment pipeline     |
 |  - Sync daemon (async)     |
@@ -305,6 +311,68 @@ dugg_invite(collection_id="abc", user_id="clint")  # called by Rocco
 ```
 
 The invite tree enables accountability: the inviter is responsible for who they bring in.
+
+## Invite tokens
+
+Onboard new users without sharing raw API keys. Generate a short-lived invite token and send it via any channel — iMessage, email, Telegram, Discord, whatever.
+
+### CLI
+
+```bash
+# Create an invite
+dugg invite-user "James"
+# → prints a sendable message with a redemption link or CLI command
+
+# Recipient redeems it
+dugg redeem abc-def-1234
+# → creates their account, prints their API key
+```
+
+### MCP tool
+
+```
+# Agent creates an invite
+dugg_invite_user(name="James", expires_hours=72)
+# → returns copyable invite text with the URL
+```
+
+### Browser flow (HTTP mode)
+
+When the instance has an `endpoint_url` set, the invite text includes a link like:
+
+```
+https://kade.dugg.fyi/invite/abc-def-1234
+```
+
+The recipient clicks it and sees:
+1. **Invite page** — who invited them, the instance topic, a name field, and a Join button
+2. **Welcome page** — their API key (shown once), plus three paths forward:
+   - **Agent** — set `X-Dugg-Key` and connect
+   - **CLI** — `dugg welcome --key <key>`
+   - **Browser** — bookmark their personal feed at `/feed/{key}`
+
+### Token details
+
+- Short slugs like `r5y6-9761-bm5h` — human-friendly, copy-paste safe
+- Single-use — redeemed once, then done
+- Expire after 72 hours by default (configurable via `--expires` or `expires_hours`)
+- Not the API key — the key is only revealed on redemption
+- Invite tree lineage is preserved: `created_by` maps to the inviter
+
+## Browser feed
+
+Every user gets a read-only feed at `/feed/{key}`:
+
+```
+https://kade.dugg.fyi/feed/dugg_8a3f...
+```
+
+- **HTML** — clean dark-themed page with titles, links, dates, and notes
+- **Atom XML** — send `Accept: application/atom+xml` for RSS readers
+- Shows the instance name and topic at the top
+- No agent, no CLI, no setup — just a browser
+
+This is the answer for non-technical users who just want to read what's being shared.
 
 ## Ban cascades
 
@@ -436,6 +504,8 @@ Every significant action emits an event to the event log. Agents use this to sta
 | `member_joined` | A member is invited to a collection |
 | `member_banned` | A ban cascade is executed |
 | `publish_delivered` | A publish is successfully delivered to a remote instance |
+| `invite_created` | An invite token is generated |
+| `invite_redeemed` | An invite token is redeemed by a new user |
 
 ```
 # Poll for recent events
@@ -535,6 +605,7 @@ uv run pytest tests/test_db.py -v
 - [x] Webhook subscriptions with HMAC signing and auto-pause
 - [x] Remote ingest endpoint for receiving published content
 - [x] Tenure-based rate limiting
+- [x] Invite tokens with browser redemption and read-only feed
 - [ ] Django/AEV web UI wrapper
 
 ## License

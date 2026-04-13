@@ -132,3 +132,30 @@ This user is auto-created on first server start if no API key is provided. A "De
 This means **a single `dugg init && dugg serve` is enough** for local agent use — no user management required.
 
 For multi-user or remote deployments, create named users with `dugg add-user` and pass their API keys via the `X-Dugg-Key` header.
+
+## Inviting others
+
+Instead of sharing raw API keys, use invite tokens:
+
+```bash
+# Generate an invite for someone
+dugg invite-user "James"
+```
+
+This prints a sendable message you can paste into any chat. If your instance has an `endpoint_url` set, the message includes a browser link:
+
+```
+https://your-server.dugg.fyi/invite/abc-def-1234
+```
+
+The recipient clicks the link, enters their name, and gets their API key. No CLI or agent needed on their end.
+
+They can also redeem via CLI if they prefer:
+
+```bash
+dugg redeem abc-def-1234
+```
+
+### For non-technical users
+
+Every user gets a bookmarkable feed at `/feed/{key}` — a browser-readable view of everything they have access to. No setup needed, just a URL.
