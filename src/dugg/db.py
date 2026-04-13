@@ -160,9 +160,20 @@ class DuggDB:
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS invite_tokens (
+                id TEXT PRIMARY KEY,
+                token TEXT UNIQUE NOT NULL,
+                created_by TEXT NOT NULL REFERENCES users(id),
+                redeemed_by TEXT REFERENCES users(id),
+                name_hint TEXT DEFAULT '',
+                expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                redeemed_at TEXT
+            );
+
             CREATE TABLE IF NOT EXISTS event_log (
                 id TEXT PRIMARY KEY,
-                event_type TEXT NOT NULL CHECK(event_type IN ('resource_added', 'resource_published', 'member_joined', 'member_banned', 'publish_delivered')),
+                event_type TEXT NOT NULL CHECK(event_type IN ('resource_added', 'resource_published', 'member_joined', 'member_banned', 'publish_delivered', 'invite_created', 'invite_redeemed')),
                 instance_id TEXT REFERENCES dugg_instances(id),
                 collection_id TEXT REFERENCES collections(id),
                 actor_id TEXT REFERENCES users(id),
@@ -837,6 +848,70 @@ class DuggDB:
         )
         self.conn.commit()
         return {"user_id": user_id, "status": "banned"}
+
+    # --- Invite Tokens ---
+
+    def _generate_invite_token(self) -> str:
+        """Generate a short, human-friendly invite token slug."""
+        import secrets
+        import string
+        alphabet = string.ascii_lowercase + string.digits
+        parts = [''.join(secrets.choice(alphabet) for _ in range(4)) for _ in range(3)]
+        return '-'.join(parts)
+
+    def create_invite_token(self, created_by: str, name_hint: str = "", expires_hours: int = 72) -> dict:
+        """Create an invite token for onboarding a new user."""
+        token_id = _uuid()
+        token = self._generate_invite_token()
+        now = _now()
+        expires_at = (datetime.now(timezone.utc) + timedelta(hours=expires_hours)).isoformat()
+        self.conn.execute(
+            "INSERT INTO invite_tokens (id, token, created_by, name_hint, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (token_id, token, created_by, name_hint, expires_at, now),
+        )
+        self.conn.commit()
+        self.emit_event("invite_created", actor_id=created_by,
+                        payload={"token_id": token_id, "name_hint": name_hint})
+        return {"id": token_id, "token": token, "created_by": created_by,
+                "name_hint": name_hint, "expires_at": expires_at, "created_at": now}
+
+    def get_invite_token(self, token: str) -> Optional[dict]:
+        """Look up an invite token by its slug."""
+        row = self.conn.execute("SELECT * FROM invite_tokens WHERE token = ?", (token,)).fetchone()
+        return dict(row) if row else None
+
+    def redeem_invite_token(self, token: str, name: str) -> Optional[dict]:
+        """Redeem an invite token: create a new user and mark the token as used.
+
+        Returns None if the token is invalid, expired, or already redeemed.
+        Returns dict with user info and token details on success.
+        """
+        invite = self.get_invite_token(token)
+        if not invite:
+            return None
+        if invite["redeemed_by"]:
+            return None
+        if datetime.fromisoformat(invite["expires_at"]) < datetime.now(timezone.utc):
+            return None
+
+        user = self.create_user(name)
+        now = _now()
+        self.conn.execute(
+            "UPDATE invite_tokens SET redeemed_by = ?, redeemed_at = ? WHERE token = ?",
+            (user["id"], now, token),
+        )
+        self.conn.commit()
+        self.emit_event("invite_redeemed", actor_id=user["id"],
+                        payload={"token": token, "invited_by": invite["created_by"], "name": name})
+        return {"user": user, "invite": {**invite, "redeemed_by": user["id"], "redeemed_at": now}}
+
+    def get_instance_for_owner(self, owner_id: str) -> Optional[dict]:
+        """Get the first instance owned by a user (for invite page context)."""
+        row = self.conn.execute(
+            "SELECT * FROM dugg_instances WHERE owner_id = ? ORDER BY created_at LIMIT 1",
+            (owner_id,),
+        ).fetchone()
+        return dict(row) if row else None
 
     # --- Routing Manifest ---
 

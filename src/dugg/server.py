@@ -176,6 +176,19 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="dugg_invite_user",
+            description="Create an invite token to onboard a new user. Returns copyable text with a redemption link they can open in a browser — no CLI or agent required on their end.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Name of the person being invited (shown on the redemption page)"},
+                    "expires_hours": {"type": "integer", "description": "Hours until the invite expires (default: 72)", "default": 72},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+                "required": ["name"],
+            },
+        ),
+        Tool(
             name="dugg_enrich",
             description="Manually trigger enrichment for a resource (re-fetch metadata, transcript, etc).",
             inputSchema={
@@ -548,6 +561,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = _handle_create_collection(d, user_id, arguments)
         elif name == "dugg_create_user":
             result = _handle_create_user(d, arguments)
+        elif name == "dugg_invite_user":
+            result = _handle_invite_user(d, user_id, arguments)
         elif name == "dugg_enrich":
             result = await _handle_enrich(d, arguments)
         elif name == "dugg_link":
@@ -802,6 +817,61 @@ def _handle_create_user(d: DuggDB, args: dict) -> list[TextContent]:
     name = args["name"]
     result = d.create_user(name)
     return [TextContent(type="text", text=f"Created user: {result['name']}\nID: {result['id']}\nAPI Key: {result['api_key']}\n\nSave this API key — it won't be shown again.")]
+
+
+def _handle_invite_user(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    name = args["name"]
+    expires_hours = args.get("expires_hours", 72)
+    result = d.create_invite_token(user_id, name_hint=name, expires_hours=expires_hours)
+    token = result["token"]
+
+    # Build the invite URL from the instance's endpoint, if set
+    instance = d.get_instance_for_owner(user_id)
+    endpoint = ""
+    instance_name = "a Dugg server"
+    instance_topic = ""
+    if instance:
+        endpoint = instance.get("endpoint_url", "")
+        instance_name = instance.get("name", instance_name)
+        instance_topic = instance.get("topic", "")
+
+    inviter = d.get_user(user_id)
+    inviter_name = inviter["name"] if inviter else "Someone"
+
+    if endpoint:
+        url = f"{endpoint.rstrip('/')}/invite/{token}"
+        invite_text = (
+            f"{inviter_name} invited you to {instance_name}!\n"
+        )
+        if instance_topic:
+            invite_text += f"{instance_topic}\n"
+        invite_text += (
+            f"\nGet set up here: {url}\n"
+            f"\nThis invite expires in {expires_hours} hours."
+        )
+    else:
+        invite_text = (
+            f"{inviter_name} invited you to {instance_name}!\n"
+        )
+        if instance_topic:
+            invite_text += f"{instance_topic}\n"
+        invite_text += (
+            f"\nRedeem via CLI:\n"
+            f"  dugg redeem {token}\n"
+            f"\nOr via API:\n"
+            f"  POST /invite/{token}/redeem\n"
+            f'  {{"name": "{name}"}}\n'
+            f"\nThis invite expires in {expires_hours} hours."
+        )
+
+    return [TextContent(type="text", text=(
+        f"Invite created for {name}\n"
+        f"Token: {token}\n"
+        f"Expires: {result['expires_at']}\n\n"
+        f"--- Copy and send this to {name} ---\n\n"
+        f"{invite_text}\n\n"
+        f"--- End of invite message ---"
+    ))]
 
 
 async def _handle_enrich(d: DuggDB, args: dict) -> list[TextContent]:

@@ -20,7 +20,7 @@ from typing import Optional
 
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Route
 
 from mcp.server.sse import SseServerTransport
@@ -29,6 +29,11 @@ from dugg.db import DuggDB
 from dugg.sync import start_sync_daemon
 
 logger = logging.getLogger("dugg.http")
+
+
+def _xml_escape(s: str) -> str:
+    """Escape XML special characters."""
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
 def create_app(db_path: Optional[Path] = None) -> Starlette:
@@ -221,6 +226,202 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 
+    # --- Invite & Feed (unauthenticated) ---
+
+    def _html_page(title: str, body: str) -> str:
+        """Minimal HTML page wrapper."""
+        return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title>
+<style>
+  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+         background: #0a0a0a; color: #e0e0e0; min-height: 100vh;
+         display: flex; justify-content: center; padding: 2rem 1rem; }}
+  .card {{ max-width: 480px; width: 100%; background: #1a1a1a; border: 1px solid #333;
+           border-radius: 12px; padding: 2rem; }}
+  h1 {{ font-size: 1.5rem; margin-bottom: 0.5rem; color: #fff; }}
+  .topic {{ color: #888; font-size: 0.9rem; margin-bottom: 1.5rem; }}
+  label {{ display: block; font-size: 0.85rem; color: #aaa; margin-bottom: 0.3rem; }}
+  input[type=text] {{ width: 100%; padding: 0.6rem; background: #111; border: 1px solid #444;
+                      border-radius: 6px; color: #fff; font-size: 1rem; margin-bottom: 1rem; }}
+  input[type=text]:focus {{ outline: none; border-color: #6366f1; }}
+  button {{ width: 100%; padding: 0.7rem; background: #6366f1; color: #fff; border: none;
+            border-radius: 6px; font-size: 1rem; cursor: pointer; font-weight: 600; }}
+  button:hover {{ background: #5558e6; }}
+  .key-box {{ background: #111; border: 1px solid #444; border-radius: 6px; padding: 1rem;
+              font-family: monospace; font-size: 0.95rem; word-break: break-all; margin: 1rem 0;
+              color: #4ade80; }}
+  .next-steps {{ margin-top: 1.5rem; }}
+  .next-steps h3 {{ font-size: 0.95rem; margin-bottom: 0.5rem; color: #fff; }}
+  .next-steps li {{ font-size: 0.85rem; color: #aaa; margin-bottom: 0.5rem; list-style: none; }}
+  .next-steps li strong {{ color: #e0e0e0; }}
+  .error {{ color: #f87171; margin-bottom: 1rem; }}
+  .feed-item {{ border-bottom: 1px solid #222; padding: 1rem 0; }}
+  .feed-item:last-child {{ border-bottom: none; }}
+  .feed-item h3 {{ font-size: 1rem; margin-bottom: 0.25rem; }}
+  .feed-item h3 a {{ color: #93c5fd; text-decoration: none; }}
+  .feed-item h3 a:hover {{ text-decoration: underline; }}
+  .feed-item .meta {{ font-size: 0.8rem; color: #666; }}
+  .feed-item .note {{ font-size: 0.85rem; color: #aaa; margin-top: 0.3rem; }}
+  .empty {{ color: #666; text-align: center; padding: 2rem 0; }}
+</style>
+</head>
+<body><div class="card">{body}</div></body>
+</html>"""
+
+    async def handle_invite_page(request: Request):
+        """GET /invite/{token} — show the invite redemption page."""
+        token = request.path_params["token"]
+        d = get_db()
+        invite = d.get_invite_token(token)
+
+        if not invite:
+            return HTMLResponse(_html_page("Invalid Invite", "<h1>Invalid invite</h1><p>This invite link is not valid.</p>"), status_code=404)
+
+        if invite.get("redeemed_by"):
+            return HTMLResponse(_html_page("Already Redeemed", "<h1>Already redeemed</h1><p>This invite has already been used.</p>"), status_code=410)
+
+        from datetime import datetime, timezone
+        if datetime.fromisoformat(invite["expires_at"]) < datetime.now(timezone.utc):
+            return HTMLResponse(_html_page("Expired Invite", "<h1>Invite expired</h1><p>This invite link has expired. Ask for a new one.</p>"), status_code=410)
+
+        inviter = d.get_user(invite["created_by"])
+        inviter_name = inviter["name"] if inviter else "Someone"
+        instance = d.get_instance_for_owner(invite["created_by"])
+        instance_name = instance["name"] if instance else "a Dugg server"
+        topic_html = f'<p class="topic">{instance["topic"]}</p>' if instance and instance.get("topic") else ""
+        name_hint = invite.get("name_hint", "")
+
+        body = f"""
+<h1>{inviter_name} invited you to {instance_name}</h1>
+{topic_html}
+<form method="POST" action="/invite/{token}/redeem">
+  <label for="name">Your name</label>
+  <input type="text" id="name" name="name" value="{name_hint}" placeholder="Your name" required>
+  <button type="submit">Join</button>
+</form>"""
+        return HTMLResponse(_html_page(f"Join {instance_name}", body))
+
+    async def handle_invite_redeem(request: Request):
+        """POST /invite/{token}/redeem — process the invite redemption."""
+        token = request.path_params["token"]
+        d = get_db()
+
+        # Accept both form-encoded and JSON
+        content_type = request.headers.get("content-type", "")
+        if "application/json" in content_type:
+            body = await request.body()
+            data = json.loads(body)
+            name = data.get("name", "")
+        else:
+            form = await request.form()
+            name = form.get("name", "")
+
+        if not name:
+            invite = d.get_invite_token(token)
+            name = invite["name_hint"] if invite and invite.get("name_hint") else "New User"
+
+        result = d.redeem_invite_token(token, name)
+
+        if not result:
+            if "application/json" in content_type:
+                return JSONResponse({"error": "Invalid, expired, or already-redeemed invite token"}, status_code=400)
+            return HTMLResponse(_html_page("Error", '<h1>Could not redeem</h1><p class="error">This invite is invalid, expired, or already used.</p>'), status_code=400)
+
+        user = result["user"]
+        invite_info = result["invite"]
+        inviter = d.get_user(invite_info["created_by"])
+        instance = d.get_instance_for_owner(invite_info["created_by"])
+        endpoint = instance.get("endpoint_url", "").rstrip("/") if instance else ""
+
+        if "application/json" in content_type:
+            return JSONResponse({
+                "status": "redeemed",
+                "user": {"id": user["id"], "name": user["name"], "api_key": user["api_key"]},
+                "feed_url": f"{endpoint}/feed/{user['api_key']}" if endpoint else None,
+            }, status_code=201)
+
+        feed_url = f"{endpoint}/feed/{user['api_key']}" if endpoint else f"/feed/{user['api_key']}"
+
+        body = f"""
+<h1>You're in, {user['name']}!</h1>
+<p>Here's your key — save it somewhere safe, it won't be shown again.</p>
+<div class="key-box">{user['api_key']}</div>
+<ul class="next-steps">
+  <h3>What now?</h3>
+  <li><strong>Got an AI agent?</strong> Set <code>X-Dugg-Key</code> to your key{f' and point it at <code>{endpoint}</code>' if endpoint else ''}</li>
+  <li><strong>Use the CLI?</strong> <code>dugg welcome --key {user['api_key']}</code></li>
+  <li><strong>Just want to read?</strong> <a href="{feed_url}">Bookmark your personal feed</a></li>
+</ul>"""
+        return HTMLResponse(_html_page("Welcome to Dugg", body))
+
+    async def handle_feed(request: Request):
+        """GET /feed/{key} — read-only browser-friendly feed view."""
+        api_key = request.path_params["key"]
+        d = get_db()
+        user = d.get_user_by_api_key(api_key)
+
+        if not user:
+            return HTMLResponse(_html_page("Not Found", "<h1>Invalid key</h1><p>This feed URL is not valid.</p>"), status_code=404)
+
+        # Check Accept header for Atom/RSS preference
+        accept = request.headers.get("accept", "")
+        want_atom = "application/atom+xml" in accept or "application/rss+xml" in accept
+
+        feed = d.get_feed(user["id"], limit=50)
+
+        # Get instance context for the page title
+        instances = d.list_instances(user["id"])
+        page_title = instances[0]["name"] if instances else "Dugg"
+        page_topic = instances[0].get("topic", "") if instances else ""
+
+        if want_atom:
+            # Simple Atom feed
+            entries = ""
+            for r in feed:
+                title = r.get("title") or r["url"]
+                desc = r.get("description", "")
+                note = r.get("note", "")
+                content = f"{desc}\n\n{note}".strip() if (desc or note) else ""
+                entries += f"""<entry>
+  <title>{_xml_escape(title)}</title>
+  <link href="{_xml_escape(r['url'])}"/>
+  <id>{_xml_escape(r['id'])}</id>
+  <updated>{r['created_at']}</updated>
+  <summary>{_xml_escape(content)}</summary>
+</entry>\n"""
+            atom = f"""<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>{_xml_escape(page_title)}</title>
+  <updated>{feed[0]['created_at'] if feed else ''}</updated>
+{entries}</feed>"""
+            return HTMLResponse(atom, media_type="application/atom+xml")
+
+        # HTML feed view
+        if not feed:
+            items_html = '<p class="empty">Nothing here yet. Check back later.</p>'
+        else:
+            items_html = ""
+            for r in feed:
+                title = r.get("title") or r["url"]
+                note_html = f'<p class="note">{r["note"]}</p>' if r.get("note") else ""
+                author_html = f' · {r["author"]}' if r.get("author") else ""
+                items_html += f"""<div class="feed-item">
+  <h3><a href="{r['url']}" target="_blank" rel="noopener">{title}</a></h3>
+  <p class="meta">{r['created_at'][:10]}{author_html}</p>
+  {note_html}
+</div>\n"""
+
+        topic_html = f'<p class="topic">{page_topic}</p>' if page_topic else ""
+        body = f"""<h1>{page_title}</h1>
+{topic_html}
+{items_html}"""
+        return HTMLResponse(_html_page(page_title, body))
+
     # --- Events SSE stream ---
 
     async def handle_events_stream(request: Request):
@@ -293,6 +494,9 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
         Route("/messages", endpoint=handle_messages, methods=["POST"]),
         Route("/ingest", endpoint=handle_ingest, methods=["POST"]),
         Route("/health", endpoint=handle_health),
+        Route("/invite/{token}", endpoint=handle_invite_page),
+        Route("/invite/{token}/redeem", endpoint=handle_invite_redeem, methods=["POST"]),
+        Route("/feed/{key}", endpoint=handle_feed),
         Route("/events/stream", endpoint=handle_events_stream),
         Route("/tools/{tool_name}", endpoint=handle_tools, methods=["POST"]),
     ]

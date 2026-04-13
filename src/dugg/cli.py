@@ -43,6 +43,90 @@ def cmd_add_user(args):
     print("\nSave this API key — it won't be shown again.")
 
 
+def cmd_invite_user(args):
+    """Create an invite token for a new user."""
+    from pathlib import Path
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+
+    # Resolve the inviter — use api_key if given, else local user
+    api_key = getattr(args, "key", None)
+    if api_key:
+        user = db.get_user_by_api_key(api_key)
+        if not user:
+            print("Invalid API key.")
+            db.close()
+            sys.exit(1)
+    else:
+        user = db.get_user_by_api_key("dugg_local_default")
+        if not user:
+            db.conn.execute(
+                "INSERT OR IGNORE INTO users (id, name, api_key, created_at) VALUES (?, ?, ?, ?)",
+                ("local", "Local User", "dugg_local_default", "2024-01-01T00:00:00Z"),
+            )
+            db.conn.commit()
+            user = db.get_user_by_api_key("dugg_local_default")
+
+    expires = getattr(args, "expires", 72)
+    result = db.create_invite_token(user["id"], name_hint=args.name, expires_hours=expires)
+    token = result["token"]
+
+    # Check for endpoint URL
+    instance = db.get_instance_for_owner(user["id"])
+    endpoint = instance.get("endpoint_url", "") if instance else ""
+    instance_name = instance.get("name", "a Dugg server") if instance else "a Dugg server"
+    instance_topic = instance.get("topic", "") if instance else ""
+
+    print(f"Invite created for {args.name}")
+    print(f"Token: {token}")
+    print(f"Expires: {result['expires_at']}")
+    print()
+
+    print("--- Send this to them ---")
+    print()
+    print(f"{user['name']} invited you to {instance_name}!")
+    if instance_topic:
+        print(instance_topic)
+    if endpoint:
+        print(f"\nGet set up here: {endpoint.rstrip('/')}/invite/{token}")
+    else:
+        print(f"\nRedeem via CLI: dugg redeem {token}")
+    print(f"\nThis invite expires in {expires} hours.")
+    print()
+    print("--- End ---")
+    db.close()
+
+
+def cmd_redeem(args):
+    """Redeem an invite token to create a user account."""
+    from pathlib import Path
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+
+    name = getattr(args, "name", None)
+    if not name:
+        # Fall back to the name hint from the invite
+        invite = db.get_invite_token(args.token)
+        name = invite["name_hint"] if invite and invite.get("name_hint") else "New User"
+    result = db.redeem_invite_token(args.token, name)
+    db.close()
+
+    if not result:
+        print("Invalid, expired, or already-redeemed invite token.")
+        sys.exit(1)
+
+    user = result["user"]
+    print(f"Welcome to Dugg, {user['name']}!")
+    print(f"ID:  {user['id']}")
+    print(f"Key: {user['api_key']}")
+    print()
+    print("Save this API key — it won't be shown again.")
+    print()
+    print("What next?")
+    print("  • Got an AI agent? Set X-Dugg-Key to your key above")
+    print("  • Use the CLI?    dugg welcome --key <your-key>")
+
+
 def cmd_list_users(args):
     """List all users."""
     from pathlib import Path
@@ -247,6 +331,15 @@ def main():
     p_user = sub.add_parser("add-user", help="Create a new user")
     p_user.add_argument("name", help="User display name")
 
+    p_invite = sub.add_parser("invite-user", help="Create an invite token for a new user")
+    p_invite.add_argument("name", help="Name of the person being invited")
+    p_invite.add_argument("--key", default=None, help="Your API key (uses local user if omitted)")
+    p_invite.add_argument("--expires", type=int, default=72, help="Hours until invite expires (default: 72)")
+
+    p_redeem = sub.add_parser("redeem", help="Redeem an invite token to join a Dugg server")
+    p_redeem.add_argument("token", help="The invite token to redeem")
+    p_redeem.add_argument("--name", default=None, help="Your display name (uses invite hint if omitted)")
+
     sub.add_parser("list-users", help="List all users")
 
     p_doctor = sub.add_parser("doctor", help="Check Dugg installation health")
@@ -264,6 +357,10 @@ def main():
         cmd_init(args)
     elif args.command == "add-user":
         cmd_add_user(args)
+    elif args.command == "invite-user":
+        cmd_invite_user(args)
+    elif args.command == "redeem":
+        cmd_redeem(args)
     elif args.command == "list-users":
         cmd_list_users(args)
     elif args.command == "doctor":
