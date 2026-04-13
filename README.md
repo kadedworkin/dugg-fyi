@@ -19,9 +19,12 @@ Dugg is an MCP server that acts as a shared, searchable filing cabinet for links
 - **Share rules** — Tag-based filters that control what collaborators see (e.g., share AI stuff with colleagues who care, but not personal vlogs)
 - **Publishing** — Flag resources for publishing to named targets (e.g., `public`, `aev-team`, `inner-circle`). One local source of truth, selective outward publishing
 - **Silent reactions** — Subscribers can tap/star resources. Only the publisher sees aggregate counts — no public signal, no social pressure
-- **Instances** — Hosted Dugg deployments with topics and access modes (public or invite-only)
-- **Invite trees** — Member-invites-member with tracked lineage. Accountability flows through the chain
-- **Ban cascades** — Ban a user and prune their invite tree. Depth 1 = hard prune, depth 2+ = credit score decides survival
+- **Instances** — Hosted Dugg deployments with topics. Invite-only by default — grow organically through trust networks
+- **Invite trees** — Member-invites-member with tracked lineage, cycle detection via path tracking, depth cap (15 levels), and IP tracking on join. Accountability flows through the chain
+- **Ban cascades** — Ban a user and prune their invite tree. Depth 1 = hard ban (no exceptions). Depth 2+ = 14-day grace period, then credit score decides survival. Owner cannot be banned. Pending publishes auto-cancelled on ban
+- **Succession** — Designate a successor for instance ownership. If the owner is incapacitated, ownership transfers to the successor with all collections re-rooted
+- **URL validation** — Scheme whitelist (`http`, `https`), domain blocklist (`blocklist.txt`), and automatic tracking parameter stripping (UTM, fbclid, gclid, etc.)
+- **No-lurking policy** — 60-day stale member timeout. Members past their grace period with zero submissions and zero reactions get flagged for pruning
 - **Appeals** — Banned users appeal with their contribution history. Owner (or owner's agent) decides
 - **Rate limiting** — Tenure-based submission caps. New members start at N posts/day (owner-configured, default 5), growing by X per day of membership. Longer in the mix = higher cap. Prevents fresh-account spam without punishing established contributors
 - **Read horizon** — Graduated content visibility based on membership tenure. New members see the last 30 days of content, unlocking 7 more days per week of membership. Instance owners control the base window and growth rate, or set `-1` for full history
@@ -29,7 +32,7 @@ Dugg is an MCP server that acts as a shared, searchable filing cabinet for links
 - **Article extraction** — Clean article text extraction from web pages via readability-lxml, with auto-generated summaries searchable via FTS5
 - **Storage cap + eviction** — IMAP-style local storage management. Per-instance MB cap (default 512 MB). When exceeded, oldest content not owned by the local user gets evicted — metadata preserved, body cleared. Your own content is never touched
 - **Instance policy** — Unified view of all governance settings (read horizon, index mode, storage cap, rate limits). Onboarding presets: `graduated` (safe defaults) or `full_access` (everything unlocked) in one call
-- **Publish sync** — Durable outbound delivery of published resources to remote Dugg instances. Queue with exponential backoff retry (30s → 2m → 8m → 32m → ~2h). Failed publishes can be retried manually
+- **Publish sync** — Durable outbound delivery of published resources to remote Dugg instances. FIFO ordering (oldest-first per target), exponential backoff retry (30s → 2m → 8m → 32m → ~2h), selective retry, queue clearing, and 30-day TTL purge on failures
 - **Event log** — Every significant action (resource added, published, member joined, banned, publish delivered, reaction added) is logged. Agents poll events or use catchup to stay informed
 - **Read cursors** — Per-user cursor tracking so agents can ask "what's new since I last checked" without managing state themselves. Powers the catchup flow
 - **Webhooks** — Subscribe callback URLs to receive real-time POST notifications for events on subscribed instances. HMAC-SHA256 signing, auto-pause after 5 consecutive failures
@@ -199,6 +202,10 @@ Add to your OpenClaw config:
 | `dugg_create_user` | Create a new user and get their API key. |
 | `dugg_invite_user` | Create an invite token with a browser redemption link — send via any channel. |
 | `dugg_instance_policy` | Get the current policy configuration for an instance — read horizon, index mode, storage cap, and rate limits. |
+| `dugg_publish_clear` | Delete failed publish queue entries. Optionally scoped to a target instance. Owner only. |
+| `dugg_publish_retry_selective` | Retry specific failed publishes — by ID or by target instance. More surgical than dugg_publish_retry. |
+| `dugg_prune_inactive` | List or remove members past their grace period with zero activity (no submissions, no reactions). No-lurking policy. |
+| `dugg_set_successor` | Designate a successor for a Dugg instance. If the owner is incapacitated, ownership transfers to this user. Owner only. |
 | `dugg_welcome` | Orientation for new connections. Returns instance topics, recent activity, and rate limit status. |
 
 ## Architecture
@@ -216,7 +223,7 @@ Add to your OpenClaw config:
                    │ MCP protocol (stdio or HTTP/SSE)
                    │
 ┌──────────────────▼──────────────────────────┐
-│  Dugg MCP Server — tool handlers (39)       │
+│  Dugg MCP Server — tool handlers (43)       │
 │                                             │
 │  - Auth (API key per user)                  │
 │  - Rate limiting (tenure-based)             │
@@ -296,19 +303,14 @@ dugg_reactions()
 Hosted Dugg deployments with topic descriptors and access control.
 
 ```
-# Create an invite-only instance
-dugg_instance_create(name="Chino Bandido", topic="Food, restaurants, recipes in the Phoenix area", access_mode="invite")
-
-# Create a public instance anyone can subscribe to
-dugg_instance_create(name="AI Research", topic="AI agents, LLMs, machine learning papers", access_mode="public")
+# Create an instance (invite-only by default)
+dugg_instance_create(name="Chino Bandido", topic="Food, restaurants, recipes in the Phoenix area")
 
 # Update the topic (owner only)
 dugg_instance_update(instance_id="abc123", topic="Updated topic description")
 ```
 
-**Access modes:**
-- `invite` — member-invites-member. Grow organically through trust networks.
-- `public` — anyone can subscribe. Open knowledge base.
+**Access mode:** Invite-only. Member-invites-member — grow organically through trust networks. No public access mode.
 
 ## Invite trees
 
@@ -323,6 +325,11 @@ dugg_invite(collection_id="abc", user_id="clint")  # called by Rocco
 ```
 
 The invite tree enables accountability: the inviter is responsible for who they bring in.
+
+**Hardening:**
+- **Cycle detection** — path tracking prevents circular invite chains
+- **Depth cap** — maximum 15 levels deep. No infinitely branching trees
+- **IP tracking** — join/invite IP addresses recorded for abuse tracing
 
 ## Invite tokens
 
@@ -399,11 +406,14 @@ dugg_ban(collection_id="abc", user_id="user_id", cascade=false)
 ```
 
 **How cascading works:**
+- **Owner protection** — the instance owner cannot be banned
 - **Depth 1** (directly invited by banned user): hard ban, no exceptions
-- **Depth 2+** (further downstream): credit score decides
-  - Credit score = submissions count + reactions received
+- **Depth 2+** (further downstream): 14-day grace period, then credit score decides
+  - Credit score = `submissions × distinct_human_reactors` (agent reactions excluded)
   - If score >= threshold: survive, auto-promoted under the owner
   - If score < threshold: banned with the rest
+  - Members still in their grace period automatically survive regardless of credit
+- **Pending publishes auto-cancelled** — all pending/delivering publishes from banned users are set to `cancelled`
 - The system self-calibrates — early communities prune aggressively, mature communities with established contributors prune surgically
 
 ## Appeals
@@ -438,6 +448,41 @@ dugg admin              # launch with local user
 dugg admin --key <key>  # launch with specific API key
 ```
 Keyboard-driven: `[c]`ollections, `[m]`embers, `[a]`ppeals, `[b]`an, `[u]`nban/approve, `[d]`eny, `[r]`efresh.
+
+## Succession
+
+Designate a successor for instance ownership. If the owner is incapacitated, ownership can be transferred cleanly.
+
+```
+# Owner designates a successor (must be an existing subscriber)
+dugg_set_successor(instance_id="abc123", successor_id="trusted_user")
+
+# Transfer ownership when needed
+# Re-roots all collections under the successor, transfers instance ownership, clears successor designation
+trigger_succession(instance_id="abc123")
+```
+
+## URL validation
+
+All URLs are sanitized on ingest:
+
+- **Scheme whitelist** — only `http` and `https` allowed
+- **Domain blocklist** — checked against `blocklist.txt` (with and without `www.` prefix)
+- **Tracking param stripping** — UTM parameters, `fbclid`, `gclid`, `dclid`, `msclkid`, `twclid`, `mc_cid`, `mc_eid`, `oly_enc_id`, `oly_anon_id`, `_ga`, `_gl`, `ref`, `ref_src` are stripped automatically
+
+## No-lurking policy
+
+Members who contribute nothing get pruned. After the 14-day grace period, anyone with zero submissions and zero reactions is flagged as inactive.
+
+```
+# List inactive members (dry run)
+dugg_prune_inactive(collection_id="abc")
+
+# Remove them
+dugg_prune_inactive(collection_id="abc", execute=true)
+```
+
+The 60-day stale member timeout surfaces members who've gone dark. Pruning is manual (owner-initiated) — the tool shows who's inactive so the owner can decide.
 
 ## Auto-routing
 
@@ -499,10 +544,13 @@ When you call `dugg_publish`, the resource is flagged locally _and_ queued for d
 
 1. `dugg_publish(resource_id, targets)` → writes to `publish_targets` (local) + `publish_queue` (outbound)
 2. Background sync loop picks up pending entries every 30 seconds
-3. POSTs resource data to each remote instance's `/ingest` endpoint
-4. Success → marked `delivered`. Failure → exponential backoff retry
+3. **FIFO ordering** — oldest-first per target, no backlog leapfrogging
+4. POSTs resource data to each remote instance's `/ingest` endpoint
+5. Success → marked `delivered`. Failure → exponential backoff retry
 
-**Retry schedule:** 30s → 2min → 8min → 32min → ~2h. After 5 failures, marked `failed`. Use `dugg_publish_retry` to reset all failed entries for another round.
+**Retry schedule:** 30s → 2min → 8min → 32min → ~2h. After 5 failures, marked `failed`.
+
+**Queue management:**
 
 ```
 # Set a remote endpoint on an instance
@@ -512,12 +560,23 @@ dugg_instance_update(instance_id="abc123", endpoint_url="https://remote.dugg.fyi
 dugg_publish_status()
 # Returns: pending: 2, delivering: 0, delivered: 47, failed: 1
 
-# Retry failures
+# Retry all failures
 dugg_publish_retry()
 # Returns: Reset 1 failed publish(es) back to pending
+
+# Retry specific failures — by ID or target
+dugg_publish_retry_selective(publish_ids=["abc123"])
+dugg_publish_retry_selective(target_instance_id="remote456")
+
+# Clear failed entries from the queue
+dugg_publish_clear()
+dugg_publish_clear(target_instance_id="remote456")
 ```
 
-**Design:** The sync daemon runs as an asyncio background task alongside the MCP server. No separate process needed. If httpx isn't installed, deliveries are skipped with a warning — install it for remote sync.
+**Design:**
+- The sync daemon runs as an asyncio background task alongside the MCP server. No separate process needed
+- If httpx isn't installed, deliveries are skipped with a warning — install it for remote sync
+- **30-day TTL purge** — failed entries older than 30 days are automatically deleted
 
 ## Event emission
 
@@ -625,11 +684,13 @@ uv run pytest tests/test_db.py -v
 
 ## What's built
 
-**Storage & retrieval** — Full-text search (FTS5), collections, tag-based share rules, resource relationship mapping
+**Storage & retrieval** — Full-text search (FTS5), collections, tag-based share rules, resource relationship mapping, URL validation with scheme whitelist + domain blocklist + tracking param stripping
 
-**Publishing** — Named publish targets, publish sync daemon with exponential backoff retry, remote ingest with URL deduplication
+**Publishing** — Named publish targets, FIFO publish queue, publish sync daemon with exponential backoff retry, selective retry + queue clearing, 30-day TTL purge, remote ingest with URL deduplication
 
-**Social layer** — Silent reactions with private aggregates, invite trees, ban cascades with depth-aware credit scoring, appeals
+**Social layer** — Silent reactions with private aggregates, invite trees (cycle detection, depth cap, IP tracking), ban cascades with grace periods + multiplicative credit scoring, appeals, no-lurking policy with member pruning
+
+**Trust & governance** — Invite-only access, owner succession planning, owner ban immunity, pending publish cancellation on ban, 60-day stale member timeout
 
 **Content governance** — Read horizon (graduated content visibility by tenure), content indexing policy (summary/full/metadata_only), article extraction via readability-lxml, IMAP-style storage cap + eviction, unified instance policy with onboarding presets
 
