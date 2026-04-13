@@ -193,41 +193,44 @@ Add to your OpenClaw config:
 | `dugg_share` | Share a collection with another user, with optional tag filters. |
 | `dugg_create_user` | Create a new user and get their API key. |
 | `dugg_invite_user` | Create an invite token with a browser redemption link — send via any channel. |
+| `dugg_welcome` | Orientation for new connections. Returns instance topics, recent activity, and rate limit status. |
 
 ## Architecture
 
 ```
-Your Agent (Claude, OpenClaw, Hermes, etc.)
-    |
-    | MCP protocol (stdio or HTTP/SSE)
-    |
-    v
-+----------------------------+
-|   Dugg MCP Server          |
-|                            |
-|  - Tool handlers (37)      |
-|  - Auth (API key)          |
-|  - Enrichment pipeline     |
-|  - Sync daemon (async)     |
-+----------------------------+
-    |              |
-    | stdio        | HTTP/SSE (:8411)
-    | (local)      | (remote)
-    v              v
-+-------------------+     +-------------------+
-|  SQLite + FTS5    |     | REST endpoints    |
-|  - Resources      |     | /ingest           |
-|  - Collections    |     | /tools/{name}     |
-|  - Tags           |     | /events/stream    |
-|  - Share rules    |     | /health           |
-|  - Publish targets|     | /sse + /messages  |
-|  - Reactions      |     +-------------------+
-|  - Instances      |
-|  - Invite trees   |
-+-------------------+
+┌─────────────────────────────────────────────┐
+│  Agent Layer (yours — Claude, OpenClaw, etc) │
+│                                             │
+│  - Enrichment: metadata, transcripts, tags  │
+│  - Judgment: auto-routing, ban appeals      │
+│  - Orchestration: catchup → process → act   │
+│  - All LLM costs live here                  │
+└──────────────────┬──────────────────────────┘
+                   │
+                   │ MCP protocol (stdio or HTTP/SSE)
+                   │
+┌──────────────────▼──────────────────────────┐
+│  Dugg MCP Server — tool handlers (38)       │
+│                                             │
+│  - Auth (API key per user)                  │
+│  - Rate limiting (tenure-based)             │
+│  - Event emission + webhook dispatch        │
+│  - Publish sync daemon (async background)   │
+└───────┬─────────────────────┬───────────────┘
+        │                     │
+        │ SQLite              │ HTTP (:8411)
+        │                     │
+┌───────▼───────┐    ┌────────▼────────┐
+│  Storage      │    │  Endpoints      │
+│  16 tables    │    │  /ingest        │
+│  FTS5 index   │    │  /tools/{name}  │
+│  Event log    │    │  /events/stream │
+│  Publish queue│    │  /feed/{key}    │
+│  Invite trees │    │  /invite/{token}│
+└───────────────┘    └─────────────────┘
 ```
 
-**Zero LLM cost in the server.** All AI processing happens in the agent layer, using the user's own tokens. Dugg is just storage, indexing, and retrieval.
+**Zero LLM cost in the server.** Dugg is storage, indexing, and retrieval. All AI processing — enrichment, tagging, routing decisions, appeal evaluation — happens in the agent layer, using the user's own tokens.
 
 ## Share rules
 
@@ -598,27 +601,19 @@ uv run pytest
 uv run pytest tests/test_db.py -v
 ```
 
-## Roadmap
+## What's built
 
-- [x] HTTP/SSE transport for remote/shared deployments
-- [ ] YouTube history sync (passive intake)
-- [ ] Browser extension for share-from-anywhere
-- [ ] Vector embeddings for semantic search
-- [x] Resource-level publish flags with named targets
-- [x] Silent reactions (tap, star, thumbsup) with private aggregates
-- [x] Hosted instances with topic descriptors and access modes
-- [x] Invite trees with member-invites-member tracking
-- [x] Ban cascades with depth-aware credit score pruning
-- [x] Appeal system with contribution-based credit scores
-- [x] Routing manifest for agent-driven auto-publishing
-- [ ] Resource relationship mapping (agent-built connections between resources)
-- [x] Publish sync daemon with exponential backoff retry
-- [x] Event emission for resource_added, resource_published, member_joined, member_banned
-- [x] Webhook subscriptions with HMAC signing and auto-pause
-- [x] Remote ingest endpoint for receiving published content
-- [x] Tenure-based rate limiting
-- [x] Invite tokens with browser redemption and read-only feed
-- [ ] Django/AEV web UI wrapper
+**Storage & retrieval** — Full-text search (FTS5), collections, tag-based share rules, resource relationship mapping
+
+**Publishing** — Named publish targets, publish sync daemon with exponential backoff retry, remote ingest with URL deduplication
+
+**Social layer** — Silent reactions with private aggregates, invite trees, ban cascades with depth-aware credit scoring, appeals
+
+**Infrastructure** — Dual transport (stdio + HTTP/SSE), hosted instances with topic descriptors, agent auto-routing via routing manifest, tenure-based rate limiting
+
+**Observability** — Event emission (8 event types), read cursors with catchup, webhook subscriptions with HMAC signing and auto-pause
+
+**Onboarding** — Invite tokens with browser redemption, read-only browser feed (HTML + Atom), welcome orientation tool
 
 ## License
 
