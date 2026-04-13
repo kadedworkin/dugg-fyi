@@ -25,7 +25,8 @@ Dugg is an MCP server that acts as a shared, searchable filing cabinet for links
 - **Appeals** — Banned users appeal with their contribution history. Owner (or owner's agent) decides
 - **Rate limiting** — Tenure-based submission caps. New members start at N posts/day (owner-configured, default 5), growing by X per day of membership. Longer in the mix = higher cap. Prevents fresh-account spam without punishing established contributors
 - **Publish sync** — Durable outbound delivery of published resources to remote Dugg instances. Queue with exponential backoff retry (30s → 2m → 8m → 32m → ~2h). Failed publishes can be retried manually
-- **Event log** — Every significant action (resource added, published, member joined, banned, publish delivered) is logged. Agents poll events to stay informed
+- **Event log** — Every significant action (resource added, published, member joined, banned, publish delivered, reaction added) is logged. Agents poll events or use catchup to stay informed
+- **Read cursors** — Per-user cursor tracking so agents can ask "what's new since I last checked" without managing state themselves. Powers the catchup flow
 - **Webhooks** — Subscribe callback URLs to receive real-time POST notifications for events on subscribed instances. HMAC-SHA256 signing, auto-pause after 5 consecutive failures
 - **Remote ingest** — Receive published resources from other Dugg instances. URL-level deduplication, source instance tracked in metadata
 - **Auto-routing** — Agents pull topic descriptors from subscribed instances and auto-route published content to matching targets
@@ -182,7 +183,9 @@ Add to your OpenClaw config:
 | `dugg_rate_limit_status` | Check your current daily post usage vs. cap for a collection. |
 | `dugg_publish_status` | Check publish sync queue status — pending, delivered, failed counts. |
 | `dugg_publish_retry` | Retry all failed publishes — resets them back to pending. |
-| `dugg_events` | Get recent events across subscribed instances (add, publish, join, ban). |
+| `dugg_events` | Get recent events across subscribed instances (add, publish, join, ban, reaction). |
+| `dugg_catchup` | Get unseen events since your last check. Oldest-first by default for timeline reading. |
+| `dugg_mark_seen` | Advance your read cursor after reviewing catchup results. |
 | `dugg_webhook_subscribe` | Subscribe a callback URL to receive real-time event notifications. |
 | `dugg_webhook_list` | List your active webhook subscriptions. |
 | `dugg_webhook_delete` | Remove a webhook subscription. |
@@ -202,7 +205,7 @@ Your Agent (Claude, Miles, etc.)
 +----------------------------+
 |   Dugg MCP Server          |
 |                            |
-|  - Tool handlers (35)      |
+|  - Tool handlers (37)      |
 |  - Auth (API key)          |
 |  - Enrichment pipeline     |
 |  - Sync daemon (async)     |
@@ -506,14 +509,23 @@ Every significant action emits an event to the event log. Agents use this to sta
 | `publish_delivered` | A publish is successfully delivered to a remote instance |
 | `invite_created` | An invite token is generated |
 | `invite_redeemed` | An invite token is redeemed by a new user |
+| `reaction_added` | A user reacts to a resource (tap, star, thumbsup). Includes `resource_owner_id` for routing |
 
 ```
 # Poll for recent events
 dugg_events()
 dugg_events(event_types=["resource_published"], since="2026-04-12T00:00:00Z")
+
+# Catchup — see what's new since your last check
+dugg_catchup()
+dugg_catchup(limit=5, oldest_first=false)
+
+# Mark everything as seen after reviewing
+dugg_mark_seen()
+dugg_mark_seen(seen_until="2026-04-12T20:00:00Z")  # or advance to a specific point
 ```
 
-Events are scoped — you only see events for instances you're subscribed to and collections you're a member of.
+Events are scoped — you only see events for instances you're subscribed to and collections you're a member of. Catchup uses a per-user read cursor so agents don't need to track timestamps themselves.
 
 ## Webhooks
 
