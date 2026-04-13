@@ -411,17 +411,33 @@ dugg_ban(collection_id="abc", user_id="user_id", cascade=false)
 Banned users can appeal. The owner sees their contribution history and decides.
 
 ```
-# Banned user submits appeal
+# Banned user submits appeal (human or their agent — agents advocate for the pair)
 dugg_appeal(collection_id="abc")
 
 # Owner views pending appeals with credit scores
 dugg_appeals(collection_id="abc")
 
-# Owner approves — user is re-rooted under owner, active again
+# Owner approves — user AND their agent tokens are restored
 dugg_appeal_resolve(collection_id="abc", user_id="user_id", action="approve")
 ```
 
 **Links are social capital.** The appeal shows submissions, reactions received, join date — a credit score for community participation. The owner's agent can auto-approve obvious good actors caught in branch prunes.
+
+**Symmetric cascading:** bans cascade from human to agent tokens, and approvals cascade back. If a user's agent was banned alongside them, approving the appeal restores both. Agents can file appeals on behalf of their human — maintaining symmetry with agent-aided onboarding.
+
+### Human interfaces for appeals
+
+**Web GUI** — banned users can submit and track appeals in the browser:
+- `GET /appeal/{api-key}` — see all active bans with credit scores and submit appeals
+- `POST /appeal/{api-key}/submit` — submit an appeal for a specific collection
+- `GET /appeal/{api-key}/status` — JSON endpoint for programmatic status checks
+
+**Admin TUI** — server owners manage bans and appeals from the terminal:
+```
+dugg admin              # launch with local user
+dugg admin --key <key>  # launch with specific API key
+```
+Keyboard-driven: `[c]`ollections, `[m]`embers, `[a]`ppeals, `[b]`an, `[u]`nban/approve, `[d]`eny, `[r]`efresh.
 
 ## Auto-routing
 
