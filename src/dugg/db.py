@@ -383,6 +383,17 @@ class DuggDB:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def list_members(self, collection_id: str) -> list[dict]:
+        """List all members of a collection with user names."""
+        rows = self.conn.execute(
+            """SELECT cm.*, u.name FROM collection_members cm
+               JOIN users u ON cm.user_id = u.id
+               WHERE cm.collection_id = ?
+               ORDER BY cm.role DESC, cm.joined_at""",
+            (collection_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def add_collection_member(self, collection_id: str, user_id: str, role: str = "member", invited_by: Optional[str] = None):
         now = _now()
         self.conn.execute(

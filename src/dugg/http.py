@@ -435,6 +435,120 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
 {items_html}"""
         return HTMLResponse(_html_page(page_title, body))
 
+    # --- Ban Appeal Pages ---
+
+    async def handle_appeal_page(request: Request):
+        """GET /appeal/{key} — show the ban appeal submission page.
+
+        The key is the user's API key. If they're banned, they can submit an appeal.
+        """
+        api_key = request.path_params["key"]
+        d = get_db()
+        user = d.get_user_by_api_key(api_key)
+
+        if not user:
+            return HTMLResponse(_html_page("Not Found", "<h1>Invalid key</h1><p>This appeal URL is not valid.</p>"), status_code=404)
+
+        # Find collections where this user is banned or appealing
+        rows = d.conn.execute(
+            """SELECT cm.collection_id, cm.status, c.name
+               FROM collection_members cm
+               JOIN collections c ON cm.collection_id = c.id
+               WHERE cm.user_id = ? AND cm.status IN ('banned', 'appealing')""",
+            (user["id"],),
+        ).fetchall()
+
+        if not rows:
+            body = f"""<h1>No active bans</h1>
+<p>You're not currently banned from any collections, {user['name']}.</p>"""
+            return HTMLResponse(_html_page("No Bans", body))
+
+        items_html = ""
+        for row in rows:
+            row = dict(row)
+            coll_name = row["name"]
+            coll_id = row["collection_id"]
+            status = row["status"]
+
+            if status == "appealing":
+                items_html += f"""<div class="feed-item">
+  <h3>{coll_name}</h3>
+  <p class="meta" style="color: #fbbf24;">Appeal pending — waiting for owner review</p>
+</div>\n"""
+            else:
+                score = d.get_member_credit_score(coll_id, user["id"])
+                items_html += f"""<div class="feed-item">
+  <h3>{coll_name}</h3>
+  <p class="meta">Your credit score: {score['total']} ({score['submissions']} submissions, {score['reactions_received']} reactions)</p>
+  <form method="POST" action="/appeal/{api_key}/submit" style="margin-top: 0.5rem;">
+    <input type="hidden" name="collection_id" value="{coll_id}">
+    <button type="submit">Submit Appeal</button>
+  </form>
+</div>\n"""
+
+        body = f"""<h1>Ban Appeals</h1>
+<p>Hi {user['name']}. You can appeal bans below. The collection owner will see your credit score and decide.</p>
+{items_html}"""
+        return HTMLResponse(_html_page("Ban Appeals", body))
+
+    async def handle_appeal_submit(request: Request):
+        """POST /appeal/{key}/submit — submit an appeal for a specific collection."""
+        api_key = request.path_params["key"]
+        d = get_db()
+        user = d.get_user_by_api_key(api_key)
+
+        if not user:
+            return HTMLResponse(_html_page("Error", "<h1>Invalid key</h1>"), status_code=404)
+
+        content_type = request.headers.get("content-type", "")
+        if "application/json" in content_type:
+            body = await request.body()
+            data = json.loads(body)
+            collection_id = data.get("collection_id", "")
+        else:
+            form = await request.form()
+            collection_id = form.get("collection_id", "")
+
+        if not collection_id:
+            return HTMLResponse(_html_page("Error", '<h1>Missing collection</h1><p class="error">No collection specified.</p>'), status_code=400)
+
+        result = d.appeal_ban(collection_id, user["id"])
+
+        if not result:
+            if "application/json" in content_type:
+                return JSONResponse({"error": "Cannot appeal — you may not be banned in this collection"}, status_code=400)
+            return HTMLResponse(_html_page("Cannot Appeal", '<h1>Cannot appeal</h1><p class="error">You can only appeal if you are currently banned.</p>'), status_code=400)
+
+        if "application/json" in content_type:
+            return JSONResponse({"status": "appealing", **result}, status_code=201)
+
+        body = f"""<h1>Appeal submitted</h1>
+<p>Your appeal has been submitted. The collection owner will review it along with your credit score.</p>
+<p style="margin-top: 1rem;"><a href="/appeal/{api_key}" style="color: #93c5fd;">Back to appeals</a></p>"""
+        return HTMLResponse(_html_page("Appeal Submitted", body))
+
+    async def handle_appeal_status(request: Request):
+        """GET /appeal/{key}/status — JSON endpoint for checking appeal status."""
+        api_key = request.path_params["key"]
+        d = get_db()
+        user = d.get_user_by_api_key(api_key)
+
+        if not user:
+            return JSONResponse({"error": "Invalid key"}, status_code=404)
+
+        rows = d.conn.execute(
+            """SELECT cm.collection_id, cm.status, c.name
+               FROM collection_members cm
+               JOIN collections c ON cm.collection_id = c.id
+               WHERE cm.user_id = ? AND cm.status IN ('banned', 'appealing')""",
+            (user["id"],),
+        ).fetchall()
+
+        return JSONResponse({
+            "user_id": user["id"],
+            "bans": [{"collection_id": r["collection_id"], "name": r["name"], "status": r["status"]} for r in rows],
+        })
+
     # --- Events SSE stream ---
 
     async def handle_events_stream(request: Request):
@@ -510,6 +624,9 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
         Route("/invite/{token}", endpoint=handle_invite_page),
         Route("/invite/{token}/redeem", endpoint=handle_invite_redeem, methods=["POST"]),
         Route("/feed/{key}", endpoint=handle_feed),
+        Route("/appeal/{key}", endpoint=handle_appeal_page),
+        Route("/appeal/{key}/submit", endpoint=handle_appeal_submit, methods=["POST"]),
+        Route("/appeal/{key}/status", endpoint=handle_appeal_status),
         Route("/events/stream", endpoint=handle_events_stream),
         Route("/tools/{tool_name}", endpoint=handle_tools, methods=["POST"]),
     ]

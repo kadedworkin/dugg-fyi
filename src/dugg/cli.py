@@ -241,6 +241,15 @@ def cmd_welcome(args):
     db.close()
 
 
+def cmd_admin(args):
+    """Launch the admin TUI for ban & appeal management."""
+    from pathlib import Path
+    from dugg.tui import run_tui
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    api_key = getattr(args, "key", None)
+    run_tui(db_path=db_path, api_key=api_key)
+
+
 def cmd_doctor(args):
     """Run health checks on the Dugg installation."""
     from pathlib import Path
@@ -349,6 +358,9 @@ def main():
     p_doctor.add_argument("--host", default="127.0.0.1", help="HTTP host to check (default: 127.0.0.1)")
     p_doctor.add_argument("--port", type=int, default=None, help="If set, also check HTTP server reachability")
 
+    p_admin = sub.add_parser("admin", help="Launch admin TUI for ban & appeal management")
+    p_admin.add_argument("--key", default=None, help="API key (uses local user if omitted)")
+
     p_welcome = sub.add_parser("welcome", help="Show orientation info for your Dugg installation")
     p_welcome.add_argument("--key", default=None, help="API key (uses local user if omitted)")
 
@@ -366,6 +378,8 @@ def main():
         cmd_redeem(args)
     elif args.command == "list-users":
         cmd_list_users(args)
+    elif args.command == "admin":
+        cmd_admin(args)
     elif args.command == "doctor":
         cmd_doctor(args)
     elif args.command == "welcome":

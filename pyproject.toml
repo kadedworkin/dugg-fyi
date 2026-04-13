@@ -17,6 +17,7 @@ dependencies = [
     "readability-lxml>=0.8.1",
     "starlette>=0.36.0",
     "uvicorn>=0.27.0",
+    "textual>=8.2.3",
 ]
 
 [project.optional-dependencies]
