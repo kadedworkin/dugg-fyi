@@ -39,8 +39,8 @@ def extract_youtube_id(url: str) -> Optional[str]:
 
 
 async def fetch_og_metadata(url: str) -> dict:
-    """Fetch Open Graph metadata from a URL."""
-    result = {"title": "", "description": "", "thumbnail": "", "site_name": ""}
+    """Fetch Open Graph metadata and article body text from a URL."""
+    result = {"title": "", "description": "", "thumbnail": "", "site_name": "", "article_text": ""}
     try:
         async with httpx.AsyncClient(follow_redirects=True, timeout=15.0) as client:
             resp = await client.get(url, headers={"User-Agent": "Dugg/0.1 (metadata fetcher)"})
@@ -48,7 +48,8 @@ async def fetch_og_metadata(url: str) -> dict:
     except (httpx.HTTPError, httpx.TimeoutException):
         return result
 
-    soup = BeautifulSoup(resp.text, "html.parser")
+    html = resp.text
+    soup = BeautifulSoup(html, "html.parser")
 
     og_map = {
         "og:title": "title",
@@ -71,7 +72,32 @@ async def fetch_og_metadata(url: str) -> dict:
         if desc_meta and desc_meta.get("content"):
             result["description"] = desc_meta["content"]
 
+    # Extract article body text using readability-lxml
+    result["article_text"] = extract_article_text(html)
+
     return result
+
+
+def extract_article_text(html: str) -> str:
+    """Extract clean article body text using readability-lxml.
+
+    Returns plain text content suitable for indexing. Falls back gracefully
+    if the library is not installed or extraction fails.
+    """
+    if not html or len(html) < 100:
+        return ""
+    try:
+        from readability import Document
+        doc = Document(html)
+        summary_html = doc.summary()
+        # Strip HTML tags from the readable content
+        clean_soup = BeautifulSoup(summary_html, "html.parser")
+        text = clean_soup.get_text(separator=" ", strip=True)
+        # Normalize whitespace
+        text = re.sub(r"\s+", " ", text).strip()
+        return text
+    except Exception:
+        return ""
 
 
 async def fetch_youtube_metadata(video_id: str) -> dict:
@@ -204,5 +230,9 @@ async def enrich_url(url: str) -> dict:
         result["description"] = og.get("description", "")
         result["thumbnail"] = og.get("thumbnail", "")
         result["raw_metadata"] = og
+        # Use extracted article text as transcript for articles
+        article_text = og.get("article_text", "")
+        if article_text:
+            result["transcript"] = article_text
 
     return result
