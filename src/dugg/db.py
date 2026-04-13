@@ -203,6 +203,14 @@ class DuggDB:
                 PRIMARY KEY(user_id, cursor_type)
             );
 
+            CREATE TABLE IF NOT EXISTS user_agents (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                agent_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                created_at TEXT NOT NULL,
+                UNIQUE(user_id, agent_id)
+            );
+
             CREATE VIRTUAL TABLE IF NOT EXISTS resources_fts USING fts5(
                 title, description, author, transcript, note,
                 content='resources',
@@ -255,6 +263,41 @@ class DuggDB:
             "SELECT * FROM users WHERE id = ?", (user_id,)
         ).fetchone()
         return dict(row) if row else None
+
+    # --- User Agents ---
+
+    def create_agent_for_user(self, user_id: str, agent_name: Optional[str] = None) -> dict:
+        """Create an agent account linked to a parent user. The agent is a separate user
+        with its own API key, tracked in user_agents so bans cascade."""
+        name = agent_name or f"{self.get_user(user_id)['name']}'s agent"
+        agent = self.create_user(name)
+        now = _now()
+        self.conn.execute(
+            "INSERT INTO user_agents (id, user_id, agent_id, created_at) VALUES (?, ?, ?, ?)",
+            (_uuid(), user_id, agent["id"], now),
+        )
+        self.conn.commit()
+        return agent
+
+    def get_agents_for_user(self, user_id: str) -> list[dict]:
+        """Get all agent accounts linked to a parent user."""
+        rows = self.conn.execute(
+            """SELECT u.* FROM users u
+               JOIN user_agents ua ON u.id = ua.agent_id
+               WHERE ua.user_id = ?
+               ORDER BY u.created_at""",
+            (user_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_parent_user(self, agent_id: str) -> Optional[dict]:
+        """If this user is an agent, return its parent user. Otherwise None."""
+        row = self.conn.execute(
+            "SELECT user_id FROM user_agents WHERE agent_id = ?", (agent_id,)
+        ).fetchone()
+        if not row:
+            return None
+        return self.get_user(row["user_id"])
 
     # --- Collections ---
 
@@ -798,6 +841,21 @@ class DuggDB:
                         )
                         banned.append(mid)
 
+        # Also ban all agents belonging to any banned user
+        agent_banned = []
+        for uid in banned:
+            agents = self.get_agents_for_user(uid)
+            for agent in agents:
+                aid = agent["id"]
+                member = self.get_member_status(collection_id, aid)
+                if member and member["status"] != "banned":
+                    self.conn.execute(
+                        "UPDATE collection_members SET status = 'banned' WHERE collection_id = ? AND user_id = ?",
+                        (collection_id, aid),
+                    )
+                    agent_banned.append(aid)
+
+        banned.extend(agent_banned)
         self.conn.commit()
         self.emit_event("member_banned", collection_id=collection_id,
                         payload={"banned": banned, "survived": survived, "cascade": cascade})
@@ -912,6 +970,7 @@ class DuggDB:
             return None
 
         user = self.create_user(name)
+        agent = self.create_agent_for_user(user["id"])
         now = _now()
         self.conn.execute(
             "UPDATE invite_tokens SET redeemed_by = ?, redeemed_at = ? WHERE token = ?",
@@ -920,7 +979,7 @@ class DuggDB:
         self.conn.commit()
         self.emit_event("invite_redeemed", actor_id=user["id"],
                         payload={"token": token, "invited_by": invite["created_by"], "name": name})
-        return {"user": user, "invite": {**invite, "redeemed_by": user["id"], "redeemed_at": now}}
+        return {"user": user, "agent": agent, "invite": {**invite, "redeemed_by": user["id"], "redeemed_at": now}}
 
     def get_instance_for_owner(self, owner_id: str) -> Optional[dict]:
         """Get the first instance owned by a user (for invite page context)."""

@@ -116,14 +116,17 @@ def cmd_redeem(args):
         sys.exit(1)
 
     user = result["user"]
+    agent = result["agent"]
     print(f"Welcome to Dugg, {user['name']}!")
-    print(f"ID:  {user['id']}")
-    print(f"Key: {user['api_key']}")
+    print(f"ID:        {user['id']}")
+    print(f"Your key:  {user['api_key']}")
+    print(f"Agent key: {agent['api_key']}")
     print()
-    print("Save this API key — it won't be shown again.")
+    print("Save both keys — they won't be shown again.")
+    print("If your account gets banned, your agent goes too.")
     print()
     print("What next?")
-    print("  • Got an AI agent? Set X-Dugg-Key to your key above")
+    print("  • Got an AI agent? Give it the agent key with X-Dugg-Key")
     print("  • Use the CLI?    dugg welcome --key <your-key>")
 
 

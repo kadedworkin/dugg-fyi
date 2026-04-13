@@ -1118,3 +1118,86 @@ def test_unseen_events_oldest_first(db):
     assert len(unseen) >= 2
     # Oldest first means first event's timestamp <= last event's timestamp
     assert unseen[0]["created_at"] <= unseen[-1]["created_at"]
+
+
+# --- User Agents ---
+
+
+def test_create_agent_for_user(db):
+    kade = db.create_user("Kade")
+    agent = db.create_agent_for_user(kade["id"])
+    assert agent["name"] == "Kade's agent"
+    assert agent["api_key"].startswith("dugg_")
+    assert agent["id"] != kade["id"]
+    agents = db.get_agents_for_user(kade["id"])
+    assert len(agents) == 1
+    assert agents[0]["id"] == agent["id"]
+
+
+def test_create_agent_custom_name(db):
+    kade = db.create_user("Kade")
+    agent = db.create_agent_for_user(kade["id"], agent_name="Kade-bot")
+    assert agent["name"] == "Kade-bot"
+
+
+def test_get_parent_user(db):
+    kade = db.create_user("Kade")
+    agent = db.create_agent_for_user(kade["id"])
+    parent = db.get_parent_user(agent["id"])
+    assert parent is not None
+    assert parent["id"] == kade["id"]
+
+
+def test_get_parent_user_returns_none_for_regular_user(db):
+    kade = db.create_user("Kade")
+    assert db.get_parent_user(kade["id"]) is None
+
+
+def test_redeem_invite_creates_agent(db):
+    kade = db.create_user("Kade")
+    invite = db.create_invite_token(kade["id"], name_hint="Rocco")
+    result = db.redeem_invite_token(invite["token"], "Rocco")
+    assert result is not None
+    assert "agent" in result
+    agent = result["agent"]
+    assert agent["api_key"].startswith("dugg_")
+    assert agent["api_key"] != result["user"]["api_key"]
+    # Agent is linked to the new user
+    parent = db.get_parent_user(agent["id"])
+    assert parent["id"] == result["user"]["id"]
+
+
+def test_ban_cascades_to_agents(db):
+    kade = db.create_user("Kade")
+    rocco = db.create_user("Rocco")
+    rocco_bot = db.create_agent_for_user(rocco["id"])
+    coll = db.create_collection("Shared", kade["id"], visibility="shared")
+    db.invite_member(coll["id"], kade["id"], rocco["id"])
+    # Also add the agent as a member
+    db.invite_member(coll["id"], rocco["id"], rocco_bot["id"])
+    # Ban Rocco — agent should get banned too
+    result = db.ban_member(coll["id"], rocco["id"], cascade=False)
+    assert rocco["id"] in result["banned"]
+    assert rocco_bot["id"] in result["banned"]
+    status = db.get_member_status(coll["id"], rocco_bot["id"])
+    assert status["status"] == "banned"
+
+
+def test_ban_cascade_catches_agents_in_tree(db):
+    """When banning with cascade, agents of depth-1 pruned users also get banned."""
+    kade = db.create_user("Kade")
+    spammer = db.create_user("Spammer")
+    spammer_bot = db.create_agent_for_user(spammer["id"])
+    victim = db.create_user("Victim")
+    victim_bot = db.create_agent_for_user(victim["id"])
+    coll = db.create_collection("Shared", kade["id"], visibility="shared")
+    db.invite_member(coll["id"], kade["id"], spammer["id"])
+    db.invite_member(coll["id"], spammer["id"], spammer_bot["id"])
+    db.invite_member(coll["id"], spammer["id"], victim["id"])
+    db.invite_member(coll["id"], victim["id"], victim_bot["id"])
+    result = db.ban_member(coll["id"], spammer["id"], cascade=True)
+    # Spammer, victim (depth 1), and both their bots should be banned
+    assert spammer["id"] in result["banned"]
+    assert victim["id"] in result["banned"]
+    assert spammer_bot["id"] in result["banned"]
+    assert victim_bot["id"] in result["banned"]

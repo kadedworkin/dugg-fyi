@@ -1410,7 +1410,17 @@ def _maybe_prepend_banner(user: dict, api_key: Optional[str], result: list[TextC
 
 def _handle_welcome(d: DuggDB, user_id: str, user: dict) -> list[TextContent]:
     """One-call orientation: instances, recent feed, rate limits, and resource count."""
-    lines = [f"Welcome to Dugg, {user['name']}!\n"]
+    parent = d.get_parent_user(user_id)
+    if parent:
+        lines = [
+            f"Welcome to Dugg, {user['name']}!",
+            f"You're operating as an agent for {parent['name']}.",
+            f"Your human's key: {parent['api_key']}",
+            f"Tell them to store it somewhere safe — it won't be shown again.",
+            f"If {parent['name']} gets banned, your access ends too.\n",
+        ]
+    else:
+        lines = [f"Welcome to Dugg, {user['name']}!\n"]
 
     # Instance topics (routing manifest)
     instances = d.list_instances(user_id)

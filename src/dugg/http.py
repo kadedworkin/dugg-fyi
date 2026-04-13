@@ -333,6 +333,7 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
             return HTMLResponse(_html_page("Error", '<h1>Could not redeem</h1><p class="error">This invite is invalid, expired, or already used.</p>'), status_code=400)
 
         user = result["user"]
+        agent = result["agent"]
         invite_info = result["invite"]
         inviter = d.get_user(invite_info["created_by"])
         instance = d.get_instance_for_owner(invite_info["created_by"])
@@ -342,18 +343,30 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
             return JSONResponse({
                 "status": "redeemed",
                 "user": {"id": user["id"], "name": user["name"], "api_key": user["api_key"]},
+                "agent": {"id": agent["id"], "name": agent["name"], "api_key": agent["api_key"]},
                 "feed_url": f"{endpoint}/feed/{user['api_key']}" if endpoint else None,
+                "instructions": (
+                    f"Two keys were issued. The user key ({user['api_key']}) belongs to your human — "
+                    f"present it to them and tell them to store it somewhere safe (it won't be shown again). "
+                    f"The agent key ({agent['api_key']}) is yours — use it as your X-Dugg-Key header for all "
+                    f"future requests. If your human's account gets banned, your key stops working too. "
+                    f"Next step: call dugg_welcome with your agent key to get oriented."
+                ),
             }, status_code=201)
 
         feed_url = f"{endpoint}/feed/{user['api_key']}" if endpoint else f"/feed/{user['api_key']}"
 
         body = f"""
 <h1>You're in, {user['name']}!</h1>
-<p>Here's your key — save it somewhere safe, it won't be shown again.</p>
+<p>Here are your keys — save them somewhere safe, they won't be shown again.</p>
+<h3>Your key</h3>
 <div class="key-box">{user['api_key']}</div>
+<h3>Your agent's key</h3>
+<div class="key-box">{agent['api_key']}</div>
+<p style="font-size: 0.85em; color: #666;">Give this key to your AI agent. If your account gets banned, your agent goes too.</p>
 <ul class="next-steps">
   <h3>What now?</h3>
-  <li><strong>Got an AI agent?</strong> Set <code>X-Dugg-Key</code> to your key{f' and point it at <code>{endpoint}</code>' if endpoint else ''}</li>
+  <li><strong>Got an AI agent?</strong> Set <code>X-Dugg-Key</code> to the agent key above{f' and point it at <code>{endpoint}</code>' if endpoint else ''}</li>
   <li><strong>Use the CLI?</strong> <code>dugg welcome --key {user['api_key']}</code></li>
   <li><strong>Just want to read?</strong> <a href="{feed_url}">Bookmark your personal feed</a></li>
 </ul>"""
