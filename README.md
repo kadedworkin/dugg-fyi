@@ -63,6 +63,53 @@ dugg serve
 dugg --db /path/to/dugg.db serve
 ```
 
+### HTTP/SSE mode (remote agents)
+
+```bash
+# Start the HTTP server with SSE transport
+dugg serve --transport http --port 8411
+
+# Custom host/port
+dugg serve --transport http --host 127.0.0.1 --port 9000
+
+# With a custom database
+dugg --db /path/to/dugg.db serve --transport http
+```
+
+**Endpoints:**
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/sse` | GET | MCP SSE transport — connect MCP clients over HTTP |
+| `/messages` | POST | MCP message endpoint (used by SSE clients) |
+| `/ingest` | POST | Receive published resources from remote instances |
+| `/tools/{name}` | POST | HTTP dispatch for any MCP tool |
+| `/events/stream` | GET | SSE stream of real-time Dugg events |
+| `/health` | GET | Liveness check |
+
+**Authentication:** All endpoints (except `/health`) require an `X-Dugg-Key` header with a valid API key.
+
+**Example — ingest via HTTP:**
+
+```bash
+curl -X POST http://localhost:8411/ingest \
+  -H "X-Dugg-Key: dugg_your_api_key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "resource": {"url": "https://example.com/article", "title": "Cool Article"},
+    "source_instance_id": "remote123"
+  }'
+```
+
+**Example — call a tool via HTTP:**
+
+```bash
+curl -X POST http://localhost:8411/tools/dugg_search \
+  -H "X-Dugg-Key: dugg_your_api_key" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "webhook architectures"}'
+```
+
 ### Connect to Claude Code
 
 Add to your Claude Code MCP config (`~/.claude/claude_desktop_config.json` or equivalent):
@@ -143,27 +190,29 @@ Add to your OpenClaw config:
 ```
 Your Agent (Claude, Miles, etc.)
     |
-    | MCP protocol (stdio or HTTP)
+    | MCP protocol (stdio or HTTP/SSE)
     |
     v
-+-------------------+
-|   Dugg MCP Server  |
-|                   |
-|  - Tool handlers  |
-|  - Auth (API key) |
-|  - Enrichment     |
-+-------------------+
-    |
-    v
-+-------------------+
-|  SQLite + FTS5    |
-|                   |
-|  - Resources      |
-|  - Collections    |
-|  - Tags           |
-|  - Share rules    |
-|  - Publish targets|
-|  - Reactions      |
++----------------------------+
+|   Dugg MCP Server          |
+|                            |
+|  - Tool handlers (34)      |
+|  - Auth (API key)          |
+|  - Enrichment pipeline     |
+|  - Sync daemon (async)     |
++----------------------------+
+    |              |
+    | stdio        | HTTP/SSE (:8411)
+    | (local)      | (remote)
+    v              v
++-------------------+     +-------------------+
+|  SQLite + FTS5    |     | REST endpoints    |
+|  - Resources      |     | /ingest           |
+|  - Collections    |     | /tools/{name}     |
+|  - Tags           |     | /events/stream    |
+|  - Share rules    |     | /health           |
+|  - Publish targets|     | /sse + /messages  |
+|  - Reactions      |     +-------------------+
 |  - Instances      |
 |  - Invite trees   |
 +-------------------+
@@ -469,7 +518,7 @@ uv run pytest tests/test_db.py -v
 
 ## Roadmap
 
-- [ ] HTTP/SSE transport for remote/shared deployments
+- [x] HTTP/SSE transport for remote/shared deployments
 - [ ] YouTube history sync (passive intake)
 - [ ] Browser extension for share-from-anywhere
 - [ ] Vector embeddings for semantic search

@@ -8,8 +8,17 @@ from dugg.db import DuggDB, DEFAULT_DB_PATH
 
 def cmd_serve(args):
     """Run the MCP server."""
-    from dugg.server import main
-    main()
+    transport = getattr(args, "transport", "stdio")
+    if transport == "http":
+        from dugg.http import run_http
+        from pathlib import Path
+        db_path = Path(args.db) if args.db else None
+        host = getattr(args, "host", "0.0.0.0")
+        port = getattr(args, "port", 8411)
+        run_http(host=host, port=port, db_path=db_path)
+    else:
+        from dugg.server import main
+        main()
 
 
 def cmd_init(args):
@@ -54,7 +63,11 @@ def main():
 
     sub = parser.add_subparsers(dest="command")
 
-    sub.add_parser("serve", help="Run the MCP server (default)")
+    p_serve = sub.add_parser("serve", help="Run the MCP server (default)")
+    p_serve.add_argument("--transport", choices=["stdio", "http"], default="stdio",
+                         help="Transport mode: stdio (local agent) or http (remote HTTP/SSE)")
+    p_serve.add_argument("--host", default="0.0.0.0", help="HTTP bind address (default: 0.0.0.0)")
+    p_serve.add_argument("--port", type=int, default=8411, help="HTTP port (default: 8411)")
     sub.add_parser("init", help="Initialize the database")
 
     p_user = sub.add_parser("add-user", help="Create a new user")
