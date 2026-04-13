@@ -197,7 +197,7 @@ Add to your OpenClaw config:
 ## Architecture
 
 ```
-Your Agent (Claude, Miles, etc.)
+Your Agent (Claude, OpenClaw, Hermes, etc.)
     |
     | MCP protocol (stdio or HTTP/SSE)
     |
