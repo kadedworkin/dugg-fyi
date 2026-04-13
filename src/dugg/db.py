@@ -1008,17 +1008,26 @@ class DuggDB:
     # --- Appeals ---
 
     def appeal_ban(self, collection_id: str, user_id: str) -> Optional[dict]:
-        """Submit an appeal. Only banned members can appeal."""
-        member = self.get_member_status(collection_id, user_id)
+        """Submit an appeal. Only banned members can appeal.
+
+        If the caller is an agent, the appeal is filed on behalf of their
+        parent human user (the agent advocates for the pair).
+        """
+        # If the caller is an agent, appeal on behalf of the parent human
+        appealing_for = user_id
+        parent = self.get_parent_user(user_id)
+        if parent:
+            appealing_for = parent["id"]
+        member = self.get_member_status(collection_id, appealing_for)
         if not member or member["status"] != "banned":
             return None
         self.conn.execute(
             "UPDATE collection_members SET status = 'appealing' WHERE collection_id = ? AND user_id = ?",
-            (collection_id, user_id),
+            (collection_id, appealing_for),
         )
         self.conn.commit()
-        score = self.get_member_credit_score(collection_id, user_id)
-        return {"user_id": user_id, "status": "appealing", **score}
+        score = self.get_member_credit_score(collection_id, appealing_for)
+        return {"user_id": appealing_for, "appealed_by": user_id, "status": "appealing", **score}
 
     def get_appeals(self, collection_id: str) -> list[dict]:
         """List all pending appeals with credit scores."""
@@ -1040,7 +1049,10 @@ class DuggDB:
         return results
 
     def approve_appeal(self, collection_id: str, user_id: str) -> Optional[dict]:
-        """Approve an appeal — re-root under owner, set active."""
+        """Approve an appeal — re-root under owner, set active.
+
+        Cascades to any agent tokens that were banned alongside the user.
+        """
         member = self.get_member_status(collection_id, user_id)
         if not member or member["status"] != "appealing":
             return None
@@ -1053,8 +1065,19 @@ class DuggDB:
             "UPDATE collection_members SET status = 'active', invited_by = ? WHERE collection_id = ? AND user_id = ?",
             (owner_id, collection_id, user_id),
         )
+        # Cascade unban to any agent tokens that were banned alongside this user
+        agents_unbanned = []
+        for agent in self.get_agents_for_user(user_id):
+            aid = agent["id"]
+            agent_member = self.get_member_status(collection_id, aid)
+            if agent_member and agent_member["status"] == "banned":
+                self.conn.execute(
+                    "UPDATE collection_members SET status = 'active', invited_by = ? WHERE collection_id = ? AND user_id = ?",
+                    (user_id, collection_id, aid),
+                )
+                agents_unbanned.append(aid)
         self.conn.commit()
-        return {"user_id": user_id, "status": "active", "invited_by": owner_id}
+        return {"user_id": user_id, "status": "active", "invited_by": owner_id, "agents_unbanned": agents_unbanned}
 
     def deny_appeal(self, collection_id: str, user_id: str) -> Optional[dict]:
         """Deny an appeal — set back to banned."""

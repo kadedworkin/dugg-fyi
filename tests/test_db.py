@@ -569,6 +569,53 @@ def test_approve_appeal(db):
     assert isinstance(feed, list)
 
 
+def test_agent_appeals_on_behalf_of_human(db):
+    """An agent can file an appeal on behalf of its banned parent human."""
+    kade = db.create_user("Kade")
+    rocco = db.create_user("Rocco")
+    rocco_bot = db.create_agent_for_user(rocco["id"])
+    coll = db.create_collection("Shared", kade["id"], visibility="shared")
+    db.invite_member(coll["id"], kade["id"], rocco["id"])
+    db.invite_member(coll["id"], rocco["id"], rocco_bot["id"])
+    db.ban_member(coll["id"], rocco["id"], cascade=False)
+    assert db.get_member_status(coll["id"], rocco["id"])["status"] == "banned"
+    assert db.get_member_status(coll["id"], rocco_bot["id"])["status"] == "banned"
+    # Agent appeals on behalf of human
+    result = db.appeal_ban(coll["id"], rocco_bot["id"])
+    assert result is not None
+    assert result["user_id"] == rocco["id"]  # Appeal is for the human
+    assert result["appealed_by"] == rocco_bot["id"]  # Filed by the agent
+    assert db.get_member_status(coll["id"], rocco["id"])["status"] == "appealing"
+    # Approve the appeal — both human and agent should be restored
+    approved = db.approve_appeal(coll["id"], rocco["id"])
+    assert approved["status"] == "active"
+    assert rocco_bot["id"] in approved["agents_unbanned"]
+    assert db.get_member_status(coll["id"], rocco["id"])["status"] == "active"
+    assert db.get_member_status(coll["id"], rocco_bot["id"])["status"] == "active"
+
+
+def test_approve_appeal_cascades_to_agents(db):
+    """Approving an appeal should also unban the user's agent tokens."""
+    kade = db.create_user("Kade")
+    rocco = db.create_user("Rocco")
+    rocco_bot = db.create_agent_for_user(rocco["id"])
+    coll = db.create_collection("Shared", kade["id"], visibility="shared")
+    db.invite_member(coll["id"], kade["id"], rocco["id"])
+    db.invite_member(coll["id"], rocco["id"], rocco_bot["id"])
+    # Ban cascades to agent
+    db.ban_member(coll["id"], rocco["id"], cascade=False)
+    assert db.get_member_status(coll["id"], rocco["id"])["status"] == "banned"
+    assert db.get_member_status(coll["id"], rocco_bot["id"])["status"] == "banned"
+    # Appeal and approve
+    db.appeal_ban(coll["id"], rocco["id"])
+    result = db.approve_appeal(coll["id"], rocco["id"])
+    assert result["status"] == "active"
+    assert rocco_bot["id"] in result["agents_unbanned"]
+    # Both human and agent are active again
+    assert db.get_member_status(coll["id"], rocco["id"])["status"] == "active"
+    assert db.get_member_status(coll["id"], rocco_bot["id"])["status"] == "active"
+
+
 def test_deny_appeal(db):
     kade = db.create_user("Kade")
     rocco = db.create_user("Rocco")

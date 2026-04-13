@@ -1204,7 +1204,10 @@ def _handle_appeal(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
     result = d.appeal_ban(collection_id, user_id)
     if not result:
         return [TextContent(type="text", text="You can only appeal if you are currently banned")]
-    return [TextContent(type="text", text=f"Appeal submitted. Your credit score: {result['submissions']} submissions, {result['reactions_received']} reactions received ({result['total']} total)")]
+    on_behalf = ""
+    if result["appealed_by"] != result["user_id"]:
+        on_behalf = f" (filed by agent on behalf of {result['user_id']})"
+    return [TextContent(type="text", text=f"Appeal submitted{on_behalf}. Credit score: {result['submissions']} submissions, {result['reactions_received']} reactions received ({result['total']} total)")]
 
 
 def _handle_appeals(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
