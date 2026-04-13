@@ -16,7 +16,7 @@ Dugg is an MCP server that acts as a shared, searchable filing cabinet for links
 - **Resources** — URLs with enriched metadata, transcripts, notes, and tags
 - **Collections** — Groups of resources (private or shared)
 - **Tags** — Human or agent-generated labels for categorization and filtering
-- **Share rules** — Tag-based filters that control what collaborators see (e.g., share AI stuff with Rocco, but not personal vlogs)
+- **Share rules** — Tag-based filters that control what collaborators see (e.g., share AI stuff with colleagues who care, but not personal vlogs)
 - **Publishing** — Flag resources for publishing to named targets (e.g., `public`, `aev-team`, `inner-circle`). One local source of truth, selective outward publishing
 - **Silent reactions** — Subscribers can tap/star resources. Only the publisher sees aggregate counts — no public signal, no social pressure
 - **Instances** — Hosted Dugg deployments with topics and access modes (public or invite-only)
