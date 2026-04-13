@@ -289,6 +289,8 @@ async def list_tools() -> list[Tool]:
                     "access_mode": {"type": "string", "enum": ["public", "invite"], "description": "public = anyone can subscribe, invite = member-invites-member", "default": "invite"},
                     "rate_limit_initial": {"type": "integer", "description": "Starting daily post cap for new members (default: 5)", "default": 5},
                     "rate_limit_growth": {"type": "integer", "description": "Additional posts/day earned per day of membership (default: 2)", "default": 2},
+                    "read_horizon_base_days": {"type": "integer", "description": "Days of content history visible to new members (default: 30, -1 for full history)", "default": 30},
+                    "read_horizon_growth": {"type": "integer", "description": "Extra days of visibility earned per week of membership (default: 7)", "default": 7},
                     "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
                 },
                 "required": ["name"],
@@ -315,6 +317,8 @@ async def list_tools() -> list[Tool]:
                     "topic": {"type": "string", "description": "New topic description", "default": ""},
                     "access_mode": {"type": "string", "enum": ["public", "invite"], "description": "New access mode", "default": ""},
                     "endpoint_url": {"type": "string", "description": "Remote endpoint URL for receiving published resources", "default": ""},
+                    "read_horizon_base_days": {"type": "integer", "description": "Days of content history visible to new members (-1 for full history)"},
+                    "read_horizon_growth": {"type": "integer", "description": "Extra days of visibility earned per week of membership"},
                     "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
                 },
                 "required": ["instance_id"],
@@ -952,7 +956,7 @@ def _handle_link(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
 def _handle_related(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
     resource_id = args["resource_id"]
     limit = args.get("limit", 10)
-    edges = d.get_related(resource_id, limit=limit)
+    edges = d.get_related(resource_id, user_id=user_id, limit=limit)
     if not edges:
         return [TextContent(type="text", text=f"No connections found for {resource_id}")]
     lines = [f"{len(edges)} connection(s):\n"]
@@ -1036,13 +1040,18 @@ def _handle_instance_create(d: DuggDB, user_id: str, args: dict) -> list[TextCon
     access_mode = args.get("access_mode", "invite")
     rate_limit_initial = args.get("rate_limit_initial", 5)
     rate_limit_growth = args.get("rate_limit_growth", 2)
+    read_horizon_base_days = args.get("read_horizon_base_days", 30)
+    read_horizon_growth = args.get("read_horizon_growth", 7)
     result = d.create_instance(name, user_id, topic=topic, access_mode=access_mode,
-                               rate_limit_initial=rate_limit_initial, rate_limit_growth=rate_limit_growth)
+                               rate_limit_initial=rate_limit_initial, rate_limit_growth=rate_limit_growth,
+                               read_horizon_base_days=read_horizon_base_days, read_horizon_growth=read_horizon_growth)
     lines = [f"Created Dugg instance: {result['name']} [{result['id']}]"]
     lines.append(f"Access: {result['access_mode']}")
     if topic:
         lines.append(f"Topic: {topic}")
     lines.append(f"Rate limit: {result['rate_limit_initial']} initial, +{result['rate_limit_growth']}/day")
+    horizon_desc = "full history" if result['read_horizon_base_days'] == -1 else f"{result['read_horizon_base_days']}d base, +{result['read_horizon_growth']}d/week"
+    lines.append(f"Read horizon: {horizon_desc}")
     return [TextContent(type="text", text="\n".join(lines))]
 
 
@@ -1069,6 +1078,10 @@ def _handle_instance_update(d: DuggDB, user_id: str, args: dict) -> list[TextCon
         updates["access_mode"] = args["access_mode"]
     if args.get("endpoint_url"):
         updates["endpoint_url"] = args["endpoint_url"]
+    if "read_horizon_base_days" in args and args["read_horizon_base_days"] is not None:
+        updates["read_horizon_base_days"] = args["read_horizon_base_days"]
+    if "read_horizon_growth" in args and args["read_horizon_growth"] is not None:
+        updates["read_horizon_growth"] = args["read_horizon_growth"]
     result = d.update_instance(instance_id, user_id, **updates)
     if not result:
         return [TextContent(type="text", text=f"Instance {instance_id} not found or you're not the owner")]
@@ -1076,6 +1089,10 @@ def _handle_instance_update(d: DuggDB, user_id: str, args: dict) -> list[TextCon
              f"Topic: {result['topic']}", f"Access: {result['access_mode']}"]
     if result.get("endpoint_url"):
         lines.append(f"Endpoint: {result['endpoint_url']}")
+    horizon_base = result.get('read_horizon_base_days', 30)
+    horizon_growth = result.get('read_horizon_growth', 7)
+    horizon_desc = "full history" if horizon_base == -1 else f"{horizon_base}d base, +{horizon_growth}d/week"
+    lines.append(f"Read horizon: {horizon_desc}")
     return [TextContent(type="text", text="\n".join(lines))]
 
 

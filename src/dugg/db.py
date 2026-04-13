@@ -69,6 +69,8 @@ class DuggDB:
                 endpoint_url TEXT DEFAULT '',
                 rate_limit_initial INTEGER DEFAULT 5,
                 rate_limit_growth INTEGER DEFAULT 2,
+                read_horizon_base_days INTEGER DEFAULT 30,
+                read_horizon_growth INTEGER DEFAULT 7,
                 owner_id TEXT NOT NULL REFERENCES users(id),
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -235,6 +237,16 @@ class DuggDB:
             END;
         """)
         self.conn.commit()
+        self._migrate()
+
+    def _migrate(self):
+        """Run idempotent schema migrations for new columns."""
+        cursor = self.conn.execute("PRAGMA table_info(dugg_instances)")
+        existing_cols = {row[1] for row in cursor.fetchall()}
+        if "read_horizon_base_days" not in existing_cols:
+            self.conn.execute("ALTER TABLE dugg_instances ADD COLUMN read_horizon_base_days INTEGER DEFAULT 30")
+            self.conn.execute("ALTER TABLE dugg_instances ADD COLUMN read_horizon_growth INTEGER DEFAULT 7")
+            self.conn.commit()
 
     def close(self):
         self.conn.close()
@@ -418,6 +430,10 @@ class DuggDB:
             accessible = [collection_id]
 
         placeholders = ",".join("?" for _ in accessible)
+        horizon_filters = self._build_horizon_filters(user_id, accessible)
+
+        # Build horizon WHERE clause
+        horizon_sql, horizon_params = self._horizon_where_clause(user_id, accessible, horizon_filters)
 
         if query.strip():
             # FTS5 search
@@ -428,19 +444,21 @@ class DuggDB:
                 JOIN resources r ON r.rowid = resources_fts.rowid
                 WHERE resources_fts MATCH ?
                   AND r.collection_id IN ({placeholders})
+                  {horizon_sql}
                 ORDER BY resources_fts.rank
                 LIMIT ?
             """
-            params = [fts_query] + accessible + [limit]
+            params = [fts_query] + accessible + horizon_params + [limit]
         else:
             sql = f"""
                 SELECT r.*, 0 as rank
                 FROM resources r
                 WHERE r.collection_id IN ({placeholders})
+                  {horizon_sql}
                 ORDER BY r.created_at DESC
                 LIMIT ?
             """
-            params = accessible + [limit]
+            params = accessible + horizon_params + [limit]
 
         rows = self.conn.execute(sql, params).fetchall()
         results = []
@@ -455,16 +473,20 @@ class DuggDB:
         return results
 
     def get_feed(self, user_id: str, limit: int = 50) -> list[dict]:
-        """Get all resources across collections the user has access to, respecting share rules."""
+        """Get all resources across collections the user has access to, respecting share rules and read horizon."""
         accessible = self._accessible_collection_ids(user_id)
         if not accessible:
             return []
 
+        horizon_filters = self._build_horizon_filters(user_id, accessible)
+        horizon_sql, horizon_params = self._horizon_where_clause(user_id, accessible, horizon_filters)
+
         placeholders = ",".join("?" for _ in accessible)
-        rows = self.conn.execute(
-            f"SELECT * FROM resources WHERE collection_id IN ({placeholders}) ORDER BY created_at DESC LIMIT ?",
-            accessible + [limit],
-        ).fetchall()
+        # Use 'r' alias to match horizon clause
+        sql = f"SELECT r.* FROM resources r WHERE r.collection_id IN ({placeholders}){horizon_sql} ORDER BY r.created_at DESC LIMIT ?"
+        params = list(accessible) + horizon_params + [limit]
+
+        rows = self.conn.execute(sql, params).fetchall()
 
         results = []
         for r in rows:
@@ -549,14 +571,36 @@ class DuggDB:
         self.conn.commit()
         return {"id": edge_id, "resource_a": resource_a, "resource_b": resource_b, "relationship_type": relationship_type, "confidence": confidence}
 
-    def get_related(self, resource_id: str, limit: int = 10) -> list[dict]:
+    def get_related(self, resource_id: str, user_id: Optional[str] = None, limit: int = 10) -> list[dict]:
         rows = self.conn.execute(
             """SELECT * FROM resource_edges
                WHERE resource_a = ? OR resource_b = ?
                ORDER BY confidence DESC LIMIT ?""",
             (resource_id, resource_id, limit),
         ).fetchall()
-        return [dict(r) for r in rows]
+        edges = [dict(r) for r in rows]
+        if not user_id:
+            return edges
+
+        # Filter out edges pointing to resources outside the user's read horizon
+        filtered = []
+        for e in edges:
+            other_id = e["resource_b"] if e["resource_a"] == resource_id else e["resource_a"]
+            other = self.get_resource(other_id)
+            if not other:
+                continue
+            # Own resources always visible
+            if other.get("submitted_by") == user_id:
+                filtered.append(e)
+                continue
+            inst = self._get_instance_for_collection_owner(other["collection_id"])
+            if not inst:
+                filtered.append(e)
+                continue
+            cutoff = self.visible_since(user_id, inst["id"])
+            if cutoff is None or other["created_at"] >= cutoff:
+                filtered.append(e)
+        return filtered
 
     # --- Publishing ---
 
@@ -683,12 +727,16 @@ class DuggDB:
     # --- Instances ---
 
     def create_instance(self, name: str, owner_id: str, topic: str = "", access_mode: str = "invite",
-                        rate_limit_initial: int = 5, rate_limit_growth: int = 2) -> dict:
+                        rate_limit_initial: int = 5, rate_limit_growth: int = 2,
+                        read_horizon_base_days: int = 30, read_horizon_growth: int = 7) -> dict:
         inst_id = _uuid()
         now = _now()
         self.conn.execute(
-            "INSERT INTO dugg_instances (id, name, topic, access_mode, rate_limit_initial, rate_limit_growth, owner_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (inst_id, name, topic, access_mode, rate_limit_initial, rate_limit_growth, owner_id, now, now),
+            """INSERT INTO dugg_instances (id, name, topic, access_mode, rate_limit_initial, rate_limit_growth,
+               read_horizon_base_days, read_horizon_growth, owner_id, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (inst_id, name, topic, access_mode, rate_limit_initial, rate_limit_growth,
+             read_horizon_base_days, read_horizon_growth, owner_id, now, now),
         )
         # Owner is auto-subscribed
         self.conn.execute(
@@ -698,6 +746,7 @@ class DuggDB:
         self.conn.commit()
         return {"id": inst_id, "name": name, "topic": topic, "access_mode": access_mode,
                 "rate_limit_initial": rate_limit_initial, "rate_limit_growth": rate_limit_growth,
+                "read_horizon_base_days": read_horizon_base_days, "read_horizon_growth": read_horizon_growth,
                 "owner_id": owner_id, "created_at": now}
 
     def get_instance(self, instance_id: str) -> Optional[dict]:
@@ -718,7 +767,8 @@ class DuggDB:
         inst = self.get_instance(instance_id)
         if not inst or inst["owner_id"] != owner_id:
             return None
-        allowed = {"name", "topic", "access_mode", "endpoint_url", "rate_limit_initial", "rate_limit_growth"}
+        allowed = {"name", "topic", "access_mode", "endpoint_url", "rate_limit_initial", "rate_limit_growth",
+                   "read_horizon_base_days", "read_horizon_growth"}
         updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
         if not updates:
             return inst
@@ -1002,6 +1052,66 @@ class DuggDB:
             (user_id,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    # --- Read Horizon ---
+
+    def visible_since(self, user_id: str, instance_id: str) -> Optional[str]:
+        """Compute the earliest date a user can see content from, based on join date + tenure.
+
+        Returns an ISO timestamp string, or None if the user can see everything.
+        A read_horizon_base_days of -1 means full history (no restriction).
+        """
+        inst = self.get_instance(instance_id)
+        if not inst:
+            return None
+
+        # Owner sees everything
+        if inst["owner_id"] == user_id:
+            return None
+
+        base_days = inst.get("read_horizon_base_days", 30)
+        growth = inst.get("read_horizon_growth", 7)
+
+        # -1 means full history
+        if base_days == -1:
+            return None
+
+        # Find the user's earliest membership join date across collections owned by the instance owner
+        row = self.conn.execute(
+            """SELECT MIN(cm.joined_at) as earliest_join
+               FROM collection_members cm
+               JOIN collections c ON cm.collection_id = c.id
+               WHERE cm.user_id = ? AND c.created_by = ? AND cm.status = 'active'""",
+            (user_id, inst["owner_id"]),
+        ).fetchone()
+
+        if not row or not row["earliest_join"]:
+            # Not a member — use base_days from now
+            cutoff = datetime.now(timezone.utc) - timedelta(days=base_days)
+            return cutoff.isoformat()
+
+        now = datetime.now(timezone.utc)
+        try:
+            joined = datetime.fromisoformat(row["earliest_join"].replace("Z", "+00:00"))
+            weeks_member = max(0, (now - joined).days // 7)
+        except (ValueError, AttributeError):
+            weeks_member = 0
+
+        # Total visible days = base + (weeks_member * growth)
+        visible_days = base_days + (weeks_member * growth)
+        cutoff = now - timedelta(days=visible_days)
+        return cutoff.isoformat()
+
+    def _get_instance_for_collection_owner(self, collection_id: str) -> Optional[dict]:
+        """Get the instance owned by a collection's owner (for horizon/policy lookups)."""
+        coll = self.conn.execute("SELECT created_by FROM collections WHERE id = ?", (collection_id,)).fetchone()
+        if not coll:
+            return None
+        row = self.conn.execute(
+            "SELECT * FROM dugg_instances WHERE owner_id = ? ORDER BY created_at LIMIT 1",
+            (coll["created_by"],),
+        ).fetchone()
+        return dict(row) if row else None
 
     # --- Rate Limiting ---
 
@@ -1475,3 +1585,41 @@ class DuggDB:
             "SELECT collection_id FROM collection_members WHERE user_id = ? AND status = 'active'", (user_id,)
         ).fetchall()
         return [r["collection_id"] for r in rows]
+
+    def _build_horizon_filters(self, user_id: str, collection_ids: list[str]) -> dict[str, str]:
+        """Build a mapping of collection_id -> cutoff ISO timestamp for read horizon filtering.
+        Only includes collections that have a horizon restriction."""
+        filters = {}
+        for coll_id in collection_ids:
+            inst = self._get_instance_for_collection_owner(coll_id)
+            if not inst:
+                continue
+            cutoff = self.visible_since(user_id, inst["id"])
+            if cutoff is not None:
+                filters[coll_id] = cutoff
+        return filters
+
+    def _horizon_where_clause(self, user_id: str, collection_ids: list[str],
+                               horizon_filters: dict[str, str]) -> tuple[str, list]:
+        """Build a SQL WHERE fragment for read horizon filtering.
+        Returns (sql_fragment, params) where sql_fragment starts with AND.
+        Own resources always pass."""
+        if not horizon_filters:
+            return "", []
+
+        params = []
+        # Resources pass if: submitted by user, or in unrestricted collection, or in restricted collection but after cutoff
+        conditions = [f"r.submitted_by = ?"]
+        params.append(user_id)
+
+        unrestricted = [c for c in collection_ids if c not in horizon_filters]
+        if unrestricted:
+            placeholders = ",".join("?" for _ in unrestricted)
+            conditions.append(f"r.collection_id IN ({placeholders})")
+            params.extend(unrestricted)
+
+        for coll_id, cutoff in horizon_filters.items():
+            conditions.append("(r.collection_id = ? AND r.created_at >= ?)")
+            params.extend([coll_id, cutoff])
+
+        return f" AND ({' OR '.join(conditions)})", params
