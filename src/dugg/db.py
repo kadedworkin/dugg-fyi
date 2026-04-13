@@ -73,6 +73,7 @@ class DuggDB:
                 read_horizon_growth INTEGER DEFAULT 7,
                 index_mode TEXT DEFAULT 'summary' CHECK(index_mode IN ('summary', 'full', 'metadata_only')),
                 local_storage_cap_mb INTEGER DEFAULT 512,
+                onboarding_mode TEXT DEFAULT 'graduated' CHECK(onboarding_mode IN ('graduated', 'full_access')),
                 owner_id TEXT NOT NULL REFERENCES users(id),
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -254,6 +255,8 @@ class DuggDB:
             self.conn.execute("ALTER TABLE dugg_instances ADD COLUMN index_mode TEXT DEFAULT 'summary'")
         if "local_storage_cap_mb" not in inst_cols:
             self.conn.execute("ALTER TABLE dugg_instances ADD COLUMN local_storage_cap_mb INTEGER DEFAULT 512")
+        if "onboarding_mode" not in inst_cols:
+            self.conn.execute("ALTER TABLE dugg_instances ADD COLUMN onboarding_mode TEXT DEFAULT 'graduated'")
 
         res_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(resources)").fetchall()}
         if "summary" not in res_cols:
@@ -782,15 +785,16 @@ class DuggDB:
     def create_instance(self, name: str, owner_id: str, topic: str = "", access_mode: str = "invite",
                         rate_limit_initial: int = 5, rate_limit_growth: int = 2,
                         read_horizon_base_days: int = 30, read_horizon_growth: int = 7,
-                        index_mode: str = "summary", local_storage_cap_mb: int = 512) -> dict:
+                        index_mode: str = "summary", local_storage_cap_mb: int = 512,
+                        onboarding_mode: str = "graduated") -> dict:
         inst_id = _uuid()
         now = _now()
         self.conn.execute(
             """INSERT INTO dugg_instances (id, name, topic, access_mode, rate_limit_initial, rate_limit_growth,
-               read_horizon_base_days, read_horizon_growth, index_mode, local_storage_cap_mb, owner_id, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               read_horizon_base_days, read_horizon_growth, index_mode, local_storage_cap_mb, onboarding_mode, owner_id, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (inst_id, name, topic, access_mode, rate_limit_initial, rate_limit_growth,
-             read_horizon_base_days, read_horizon_growth, index_mode, local_storage_cap_mb, owner_id, now, now),
+             read_horizon_base_days, read_horizon_growth, index_mode, local_storage_cap_mb, onboarding_mode, owner_id, now, now),
         )
         # Owner is auto-subscribed
         self.conn.execute(
@@ -802,7 +806,7 @@ class DuggDB:
                 "rate_limit_initial": rate_limit_initial, "rate_limit_growth": rate_limit_growth,
                 "read_horizon_base_days": read_horizon_base_days, "read_horizon_growth": read_horizon_growth,
                 "index_mode": index_mode, "local_storage_cap_mb": local_storage_cap_mb,
-                "owner_id": owner_id, "created_at": now}
+                "onboarding_mode": onboarding_mode, "owner_id": owner_id, "created_at": now}
 
     def get_instance(self, instance_id: str) -> Optional[dict]:
         row = self.conn.execute("SELECT * FROM dugg_instances WHERE id = ?", (instance_id,)).fetchone()
@@ -823,7 +827,7 @@ class DuggDB:
         if not inst or inst["owner_id"] != owner_id:
             return None
         allowed = {"name", "topic", "access_mode", "endpoint_url", "rate_limit_initial", "rate_limit_growth",
-                   "read_horizon_base_days", "read_horizon_growth", "index_mode", "local_storage_cap_mb"}
+                   "read_horizon_base_days", "read_horizon_growth", "index_mode", "local_storage_cap_mb", "onboarding_mode"}
         updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
         if not updates:
             return inst
@@ -833,6 +837,41 @@ class DuggDB:
         self.conn.execute(f"UPDATE dugg_instances SET {set_clause} WHERE id = ?", values)
         self.conn.commit()
         return self.get_instance(instance_id)
+
+    def get_instance_policy(self, instance_id: str) -> Optional[dict]:
+        """Return the full policy dict for an instance."""
+        inst = self.get_instance(instance_id)
+        if not inst:
+            return None
+        return {
+            "instance_id": inst["id"],
+            "instance_name": inst["name"],
+            "read_horizon_base_days": inst.get("read_horizon_base_days", 30),
+            "read_horizon_growth": inst.get("read_horizon_growth", 7),
+            "index_mode": inst.get("index_mode", "summary"),
+            "local_storage_cap_mb": inst.get("local_storage_cap_mb", 512),
+            "onboarding_mode": inst.get("onboarding_mode", "graduated"),
+            "rate_limit_initial": inst.get("rate_limit_initial", 5),
+            "rate_limit_growth": inst.get("rate_limit_growth", 2),
+            "access_mode": inst.get("access_mode", "invite"),
+        }
+
+    def apply_onboarding_preset(self, instance_id: str, owner_id: str, mode: str) -> Optional[dict]:
+        """Apply an onboarding mode preset. 'full_access' sets read_horizon=-1, storage=-1, index_mode='full'."""
+        if mode == "full_access":
+            return self.update_instance(instance_id, owner_id,
+                                        onboarding_mode="full_access",
+                                        read_horizon_base_days=-1,
+                                        local_storage_cap_mb=-1,
+                                        index_mode="full")
+        elif mode == "graduated":
+            return self.update_instance(instance_id, owner_id,
+                                        onboarding_mode="graduated",
+                                        read_horizon_base_days=30,
+                                        read_horizon_growth=7,
+                                        local_storage_cap_mb=512,
+                                        index_mode="summary")
+        return None
 
     def subscribe_to_instance(self, instance_id: str, user_id: str) -> dict:
         now = _now()

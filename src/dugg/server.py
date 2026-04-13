@@ -324,6 +324,7 @@ async def list_tools() -> list[Tool]:
                     "read_horizon_growth": {"type": "integer", "description": "Extra days of visibility earned per week of membership"},
                     "index_mode": {"type": "string", "enum": ["summary", "full", "metadata_only"], "description": "How ingested content is stored"},
                     "local_storage_cap_mb": {"type": "integer", "description": "Max local content storage in MB (-1 for unlimited)"},
+                    "onboarding_mode": {"type": "string", "enum": ["graduated", "full_access"], "description": "Onboarding preset: 'graduated' (default) or 'full_access' (sets horizon=-1, storage=-1, index=full)"},
                     "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
                 },
                 "required": ["instance_id"],
@@ -557,6 +558,18 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="dugg_instance_policy",
+            description="Get the current policy configuration for a Dugg instance — read horizon, index mode, storage cap, onboarding mode, and rate limits.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "instance_id": {"type": "string", "description": "Instance to get policy for"},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+                "required": ["instance_id"],
+            },
+        ),
+        Tool(
             name="dugg_welcome",
             description="Orientation for new connections. Returns instance topic(s), recent activity, and your rate limit status in one call. Run this first when connecting to a Dugg instance.",
             inputSchema={
@@ -649,6 +662,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = _handle_rate_limit(d, user_id, arguments)
         elif name == "dugg_rate_limit_status":
             result = _handle_rate_limit_status(d, user_id, arguments)
+        elif name == "dugg_instance_policy":
+            result = _handle_instance_policy(d, user_id, arguments)
         elif name == "dugg_get":
             result = _handle_get(d, user_id, arguments)
         elif name == "dugg_welcome":
@@ -1104,7 +1119,14 @@ def _handle_instance_update(d: DuggDB, user_id: str, args: dict) -> list[TextCon
         updates["index_mode"] = args["index_mode"]
     if "local_storage_cap_mb" in args and args["local_storage_cap_mb"] is not None:
         updates["local_storage_cap_mb"] = args["local_storage_cap_mb"]
-    result = d.update_instance(instance_id, user_id, **updates)
+    # Handle onboarding_mode preset — overrides individual settings
+    onboarding_mode = args.get("onboarding_mode", "")
+    if onboarding_mode == "full_access":
+        result = d.apply_onboarding_preset(instance_id, user_id, "full_access")
+    elif onboarding_mode == "graduated":
+        result = d.apply_onboarding_preset(instance_id, user_id, "graduated")
+    else:
+        result = d.update_instance(instance_id, user_id, **updates)
     if not result:
         return [TextContent(type="text", text=f"Instance {instance_id} not found or you're not the owner")]
     lines = [f"Updated instance: {result['name']} [{result['id']}]",
@@ -1118,6 +1140,24 @@ def _handle_instance_update(d: DuggDB, user_id: str, args: dict) -> list[TextCon
     lines.append(f"Index mode: {result.get('index_mode', 'summary')}")
     cap = result.get('local_storage_cap_mb', 512)
     lines.append(f"Storage cap: {'unlimited' if cap == -1 else f'{cap} MB'}")
+    return [TextContent(type="text", text="\n".join(lines))]
+
+
+def _handle_instance_policy(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    instance_id = args["instance_id"]
+    policy = d.get_instance_policy(instance_id)
+    if not policy:
+        return [TextContent(type="text", text=f"Instance {instance_id} not found")]
+    lines = [f"Policy for {policy['instance_name']} [{policy['instance_id']}]:\n"]
+    lines.append(f"Onboarding mode: {policy['onboarding_mode']}")
+    horizon_base = policy['read_horizon_base_days']
+    horizon_desc = "full history" if horizon_base == -1 else f"{horizon_base}d base, +{policy['read_horizon_growth']}d/week"
+    lines.append(f"Read horizon: {horizon_desc}")
+    lines.append(f"Index mode: {policy['index_mode']}")
+    cap = policy['local_storage_cap_mb']
+    lines.append(f"Storage cap: {'unlimited' if cap == -1 else f'{cap} MB'}")
+    lines.append(f"Rate limit: {policy['rate_limit_initial']} initial, +{policy['rate_limit_growth']}/day")
+    lines.append(f"Access mode: {policy['access_mode']}")
     return [TextContent(type="text", text="\n".join(lines))]
 
 
