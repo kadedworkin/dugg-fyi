@@ -291,7 +291,7 @@ Hosted Dugg deployments with topic descriptors and access control.
 
 ```
 # Create an invite-only instance
-dugg_instance_create(name="Chino Bandito", topic="Food, restaurants, recipes in the Phoenix area", access_mode="invite")
+dugg_instance_create(name="Chino Bandido", topic="Food, restaurants, recipes in the Phoenix area", access_mode="invite")
 
 # Create a public instance anyone can subscribe to
 dugg_instance_create(name="AI Research", topic="AI agents, LLMs, machine learning papers", access_mode="public")
