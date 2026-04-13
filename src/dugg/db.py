@@ -71,6 +71,7 @@ class DuggDB:
                 rate_limit_growth INTEGER DEFAULT 2,
                 read_horizon_base_days INTEGER DEFAULT 30,
                 read_horizon_growth INTEGER DEFAULT 7,
+                index_mode TEXT DEFAULT 'summary' CHECK(index_mode IN ('summary', 'full', 'metadata_only')),
                 owner_id TEXT NOT NULL REFERENCES users(id),
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -94,6 +95,7 @@ class DuggDB:
                 transcript TEXT DEFAULT '',
                 raw_metadata TEXT DEFAULT '{}',
                 note TEXT DEFAULT '',
+                summary TEXT DEFAULT '',
                 submitted_by TEXT NOT NULL REFERENCES users(id),
                 collection_id TEXT NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
                 created_at TEXT NOT NULL,
@@ -214,26 +216,26 @@ class DuggDB:
             );
 
             CREATE VIRTUAL TABLE IF NOT EXISTS resources_fts USING fts5(
-                title, description, author, transcript, note,
+                title, description, author, transcript, note, summary,
                 content='resources',
                 content_rowid='rowid'
             );
 
             CREATE TRIGGER IF NOT EXISTS resources_ai AFTER INSERT ON resources BEGIN
-                INSERT INTO resources_fts(rowid, title, description, author, transcript, note)
-                VALUES (new.rowid, new.title, new.description, new.author, new.transcript, new.note);
+                INSERT INTO resources_fts(rowid, title, description, author, transcript, note, summary)
+                VALUES (new.rowid, new.title, new.description, new.author, new.transcript, new.note, new.summary);
             END;
 
             CREATE TRIGGER IF NOT EXISTS resources_ad AFTER DELETE ON resources BEGIN
-                INSERT INTO resources_fts(resources_fts, rowid, title, description, author, transcript, note)
-                VALUES ('delete', old.rowid, old.title, old.description, old.author, old.transcript, old.note);
+                INSERT INTO resources_fts(resources_fts, rowid, title, description, author, transcript, note, summary)
+                VALUES ('delete', old.rowid, old.title, old.description, old.author, old.transcript, old.note, old.summary);
             END;
 
             CREATE TRIGGER IF NOT EXISTS resources_au AFTER UPDATE ON resources BEGIN
-                INSERT INTO resources_fts(resources_fts, rowid, title, description, author, transcript, note)
-                VALUES ('delete', old.rowid, old.title, old.description, old.author, old.transcript, old.note);
-                INSERT INTO resources_fts(rowid, title, description, author, transcript, note)
-                VALUES (new.rowid, new.title, new.description, new.author, new.transcript, new.note);
+                INSERT INTO resources_fts(resources_fts, rowid, title, description, author, transcript, note, summary)
+                VALUES ('delete', old.rowid, old.title, old.description, old.author, old.transcript, old.note, old.summary);
+                INSERT INTO resources_fts(rowid, title, description, author, transcript, note, summary)
+                VALUES (new.rowid, new.title, new.description, new.author, new.transcript, new.note, new.summary);
             END;
         """)
         self.conn.commit()
@@ -241,12 +243,44 @@ class DuggDB:
 
     def _migrate(self):
         """Run idempotent schema migrations for new columns."""
-        cursor = self.conn.execute("PRAGMA table_info(dugg_instances)")
-        existing_cols = {row[1] for row in cursor.fetchall()}
-        if "read_horizon_base_days" not in existing_cols:
+        inst_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(dugg_instances)").fetchall()}
+        if "read_horizon_base_days" not in inst_cols:
             self.conn.execute("ALTER TABLE dugg_instances ADD COLUMN read_horizon_base_days INTEGER DEFAULT 30")
             self.conn.execute("ALTER TABLE dugg_instances ADD COLUMN read_horizon_growth INTEGER DEFAULT 7")
-            self.conn.commit()
+        if "index_mode" not in inst_cols:
+            self.conn.execute("ALTER TABLE dugg_instances ADD COLUMN index_mode TEXT DEFAULT 'summary'")
+
+        res_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(resources)").fetchall()}
+        if "summary" not in res_cols:
+            self.conn.execute("ALTER TABLE resources ADD COLUMN summary TEXT DEFAULT ''")
+
+        # Rebuild FTS5 triggers if summary column was added (triggers reference summary now)
+        # This is safe — DROP TRIGGER IF EXISTS is idempotent
+        if "summary" not in res_cols:
+            self.conn.executescript("""
+                DROP TRIGGER IF EXISTS resources_ai;
+                DROP TRIGGER IF EXISTS resources_ad;
+                DROP TRIGGER IF EXISTS resources_au;
+
+                CREATE TRIGGER resources_ai AFTER INSERT ON resources BEGIN
+                    INSERT INTO resources_fts(rowid, title, description, author, transcript, note, summary)
+                    VALUES (new.rowid, new.title, new.description, new.author, new.transcript, new.note, new.summary);
+                END;
+
+                CREATE TRIGGER resources_ad AFTER DELETE ON resources BEGIN
+                    INSERT INTO resources_fts(resources_fts, rowid, title, description, author, transcript, note, summary)
+                    VALUES ('delete', old.rowid, old.title, old.description, old.author, old.transcript, old.note, old.summary);
+                END;
+
+                CREATE TRIGGER resources_au AFTER UPDATE ON resources BEGIN
+                    INSERT INTO resources_fts(resources_fts, rowid, title, description, author, transcript, note, summary)
+                    VALUES ('delete', old.rowid, old.title, old.description, old.author, old.transcript, old.note, old.summary);
+                    INSERT INTO resources_fts(rowid, title, description, author, transcript, note, summary)
+                    VALUES (new.rowid, new.title, new.description, new.author, new.transcript, new.note, new.summary);
+                END;
+            """)
+
+        self.conn.commit()
 
     def close(self):
         self.conn.close()
@@ -362,15 +396,16 @@ class DuggDB:
         raw_metadata: Optional[dict] = None,
         tags: Optional[list[str]] = None,
         tag_source: str = "human",
+        summary: str = "",
     ) -> dict:
         res_id = _uuid()
         now = _now()
         meta_json = json.dumps(raw_metadata or {})
         self.conn.execute(
             """INSERT INTO resources
-               (id, url, title, description, thumbnail, source_type, author, transcript, raw_metadata, note, submitted_by, collection_id, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (res_id, url, title, description, thumbnail, source_type, author, transcript, meta_json, note, submitted_by, collection_id, now, now),
+               (id, url, title, description, thumbnail, source_type, author, transcript, raw_metadata, note, summary, submitted_by, collection_id, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (res_id, url, title, description, thumbnail, source_type, author, transcript, meta_json, note, summary, submitted_by, collection_id, now, now),
         )
         if tags:
             for tag in tags:
@@ -386,7 +421,7 @@ class DuggDB:
         return result
 
     def update_resource(self, resource_id: str, **fields) -> Optional[dict]:
-        allowed = {"title", "description", "thumbnail", "source_type", "author", "transcript", "raw_metadata", "note", "enriched_at"}
+        allowed = {"title", "description", "thumbnail", "source_type", "author", "transcript", "raw_metadata", "note", "enriched_at", "summary"}
         updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
         if not updates:
             return self.get_resource(resource_id)
@@ -728,15 +763,16 @@ class DuggDB:
 
     def create_instance(self, name: str, owner_id: str, topic: str = "", access_mode: str = "invite",
                         rate_limit_initial: int = 5, rate_limit_growth: int = 2,
-                        read_horizon_base_days: int = 30, read_horizon_growth: int = 7) -> dict:
+                        read_horizon_base_days: int = 30, read_horizon_growth: int = 7,
+                        index_mode: str = "summary") -> dict:
         inst_id = _uuid()
         now = _now()
         self.conn.execute(
             """INSERT INTO dugg_instances (id, name, topic, access_mode, rate_limit_initial, rate_limit_growth,
-               read_horizon_base_days, read_horizon_growth, owner_id, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               read_horizon_base_days, read_horizon_growth, index_mode, owner_id, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (inst_id, name, topic, access_mode, rate_limit_initial, rate_limit_growth,
-             read_horizon_base_days, read_horizon_growth, owner_id, now, now),
+             read_horizon_base_days, read_horizon_growth, index_mode, owner_id, now, now),
         )
         # Owner is auto-subscribed
         self.conn.execute(
@@ -747,7 +783,7 @@ class DuggDB:
         return {"id": inst_id, "name": name, "topic": topic, "access_mode": access_mode,
                 "rate_limit_initial": rate_limit_initial, "rate_limit_growth": rate_limit_growth,
                 "read_horizon_base_days": read_horizon_base_days, "read_horizon_growth": read_horizon_growth,
-                "owner_id": owner_id, "created_at": now}
+                "index_mode": index_mode, "owner_id": owner_id, "created_at": now}
 
     def get_instance(self, instance_id: str) -> Optional[dict]:
         row = self.conn.execute("SELECT * FROM dugg_instances WHERE id = ?", (instance_id,)).fetchone()
@@ -768,7 +804,7 @@ class DuggDB:
         if not inst or inst["owner_id"] != owner_id:
             return None
         allowed = {"name", "topic", "access_mode", "endpoint_url", "rate_limit_initial", "rate_limit_growth",
-                   "read_horizon_base_days", "read_horizon_growth"}
+                   "read_horizon_base_days", "read_horizon_growth", "index_mode"}
         updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
         if not updates:
             return inst
@@ -1112,6 +1148,55 @@ class DuggDB:
             (coll["created_by"],),
         ).fetchone()
         return dict(row) if row else None
+
+    # --- Index Mode ---
+
+    def get_index_mode(self, collection_id: str) -> str:
+        """Get the index mode for a collection based on its owner's instance config."""
+        inst = self._get_instance_for_collection_owner(collection_id)
+        if not inst:
+            return "full"  # No instance = legacy full mode
+        return inst.get("index_mode", "summary")
+
+    def apply_index_policy(self, resource_id: str, collection_id: str,
+                           enriched_description: str = "", enriched_transcript: str = "",
+                           agent_summary: str = "") -> None:
+        """Apply the instance's index_mode policy to a resource after enrichment.
+
+        - 'full': keep everything (current behavior)
+        - 'summary': store summary, clear full transcript/description from resource (keep in FTS via summary)
+        - 'metadata_only': title + URL + tags only — clear description, transcript, summary
+        """
+        mode = self.get_index_mode(collection_id)
+
+        if mode == "full":
+            return  # Keep everything as-is
+
+        if mode == "summary":
+            # Generate summary if agent didn't provide one
+            summary = agent_summary
+            if not summary:
+                # Auto-generate from description + transcript
+                text = enriched_description or ""
+                if enriched_transcript:
+                    text = enriched_transcript if not text else f"{text} {enriched_transcript}"
+                if text:
+                    # Take first ~500 chars as a rough 2-3 sentence summary
+                    sentences = text.replace("\n", " ").split(". ")
+                    summary_parts = []
+                    char_count = 0
+                    for s in sentences:
+                        if char_count > 400:
+                            break
+                        summary_parts.append(s.strip())
+                        char_count += len(s)
+                    summary = ". ".join(summary_parts)
+                    if not summary.endswith("."):
+                        summary += "."
+
+            self.update_resource(resource_id, summary=summary, transcript="", description=summary)
+        elif mode == "metadata_only":
+            self.update_resource(resource_id, transcript="", description="", summary="")
 
     # --- Rate Limiting ---
 

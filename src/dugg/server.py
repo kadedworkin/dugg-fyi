@@ -79,6 +79,7 @@ async def list_tools() -> list[Tool]:
                     "title": {"type": "string", "description": "Override title (auto-detected if omitted)", "default": ""},
                     "description": {"type": "string", "description": "Override description (auto-detected if omitted)", "default": ""},
                     "transcript": {"type": "string", "description": "Pre-processed transcript (auto-fetched for YouTube if omitted)", "default": ""},
+                    "summary": {"type": "string", "description": "Agent-provided summary (takes priority over auto-generation)", "default": ""},
                     "api_key": {"type": "string", "description": "API key for authentication (optional in local mode)", "default": ""},
                 },
                 "required": ["url"],
@@ -291,6 +292,7 @@ async def list_tools() -> list[Tool]:
                     "rate_limit_growth": {"type": "integer", "description": "Additional posts/day earned per day of membership (default: 2)", "default": 2},
                     "read_horizon_base_days": {"type": "integer", "description": "Days of content history visible to new members (default: 30, -1 for full history)", "default": 30},
                     "read_horizon_growth": {"type": "integer", "description": "Extra days of visibility earned per week of membership (default: 7)", "default": 7},
+                    "index_mode": {"type": "string", "enum": ["summary", "full", "metadata_only"], "description": "How ingested content is stored: summary (default), full, or metadata_only", "default": "summary"},
                     "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
                 },
                 "required": ["name"],
@@ -319,6 +321,7 @@ async def list_tools() -> list[Tool]:
                     "endpoint_url": {"type": "string", "description": "Remote endpoint URL for receiving published resources", "default": ""},
                     "read_horizon_base_days": {"type": "integer", "description": "Days of content history visible to new members (-1 for full history)"},
                     "read_horizon_growth": {"type": "integer", "description": "Extra days of visibility earned per week of membership"},
+                    "index_mode": {"type": "string", "enum": ["summary", "full", "metadata_only"], "description": "How ingested content is stored"},
                     "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
                 },
                 "required": ["instance_id"],
@@ -720,6 +723,13 @@ async def _handle_add(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
     from dugg.db import _now
     d.update_resource(resource["id"], enriched_at=_now())
 
+    # Apply index policy (summary/full/metadata_only) based on instance config
+    agent_summary = args.get("summary", "")
+    d.apply_index_policy(resource["id"], coll_id,
+                         enriched_description=enriched.get("description", ""),
+                         enriched_transcript=enriched.get("transcript", ""),
+                         agent_summary=agent_summary)
+
     summary = f"Added: {resource.get('title') or url}\n"
     summary += f"ID: {resource['id']}\n"
     summary += f"Type: {resource['source_type']}\n"
@@ -1042,9 +1052,11 @@ def _handle_instance_create(d: DuggDB, user_id: str, args: dict) -> list[TextCon
     rate_limit_growth = args.get("rate_limit_growth", 2)
     read_horizon_base_days = args.get("read_horizon_base_days", 30)
     read_horizon_growth = args.get("read_horizon_growth", 7)
+    index_mode = args.get("index_mode", "summary")
     result = d.create_instance(name, user_id, topic=topic, access_mode=access_mode,
                                rate_limit_initial=rate_limit_initial, rate_limit_growth=rate_limit_growth,
-                               read_horizon_base_days=read_horizon_base_days, read_horizon_growth=read_horizon_growth)
+                               read_horizon_base_days=read_horizon_base_days, read_horizon_growth=read_horizon_growth,
+                               index_mode=index_mode)
     lines = [f"Created Dugg instance: {result['name']} [{result['id']}]"]
     lines.append(f"Access: {result['access_mode']}")
     if topic:
@@ -1052,6 +1064,7 @@ def _handle_instance_create(d: DuggDB, user_id: str, args: dict) -> list[TextCon
     lines.append(f"Rate limit: {result['rate_limit_initial']} initial, +{result['rate_limit_growth']}/day")
     horizon_desc = "full history" if result['read_horizon_base_days'] == -1 else f"{result['read_horizon_base_days']}d base, +{result['read_horizon_growth']}d/week"
     lines.append(f"Read horizon: {horizon_desc}")
+    lines.append(f"Index mode: {result.get('index_mode', 'summary')}")
     return [TextContent(type="text", text="\n".join(lines))]
 
 
@@ -1082,6 +1095,8 @@ def _handle_instance_update(d: DuggDB, user_id: str, args: dict) -> list[TextCon
         updates["read_horizon_base_days"] = args["read_horizon_base_days"]
     if "read_horizon_growth" in args and args["read_horizon_growth"] is not None:
         updates["read_horizon_growth"] = args["read_horizon_growth"]
+    if args.get("index_mode"):
+        updates["index_mode"] = args["index_mode"]
     result = d.update_instance(instance_id, user_id, **updates)
     if not result:
         return [TextContent(type="text", text=f"Instance {instance_id} not found or you're not the owner")]
@@ -1093,6 +1108,7 @@ def _handle_instance_update(d: DuggDB, user_id: str, args: dict) -> list[TextCon
     horizon_growth = result.get('read_horizon_growth', 7)
     horizon_desc = "full history" if horizon_base == -1 else f"{horizon_base}d base, +{horizon_growth}d/week"
     lines.append(f"Read horizon: {horizon_desc}")
+    lines.append(f"Index mode: {result.get('index_mode', 'summary')}")
     return [TextContent(type="text", text="\n".join(lines))]
 
 
