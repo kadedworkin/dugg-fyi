@@ -1,9 +1,10 @@
 """SQLite + FTS5 database layer for Dugg."""
 
 import json
+import math
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -65,6 +66,7 @@ class DuggDB:
                 name TEXT NOT NULL,
                 topic TEXT DEFAULT '',
                 access_mode TEXT DEFAULT 'invite' CHECK(access_mode IN ('public', 'invite')),
+                endpoint_url TEXT DEFAULT '',
                 rate_limit_initial INTEGER DEFAULT 5,
                 rate_limit_growth INTEGER DEFAULT 2,
                 owner_id TEXT NOT NULL REFERENCES users(id),
@@ -142,6 +144,44 @@ class DuggDB:
                 reaction_type TEXT DEFAULT 'tap' CHECK(reaction_type IN ('tap', 'star', 'thumbsup')),
                 created_at TEXT NOT NULL,
                 UNIQUE(resource_id, user_id, reaction_type)
+            );
+
+            CREATE TABLE IF NOT EXISTS publish_queue (
+                id TEXT PRIMARY KEY,
+                resource_id TEXT NOT NULL REFERENCES resources(id) ON DELETE CASCADE,
+                target_instance_id TEXT NOT NULL REFERENCES dugg_instances(id),
+                target_name TEXT NOT NULL,
+                status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'delivering', 'delivered', 'failed')),
+                retry_count INTEGER DEFAULT 0,
+                max_retries INTEGER DEFAULT 5,
+                next_retry_at TEXT NOT NULL,
+                last_error TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS event_log (
+                id TEXT PRIMARY KEY,
+                event_type TEXT NOT NULL CHECK(event_type IN ('resource_added', 'resource_published', 'member_joined', 'member_banned', 'publish_delivered')),
+                instance_id TEXT REFERENCES dugg_instances(id),
+                collection_id TEXT REFERENCES collections(id),
+                actor_id TEXT REFERENCES users(id),
+                payload TEXT DEFAULT '{}',
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS webhook_subscriptions (
+                id TEXT PRIMARY KEY,
+                instance_id TEXT NOT NULL REFERENCES dugg_instances(id) ON DELETE CASCADE,
+                user_id TEXT NOT NULL REFERENCES users(id),
+                callback_url TEXT NOT NULL,
+                event_types TEXT DEFAULT '[]',
+                secret TEXT DEFAULT '',
+                status TEXT DEFAULT 'active' CHECK(status IN ('active', 'paused', 'failed')),
+                failure_count INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(instance_id, user_id, callback_url)
             );
 
             CREATE VIRTUAL TABLE IF NOT EXISTS resources_fts USING fts5(
@@ -262,11 +302,14 @@ class DuggDB:
             for tag in tags:
                 self._add_tag(res_id, tag, tag_source, now)
         self.conn.commit()
-        return {
+        result = {
             "id": res_id, "url": url, "title": title, "description": description,
             "source_type": source_type, "author": author, "note": note, "submitted_by": submitted_by,
             "collection_id": collection_id, "tags": tags or [], "created_at": now,
         }
+        self.emit_event("resource_added", actor_id=submitted_by, collection_id=collection_id,
+                        payload={"resource_id": res_id, "url": url, "title": title, "source_type": source_type})
+        return result
 
     def update_resource(self, resource_id: str, **fields) -> Optional[dict]:
         allowed = {"title", "description", "thumbnail", "source_type", "author", "transcript", "raw_metadata", "note", "enriched_at"}
@@ -456,7 +499,7 @@ class DuggDB:
     # --- Publishing ---
 
     def publish_resource(self, resource_id: str, targets: list[str]) -> list[dict]:
-        """Publish a resource to one or more named targets."""
+        """Publish a resource to one or more named targets. Also enqueues for remote delivery."""
         now = _now()
         results = []
         for target in targets:
@@ -468,6 +511,15 @@ class DuggDB:
             )
             results.append({"resource_id": resource_id, "target": target.lower().strip(), "published_at": now})
         self.conn.commit()
+        # Enqueue for remote delivery and emit events
+        resource = self.get_resource(resource_id)
+        coll_id = resource["collection_id"] if resource else None
+        for target in targets:
+            self.enqueue_publish(resource_id, target.lower().strip())
+            self.emit_event("resource_published", actor_id=resource["submitted_by"] if resource else None,
+                            collection_id=coll_id,
+                            payload={"resource_id": resource_id, "target": target.lower().strip(),
+                                     "title": resource.get("title", "") if resource else ""})
         return results
 
     def unpublish_resource(self, resource_id: str, targets: Optional[list[str]] = None):
@@ -595,7 +647,7 @@ class DuggDB:
         inst = self.get_instance(instance_id)
         if not inst or inst["owner_id"] != owner_id:
             return None
-        allowed = {"name", "topic", "access_mode", "rate_limit_initial", "rate_limit_growth"}
+        allowed = {"name", "topic", "access_mode", "endpoint_url", "rate_limit_initial", "rate_limit_growth"}
         updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
         if not updates:
             return inst
@@ -626,6 +678,8 @@ class DuggDB:
             (collection_id, invitee_id, inviter_id, now),
         )
         self.conn.commit()
+        self.emit_event("member_joined", actor_id=inviter_id, collection_id=collection_id,
+                        payload={"user_id": invitee_id, "invited_by": inviter_id})
         return {"collection_id": collection_id, "user_id": invitee_id, "invited_by": inviter_id, "joined_at": now}
 
     def get_invite_tree(self, collection_id: str, user_id: str) -> list[dict]:
@@ -717,6 +771,8 @@ class DuggDB:
                         banned.append(mid)
 
         self.conn.commit()
+        self.emit_event("member_banned", collection_id=collection_id,
+                        payload={"banned": banned, "survived": survived, "cascade": cascade})
         return {"banned": banned, "survived": survived}
 
     # --- Appeals ---
@@ -884,6 +940,343 @@ class DuggDB:
             "days_member": days_member,
             "reason": "ok" if current < cap else "rate limit exceeded",
         }
+
+    # --- Publish Queue ---
+
+    def enqueue_publish(self, resource_id: str, target_name: str) -> list[dict]:
+        """Enqueue a publish for delivery to all instances subscribed by the resource owner that match the target.
+
+        Finds instances with endpoint_url set, creates queue entries for each.
+        Returns list of queue entries created.
+        """
+        now = _now()
+        resource = self.get_resource(resource_id)
+        if not resource:
+            return []
+
+        # Find all instances with endpoint URLs (these are remote Dugg deployments)
+        rows = self.conn.execute(
+            "SELECT id, endpoint_url FROM dugg_instances WHERE endpoint_url != '' AND endpoint_url IS NOT NULL"
+        ).fetchall()
+
+        entries = []
+        for row in rows:
+            inst = dict(row)
+            queue_id = _uuid()
+            self.conn.execute(
+                """INSERT OR IGNORE INTO publish_queue
+                   (id, resource_id, target_instance_id, target_name, status, retry_count, max_retries, next_retry_at, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, 'pending', 0, 5, ?, ?, ?)""",
+                (queue_id, resource_id, inst["id"], target_name, now, now, now),
+            )
+            entries.append({
+                "id": queue_id, "resource_id": resource_id,
+                "target_instance_id": inst["id"], "target_name": target_name,
+                "status": "pending", "created_at": now,
+            })
+        self.conn.commit()
+        return entries
+
+    def get_pending_publishes(self, limit: int = 50) -> list[dict]:
+        """Get publish queue entries ready for delivery (pending + next_retry_at <= now)."""
+        now = _now()
+        rows = self.conn.execute(
+            """SELECT pq.*, di.endpoint_url, di.name as instance_name
+               FROM publish_queue pq
+               JOIN dugg_instances di ON pq.target_instance_id = di.id
+               WHERE pq.status IN ('pending', 'delivering')
+                 AND pq.next_retry_at <= ?
+               ORDER BY pq.created_at ASC
+               LIMIT ?""",
+            (now, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_publish_delivering(self, queue_id: str):
+        """Mark a queue entry as currently being delivered."""
+        self.conn.execute(
+            "UPDATE publish_queue SET status = 'delivering', updated_at = ? WHERE id = ?",
+            (_now(), queue_id),
+        )
+        self.conn.commit()
+
+    def mark_publish_delivered(self, queue_id: str):
+        """Mark a queue entry as successfully delivered."""
+        self.conn.execute(
+            "UPDATE publish_queue SET status = 'delivered', updated_at = ? WHERE id = ?",
+            (_now(), queue_id),
+        )
+        self.conn.commit()
+
+    def mark_publish_retry(self, queue_id: str, error: str):
+        """Increment retry count and schedule next attempt with exponential backoff."""
+        row = self.conn.execute("SELECT retry_count, max_retries FROM publish_queue WHERE id = ?", (queue_id,)).fetchone()
+        if not row:
+            return
+        retry_count = row["retry_count"] + 1
+        if retry_count >= row["max_retries"]:
+            self.conn.execute(
+                "UPDATE publish_queue SET status = 'failed', retry_count = ?, last_error = ?, updated_at = ? WHERE id = ?",
+                (retry_count, error, _now(), queue_id),
+            )
+        else:
+            # Exponential backoff: 30s, 2m, 8m, 32m, ~2h
+            delay_seconds = 30 * (4 ** retry_count)
+            next_retry = (datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)).isoformat()
+            self.conn.execute(
+                "UPDATE publish_queue SET status = 'pending', retry_count = ?, next_retry_at = ?, last_error = ?, updated_at = ? WHERE id = ?",
+                (retry_count, next_retry, error, _now(), queue_id),
+            )
+        self.conn.commit()
+
+    def get_publish_queue_status(self, user_id: Optional[str] = None) -> dict:
+        """Get publish queue stats. Optionally filter by user's resources."""
+        if user_id:
+            rows = self.conn.execute(
+                """SELECT pq.status, COUNT(*) as count
+                   FROM publish_queue pq
+                   JOIN resources r ON pq.resource_id = r.id
+                   WHERE r.submitted_by = ?
+                   GROUP BY pq.status""",
+                (user_id,),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT status, COUNT(*) as count FROM publish_queue GROUP BY status"
+            ).fetchall()
+        stats = {r["status"]: r["count"] for r in rows}
+        return {"pending": stats.get("pending", 0), "delivering": stats.get("delivering", 0),
+                "delivered": stats.get("delivered", 0), "failed": stats.get("failed", 0)}
+
+    def get_failed_publishes(self, limit: int = 20) -> list[dict]:
+        """Get failed publish queue entries for inspection."""
+        rows = self.conn.execute(
+            """SELECT pq.*, di.name as instance_name, di.endpoint_url
+               FROM publish_queue pq
+               JOIN dugg_instances di ON pq.target_instance_id = di.id
+               WHERE pq.status = 'failed'
+               ORDER BY pq.updated_at DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def retry_failed_publishes(self) -> int:
+        """Reset all failed publishes back to pending for another round of attempts."""
+        now = _now()
+        cursor = self.conn.execute(
+            "UPDATE publish_queue SET status = 'pending', retry_count = 0, next_retry_at = ?, updated_at = ? WHERE status = 'failed'",
+            (now, now),
+        )
+        self.conn.commit()
+        return cursor.rowcount
+
+    # --- Event Log ---
+
+    def emit_event(self, event_type: str, actor_id: Optional[str] = None,
+                   instance_id: Optional[str] = None, collection_id: Optional[str] = None,
+                   payload: Optional[dict] = None) -> dict:
+        """Log an event. Returns the event dict."""
+        event_id = _uuid()
+        now = _now()
+        self.conn.execute(
+            """INSERT INTO event_log (id, event_type, instance_id, collection_id, actor_id, payload, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (event_id, event_type, instance_id, collection_id, actor_id, json.dumps(payload or {}), now),
+        )
+        self.conn.commit()
+        return {"id": event_id, "event_type": event_type, "actor_id": actor_id,
+                "instance_id": instance_id, "collection_id": collection_id,
+                "payload": payload or {}, "created_at": now}
+
+    def get_events(self, user_id: str, event_types: Optional[list[str]] = None,
+                   since: Optional[str] = None, limit: int = 50) -> list[dict]:
+        """Get events for instances the user is subscribed to."""
+        # Get user's subscribed instance IDs
+        inst_rows = self.conn.execute(
+            "SELECT instance_id FROM instance_subscribers WHERE user_id = ?", (user_id,)
+        ).fetchall()
+        inst_ids = [r["instance_id"] for r in inst_rows]
+
+        # Also get user's collection IDs
+        coll_ids = self._accessible_collection_ids(user_id)
+
+        if not inst_ids and not coll_ids:
+            return []
+
+        conditions = []
+        params = []
+
+        if inst_ids:
+            placeholders = ",".join("?" for _ in inst_ids)
+            conditions.append(f"e.instance_id IN ({placeholders})")
+            params.extend(inst_ids)
+
+        if coll_ids:
+            placeholders = ",".join("?" for _ in coll_ids)
+            conditions.append(f"e.collection_id IN ({placeholders})")
+            params.extend(coll_ids)
+
+        where = f"({' OR '.join(conditions)})"
+
+        if event_types:
+            type_placeholders = ",".join("?" for _ in event_types)
+            where += f" AND e.event_type IN ({type_placeholders})"
+            params.extend(event_types)
+
+        if since:
+            where += " AND e.created_at > ?"
+            params.append(since)
+
+        params.append(limit)
+        rows = self.conn.execute(
+            f"SELECT e.* FROM event_log e WHERE {where} ORDER BY e.created_at DESC LIMIT ?",
+            params,
+        ).fetchall()
+
+        results = []
+        for r in rows:
+            d = dict(r)
+            d["payload"] = json.loads(d["payload"]) if d["payload"] else {}
+            results.append(d)
+        return results
+
+    # --- Webhook Subscriptions ---
+
+    def subscribe_webhook(self, instance_id: str, user_id: str, callback_url: str,
+                          event_types: Optional[list[str]] = None, secret: str = "") -> dict:
+        """Subscribe a webhook to an instance's events."""
+        sub_id = _uuid()
+        now = _now()
+        types_json = json.dumps(event_types or [])
+        self.conn.execute(
+            """INSERT INTO webhook_subscriptions (id, instance_id, user_id, callback_url, event_types, secret, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)
+               ON CONFLICT(instance_id, user_id, callback_url) DO UPDATE SET
+               event_types = ?, secret = ?, status = 'active', failure_count = 0, updated_at = ?""",
+            (sub_id, instance_id, user_id, callback_url, types_json, secret, now, now, types_json, secret, now),
+        )
+        self.conn.commit()
+        return {"id": sub_id, "instance_id": instance_id, "user_id": user_id,
+                "callback_url": callback_url, "event_types": event_types or [], "status": "active"}
+
+    def get_webhooks_for_event(self, event_type: str, instance_id: Optional[str] = None) -> list[dict]:
+        """Get active webhook subscriptions that match an event type."""
+        if instance_id:
+            rows = self.conn.execute(
+                "SELECT * FROM webhook_subscriptions WHERE instance_id = ? AND status = 'active'",
+                (instance_id,),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM webhook_subscriptions WHERE status = 'active'"
+            ).fetchall()
+
+        results = []
+        for r in rows:
+            d = dict(r)
+            d["event_types"] = json.loads(d["event_types"]) if d["event_types"] else []
+            # Empty event_types = subscribe to all
+            if not d["event_types"] or event_type in d["event_types"]:
+                results.append(d)
+        return results
+
+    def list_webhooks(self, user_id: str) -> list[dict]:
+        """List all webhook subscriptions for a user."""
+        rows = self.conn.execute(
+            "SELECT * FROM webhook_subscriptions WHERE user_id = ? ORDER BY created_at DESC",
+            (user_id,),
+        ).fetchall()
+        results = []
+        for r in rows:
+            d = dict(r)
+            d["event_types"] = json.loads(d["event_types"]) if d["event_types"] else []
+            results.append(d)
+        return results
+
+    def unsubscribe_webhook(self, webhook_id: str, user_id: str) -> bool:
+        """Remove a webhook subscription. Returns True if found and deleted."""
+        cursor = self.conn.execute(
+            "DELETE FROM webhook_subscriptions WHERE id = ? AND user_id = ?",
+            (webhook_id, user_id),
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def mark_webhook_failure(self, webhook_id: str):
+        """Increment failure count. Pause webhook after 5 consecutive failures."""
+        row = self.conn.execute("SELECT failure_count FROM webhook_subscriptions WHERE id = ?", (webhook_id,)).fetchone()
+        if not row:
+            return
+        new_count = row["failure_count"] + 1
+        new_status = "failed" if new_count >= 5 else "active"
+        self.conn.execute(
+            "UPDATE webhook_subscriptions SET failure_count = ?, status = ?, updated_at = ? WHERE id = ?",
+            (new_count, new_status, _now(), webhook_id),
+        )
+        self.conn.commit()
+
+    def mark_webhook_success(self, webhook_id: str):
+        """Reset failure count on successful delivery."""
+        self.conn.execute(
+            "UPDATE webhook_subscriptions SET failure_count = 0, updated_at = ? WHERE id = ?",
+            (_now(), webhook_id),
+        )
+        self.conn.commit()
+
+    # --- Inbound Publish (receiving from remote) ---
+
+    def ingest_remote_publish(self, resource_data: dict, source_instance_id: str, target_collection_id: str) -> Optional[dict]:
+        """Receive a published resource from a remote Dugg instance.
+
+        Stores the resource in the target collection with the source tracked.
+        Deduplicates by URL within the collection.
+        """
+        url = resource_data.get("url", "")
+        if not url:
+            return None
+
+        # Deduplicate: check if this URL already exists in this collection
+        existing = self.conn.execute(
+            "SELECT id FROM resources WHERE url = ? AND collection_id = ?",
+            (url, target_collection_id),
+        ).fetchone()
+        if existing:
+            return {"id": existing["id"], "status": "duplicate", "url": url}
+
+        # Get the collection owner as the submitter
+        coll = self.conn.execute("SELECT created_by FROM collections WHERE id = ?", (target_collection_id,)).fetchone()
+        if not coll:
+            return None
+
+        res_id = _uuid()
+        now = _now()
+        meta = resource_data.get("raw_metadata", {})
+        if isinstance(meta, dict):
+            meta["_source_instance"] = source_instance_id
+        meta_json = json.dumps(meta) if isinstance(meta, dict) else meta
+
+        self.conn.execute(
+            """INSERT INTO resources
+               (id, url, title, description, thumbnail, source_type, author, transcript, raw_metadata, note, submitted_by, collection_id, created_at, updated_at, enriched_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (res_id, url,
+             resource_data.get("title", ""), resource_data.get("description", ""),
+             resource_data.get("thumbnail", ""), resource_data.get("source_type", "unknown"),
+             resource_data.get("author", ""), resource_data.get("transcript", ""),
+             meta_json, resource_data.get("note", ""),
+             coll["created_by"], target_collection_id, now, now,
+             resource_data.get("enriched_at")),
+        )
+
+        # Copy tags
+        tags = resource_data.get("tags", [])
+        for tag in tags:
+            label = tag if isinstance(tag, str) else tag.get("label", "")
+            if label:
+                self._add_tag(res_id, label, "agent", now)
+
+        self.conn.commit()
+        return {"id": res_id, "status": "ingested", "url": url, "title": resource_data.get("title", "")}
 
     # --- Helpers ---
 

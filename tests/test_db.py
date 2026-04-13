@@ -688,6 +688,326 @@ def test_rate_limit_tenure_growth(db):
 
 # --- Routing Manifest ---
 
+# --- Publish Queue ---
+
+def test_enqueue_publish_no_remote_instances(db):
+    """No instances with endpoint_url = nothing enqueued."""
+    kade = db.create_user("Kade")
+    coll = db.create_collection("AI", kade["id"])
+    db.create_instance("Local", kade["id"])  # No endpoint_url
+    res = db.add_resource(url="https://example.com/1", collection_id=coll["id"], submitted_by=kade["id"])
+    entries = db.enqueue_publish(res["id"], "public")
+    assert len(entries) == 0
+
+
+def test_enqueue_publish_with_remote(db):
+    kade = db.create_user("Kade")
+    coll = db.create_collection("AI", kade["id"])
+    inst = db.create_instance("Remote", kade["id"])
+    db.update_instance(inst["id"], kade["id"], endpoint_url="https://remote.dugg.fyi")
+    res = db.add_resource(url="https://example.com/1", collection_id=coll["id"], submitted_by=kade["id"])
+    entries = db.enqueue_publish(res["id"], "public")
+    assert len(entries) == 1
+    assert entries[0]["status"] == "pending"
+    assert entries[0]["target_name"] == "public"
+
+
+def test_publish_queue_status(db):
+    kade = db.create_user("Kade")
+    coll = db.create_collection("AI", kade["id"])
+    inst = db.create_instance("Remote", kade["id"])
+    db.update_instance(inst["id"], kade["id"], endpoint_url="https://remote.dugg.fyi")
+    res = db.add_resource(url="https://example.com/1", collection_id=coll["id"], submitted_by=kade["id"])
+    db.enqueue_publish(res["id"], "public")
+    status = db.get_publish_queue_status(kade["id"])
+    assert status["pending"] == 1
+    assert status["delivered"] == 0
+
+
+def test_mark_publish_delivered(db):
+    kade = db.create_user("Kade")
+    coll = db.create_collection("AI", kade["id"])
+    inst = db.create_instance("Remote", kade["id"])
+    db.update_instance(inst["id"], kade["id"], endpoint_url="https://remote.dugg.fyi")
+    res = db.add_resource(url="https://example.com/1", collection_id=coll["id"], submitted_by=kade["id"])
+    entries = db.enqueue_publish(res["id"], "public")
+    db.mark_publish_delivered(entries[0]["id"])
+    status = db.get_publish_queue_status()
+    assert status["delivered"] == 1
+    assert status["pending"] == 0
+
+
+def test_mark_publish_retry_with_backoff(db):
+    kade = db.create_user("Kade")
+    coll = db.create_collection("AI", kade["id"])
+    inst = db.create_instance("Remote", kade["id"])
+    db.update_instance(inst["id"], kade["id"], endpoint_url="https://remote.dugg.fyi")
+    res = db.add_resource(url="https://example.com/1", collection_id=coll["id"], submitted_by=kade["id"])
+    entries = db.enqueue_publish(res["id"], "public")
+    queue_id = entries[0]["id"]
+    db.mark_publish_retry(queue_id, "Connection refused")
+    row = db.conn.execute("SELECT * FROM publish_queue WHERE id = ?", (queue_id,)).fetchone()
+    assert dict(row)["retry_count"] == 1
+    assert dict(row)["status"] == "pending"
+    assert dict(row)["last_error"] == "Connection refused"
+
+
+def test_mark_publish_fails_after_max_retries(db):
+    kade = db.create_user("Kade")
+    coll = db.create_collection("AI", kade["id"])
+    inst = db.create_instance("Remote", kade["id"])
+    db.update_instance(inst["id"], kade["id"], endpoint_url="https://remote.dugg.fyi")
+    res = db.add_resource(url="https://example.com/1", collection_id=coll["id"], submitted_by=kade["id"])
+    entries = db.enqueue_publish(res["id"], "public")
+    queue_id = entries[0]["id"]
+    # Exhaust all retries
+    for i in range(5):
+        db.mark_publish_retry(queue_id, f"Error {i}")
+    row = db.conn.execute("SELECT * FROM publish_queue WHERE id = ?", (queue_id,)).fetchone()
+    assert dict(row)["status"] == "failed"
+
+
+def test_retry_failed_publishes(db):
+    kade = db.create_user("Kade")
+    coll = db.create_collection("AI", kade["id"])
+    inst = db.create_instance("Remote", kade["id"])
+    db.update_instance(inst["id"], kade["id"], endpoint_url="https://remote.dugg.fyi")
+    res = db.add_resource(url="https://example.com/1", collection_id=coll["id"], submitted_by=kade["id"])
+    entries = db.enqueue_publish(res["id"], "public")
+    queue_id = entries[0]["id"]
+    for i in range(5):
+        db.mark_publish_retry(queue_id, f"Error {i}")
+    # Now retry all failed
+    count = db.retry_failed_publishes()
+    assert count == 1
+    status = db.get_publish_queue_status()
+    assert status["pending"] == 1
+    assert status["failed"] == 0
+
+
+def test_get_pending_publishes(db):
+    kade = db.create_user("Kade")
+    coll = db.create_collection("AI", kade["id"])
+    inst = db.create_instance("Remote", kade["id"])
+    db.update_instance(inst["id"], kade["id"], endpoint_url="https://remote.dugg.fyi")
+    res = db.add_resource(url="https://example.com/1", collection_id=coll["id"], submitted_by=kade["id"])
+    db.enqueue_publish(res["id"], "public")
+    pending = db.get_pending_publishes()
+    assert len(pending) == 1
+    assert pending[0]["endpoint_url"] == "https://remote.dugg.fyi"
+
+
+# --- Event Log ---
+
+def test_emit_event(db):
+    kade = db.create_user("Kade")
+    event = db.emit_event("resource_added", actor_id=kade["id"], payload={"url": "https://example.com"})
+    assert event["event_type"] == "resource_added"
+    assert event["actor_id"] == kade["id"]
+    assert event["payload"]["url"] == "https://example.com"
+
+
+def test_events_emitted_on_add_resource(db):
+    kade = db.create_user("Kade")
+    coll = db.create_collection("AI", kade["id"])
+    db.add_resource(url="https://example.com/1", collection_id=coll["id"], submitted_by=kade["id"], title="Cool thing")
+    events = db.get_events(kade["id"])
+    resource_added = [e for e in events if e["event_type"] == "resource_added"]
+    assert len(resource_added) >= 1
+    assert resource_added[0]["payload"]["url"] == "https://example.com/1"
+
+
+def test_events_emitted_on_publish(db):
+    kade = db.create_user("Kade")
+    coll = db.create_collection("AI", kade["id"])
+    res = db.add_resource(url="https://example.com/1", collection_id=coll["id"], submitted_by=kade["id"])
+    db.publish_resource(res["id"], ["public"])
+    events = db.get_events(kade["id"])
+    pub_events = [e for e in events if e["event_type"] == "resource_published"]
+    assert len(pub_events) >= 1
+    assert pub_events[0]["payload"]["target"] == "public"
+
+
+def test_events_emitted_on_invite(db):
+    kade = db.create_user("Kade")
+    rocco = db.create_user("Rocco")
+    coll = db.create_collection("Shared", kade["id"], visibility="shared")
+    db.invite_member(coll["id"], kade["id"], rocco["id"])
+    events = db.get_events(kade["id"])
+    join_events = [e for e in events if e["event_type"] == "member_joined"]
+    assert len(join_events) >= 1
+
+
+def test_events_emitted_on_ban(db):
+    kade = db.create_user("Kade")
+    rocco = db.create_user("Rocco")
+    coll = db.create_collection("Shared", kade["id"], visibility="shared")
+    db.invite_member(coll["id"], kade["id"], rocco["id"])
+    db.ban_member(coll["id"], rocco["id"], cascade=False)
+    events = db.get_events(kade["id"])
+    ban_events = [e for e in events if e["event_type"] == "member_banned"]
+    assert len(ban_events) >= 1
+
+
+def test_events_filtered_by_type(db):
+    kade = db.create_user("Kade")
+    coll = db.create_collection("AI", kade["id"])
+    db.add_resource(url="https://example.com/1", collection_id=coll["id"], submitted_by=kade["id"])
+    res = db.add_resource(url="https://example.com/2", collection_id=coll["id"], submitted_by=kade["id"])
+    db.publish_resource(res["id"], ["public"])
+    events = db.get_events(kade["id"], event_types=["resource_published"])
+    assert all(e["event_type"] == "resource_published" for e in events)
+
+
+def test_events_filtered_by_since(db):
+    from datetime import datetime, timezone, timedelta
+    kade = db.create_user("Kade")
+    coll = db.create_collection("AI", kade["id"])
+    db.add_resource(url="https://example.com/1", collection_id=coll["id"], submitted_by=kade["id"])
+    # All events are from "now", so filtering since yesterday should include them
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    events = db.get_events(kade["id"], since=yesterday)
+    assert len(events) >= 1
+    # Filtering since tomorrow should exclude them
+    tomorrow = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+    events = db.get_events(kade["id"], since=tomorrow)
+    assert len(events) == 0
+
+
+# --- Webhook Subscriptions ---
+
+def test_subscribe_webhook(db):
+    kade = db.create_user("Kade")
+    inst = db.create_instance("AI", kade["id"])
+    result = db.subscribe_webhook(inst["id"], kade["id"], "https://hooks.example.com/dugg")
+    assert result["callback_url"] == "https://hooks.example.com/dugg"
+    assert result["status"] == "active"
+
+
+def test_subscribe_webhook_with_event_filter(db):
+    kade = db.create_user("Kade")
+    inst = db.create_instance("AI", kade["id"])
+    result = db.subscribe_webhook(inst["id"], kade["id"], "https://hooks.example.com/dugg",
+                                   event_types=["resource_published"])
+    assert result["event_types"] == ["resource_published"]
+
+
+def test_list_webhooks(db):
+    kade = db.create_user("Kade")
+    inst = db.create_instance("AI", kade["id"])
+    db.subscribe_webhook(inst["id"], kade["id"], "https://hooks.example.com/a")
+    db.subscribe_webhook(inst["id"], kade["id"], "https://hooks.example.com/b")
+    webhooks = db.list_webhooks(kade["id"])
+    assert len(webhooks) == 2
+
+
+def test_unsubscribe_webhook(db):
+    kade = db.create_user("Kade")
+    inst = db.create_instance("AI", kade["id"])
+    result = db.subscribe_webhook(inst["id"], kade["id"], "https://hooks.example.com/dugg")
+    deleted = db.unsubscribe_webhook(result["id"], kade["id"])
+    assert deleted is True
+    webhooks = db.list_webhooks(kade["id"])
+    assert len(webhooks) == 0
+
+
+def test_unsubscribe_webhook_wrong_user(db):
+    kade = db.create_user("Kade")
+    rocco = db.create_user("Rocco")
+    inst = db.create_instance("AI", kade["id"])
+    result = db.subscribe_webhook(inst["id"], kade["id"], "https://hooks.example.com/dugg")
+    deleted = db.unsubscribe_webhook(result["id"], rocco["id"])
+    assert deleted is False
+
+
+def test_get_webhooks_for_event(db):
+    kade = db.create_user("Kade")
+    inst = db.create_instance("AI", kade["id"])
+    db.subscribe_webhook(inst["id"], kade["id"], "https://hooks.example.com/all")  # All events
+    db.subscribe_webhook(inst["id"], kade["id"], "https://hooks.example.com/pub",
+                          event_types=["resource_published"])
+    # resource_published should match both
+    matches = db.get_webhooks_for_event("resource_published", instance_id=inst["id"])
+    assert len(matches) == 2
+    # resource_added should only match the "all" webhook
+    matches = db.get_webhooks_for_event("resource_added", instance_id=inst["id"])
+    assert len(matches) == 1
+
+
+def test_webhook_failure_tracking(db):
+    kade = db.create_user("Kade")
+    inst = db.create_instance("AI", kade["id"])
+    result = db.subscribe_webhook(inst["id"], kade["id"], "https://hooks.example.com/dugg")
+    # Fail 4 times — still active
+    for _ in range(4):
+        db.mark_webhook_failure(result["id"])
+    webhooks = db.list_webhooks(kade["id"])
+    assert webhooks[0]["status"] == "active"
+    assert webhooks[0]["failure_count"] == 4
+    # 5th failure — auto-paused
+    db.mark_webhook_failure(result["id"])
+    webhooks = db.list_webhooks(kade["id"])
+    assert webhooks[0]["status"] == "failed"
+
+
+def test_webhook_success_resets_failures(db):
+    kade = db.create_user("Kade")
+    inst = db.create_instance("AI", kade["id"])
+    result = db.subscribe_webhook(inst["id"], kade["id"], "https://hooks.example.com/dugg")
+    db.mark_webhook_failure(result["id"])
+    db.mark_webhook_failure(result["id"])
+    db.mark_webhook_success(result["id"])
+    webhooks = db.list_webhooks(kade["id"])
+    assert webhooks[0]["failure_count"] == 0
+
+
+# --- Inbound Publish (Remote Ingest) ---
+
+def test_ingest_remote_publish(db):
+    kade = db.create_user("Kade")
+    coll = db.create_collection("Inbox", kade["id"])
+    result = db.ingest_remote_publish(
+        {"url": "https://example.com/cool", "title": "Cool thing", "source_type": "article", "tags": ["ai"]},
+        source_instance_id="remote123",
+        target_collection_id=coll["id"],
+    )
+    assert result["status"] == "ingested"
+    assert result["title"] == "Cool thing"
+    # Verify resource exists
+    resource = db.get_resource(result["id"])
+    assert resource["url"] == "https://example.com/cool"
+    assert len(resource["tags"]) == 1
+
+
+def test_ingest_remote_deduplicates(db):
+    kade = db.create_user("Kade")
+    coll = db.create_collection("Inbox", kade["id"])
+    db.ingest_remote_publish(
+        {"url": "https://example.com/cool", "title": "Cool thing"},
+        source_instance_id="remote123", target_collection_id=coll["id"],
+    )
+    result = db.ingest_remote_publish(
+        {"url": "https://example.com/cool", "title": "Same thing"},
+        source_instance_id="remote123", target_collection_id=coll["id"],
+    )
+    assert result["status"] == "duplicate"
+
+
+def test_ingest_tracks_source_instance(db):
+    kade = db.create_user("Kade")
+    coll = db.create_collection("Inbox", kade["id"])
+    result = db.ingest_remote_publish(
+        {"url": "https://example.com/cool", "title": "Cool thing"},
+        source_instance_id="remote123", target_collection_id=coll["id"],
+    )
+    resource = db.get_resource(result["id"])
+    import json
+    meta = json.loads(resource["raw_metadata"])
+    assert meta["_source_instance"] == "remote123"
+
+
+# --- Routing Manifest ---
+
 def test_routing_manifest(db):
     kade = db.create_user("Kade")
     db.create_instance("Food Dugg", kade["id"], topic="Food, restaurants, recipes")

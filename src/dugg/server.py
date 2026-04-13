@@ -13,6 +13,7 @@ from mcp.types import TextContent, Tool
 
 from dugg.db import DuggDB
 from dugg.enrichment import enrich_url
+from dugg.sync import start_sync_daemon
 
 # --- Server Setup ---
 
@@ -300,6 +301,7 @@ async def list_tools() -> list[Tool]:
                     "name": {"type": "string", "description": "New name", "default": ""},
                     "topic": {"type": "string", "description": "New topic description", "default": ""},
                     "access_mode": {"type": "string", "enum": ["public", "invite"], "description": "New access mode", "default": ""},
+                    "endpoint_url": {"type": "string", "description": "Remote endpoint URL for receiving published resources", "default": ""},
                     "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
                 },
                 "required": ["instance_id"],
@@ -396,6 +398,96 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="dugg_publish_status",
+            description="Check the status of the publish sync queue — how many publishes are pending, delivered, or failed.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+            },
+        ),
+        Tool(
+            name="dugg_publish_retry",
+            description="Retry all failed publishes — resets them back to pending for another round of delivery attempts.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+            },
+        ),
+        Tool(
+            name="dugg_events",
+            description="Get recent events across your subscribed instances and collections. Events include resource_added, resource_published, member_joined, member_banned, publish_delivered.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "event_types": {"type": "array", "items": {"type": "string"}, "description": "Filter by event type(s)", "default": []},
+                    "since": {"type": "string", "description": "Only show events after this ISO timestamp", "default": ""},
+                    "limit": {"type": "integer", "description": "Max events to return", "default": 50},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+            },
+        ),
+        Tool(
+            name="dugg_webhook_subscribe",
+            description="Subscribe a webhook to receive real-time event notifications from a Dugg instance. The callback URL receives POST requests with event payloads.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "instance_id": {"type": "string", "description": "Instance to subscribe to"},
+                    "callback_url": {"type": "string", "description": "URL to POST event payloads to"},
+                    "event_types": {"type": "array", "items": {"type": "string"}, "description": "Event types to subscribe to (empty = all)", "default": []},
+                    "secret": {"type": "string", "description": "HMAC secret for signing webhook payloads (optional)", "default": ""},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+                "required": ["instance_id", "callback_url"],
+            },
+        ),
+        Tool(
+            name="dugg_webhook_list",
+            description="List your active webhook subscriptions.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+            },
+        ),
+        Tool(
+            name="dugg_webhook_delete",
+            description="Remove a webhook subscription.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "webhook_id": {"type": "string", "description": "Webhook subscription ID to remove"},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+                "required": ["webhook_id"],
+            },
+        ),
+        Tool(
+            name="dugg_ingest",
+            description="Receive a published resource from a remote Dugg instance. Deduplicates by URL. Used by the sync daemon or manual push.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "Resource URL"},
+                    "title": {"type": "string", "description": "Resource title", "default": ""},
+                    "description": {"type": "string", "description": "Resource description", "default": ""},
+                    "source_type": {"type": "string", "description": "Resource type", "default": "unknown"},
+                    "author": {"type": "string", "description": "Resource author", "default": ""},
+                    "note": {"type": "string", "description": "Context note", "default": ""},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Tags", "default": []},
+                    "source_instance_id": {"type": "string", "description": "The remote instance that published this"},
+                    "collection": {"type": "string", "description": "Target collection name (uses Default if omitted)", "default": ""},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+                "required": ["url", "source_instance_id"],
+            },
+        ),
+        Tool(
             name="dugg_rate_limit_status",
             description="Check your current rate limit status for a collection — how many posts you've used today vs. your cap.",
             inputSchema={
@@ -478,6 +570,20 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return _handle_appeal_resolve(d, user_id, arguments)
         elif name == "dugg_routing_manifest":
             return _handle_routing_manifest(d, user_id)
+        elif name == "dugg_publish_status":
+            return _handle_publish_status(d, user_id)
+        elif name == "dugg_publish_retry":
+            return _handle_publish_retry(d)
+        elif name == "dugg_events":
+            return _handle_events(d, user_id, arguments)
+        elif name == "dugg_webhook_subscribe":
+            return _handle_webhook_subscribe(d, user_id, arguments)
+        elif name == "dugg_webhook_list":
+            return _handle_webhook_list(d, user_id)
+        elif name == "dugg_webhook_delete":
+            return _handle_webhook_delete(d, user_id, arguments)
+        elif name == "dugg_ingest":
+            return _handle_ingest(d, user_id, arguments)
         elif name == "dugg_rate_limit":
             return _handle_rate_limit(d, user_id, arguments)
         elif name == "dugg_rate_limit_status":
@@ -847,10 +953,16 @@ def _handle_instance_update(d: DuggDB, user_id: str, args: dict) -> list[TextCon
         updates["topic"] = args["topic"]
     if args.get("access_mode"):
         updates["access_mode"] = args["access_mode"]
+    if args.get("endpoint_url"):
+        updates["endpoint_url"] = args["endpoint_url"]
     result = d.update_instance(instance_id, user_id, **updates)
     if not result:
         return [TextContent(type="text", text=f"Instance {instance_id} not found or you're not the owner")]
-    return [TextContent(type="text", text=f"Updated instance: {result['name']} [{result['id']}]\nTopic: {result['topic']}\nAccess: {result['access_mode']}")]
+    lines = [f"Updated instance: {result['name']} [{result['id']}]",
+             f"Topic: {result['topic']}", f"Access: {result['access_mode']}"]
+    if result.get("endpoint_url"):
+        lines.append(f"Endpoint: {result['endpoint_url']}")
+    return [TextContent(type="text", text="\n".join(lines))]
 
 
 def _handle_invite(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
@@ -950,6 +1062,122 @@ def _handle_routing_manifest(d: DuggDB, user_id: str) -> list[TextContent]:
     return [TextContent(type="text", text="\n".join(lines))]
 
 
+def _handle_publish_status(d: DuggDB, user_id: str) -> list[TextContent]:
+    stats = d.get_publish_queue_status(user_id)
+    total = sum(stats.values())
+    if total == 0:
+        return [TextContent(type="text", text="Publish queue is empty. Nothing has been queued for remote delivery yet.")]
+    lines = [f"Publish queue status:"]
+    lines.append(f"  Pending: {stats['pending']}")
+    lines.append(f"  Delivering: {stats['delivering']}")
+    lines.append(f"  Delivered: {stats['delivered']}")
+    lines.append(f"  Failed: {stats['failed']}")
+    if stats["failed"] > 0:
+        failed = d.get_failed_publishes(limit=5)
+        lines.append(f"\nRecent failures:")
+        for f_entry in failed:
+            lines.append(f"  - {f_entry['resource_id']} → {f_entry.get('instance_name', '?')} | {f_entry.get('last_error', 'unknown error')}")
+    return [TextContent(type="text", text="\n".join(lines))]
+
+
+def _handle_publish_retry(d: DuggDB) -> list[TextContent]:
+    count = d.retry_failed_publishes()
+    if count == 0:
+        return [TextContent(type="text", text="No failed publishes to retry.")]
+    return [TextContent(type="text", text=f"Reset {count} failed publish(es) back to pending. They'll be retried on the next sync cycle.")]
+
+
+def _handle_events(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    event_types = args.get("event_types", [])
+    since = args.get("since", "")
+    limit = args.get("limit", 50)
+    events = d.get_events(user_id, event_types=event_types or None, since=since or None, limit=limit)
+    if not events:
+        return [TextContent(type="text", text="No events found.")]
+    lines = [f"{len(events)} event(s):\n"]
+    for e in events:
+        payload_summary = ", ".join(f"{k}: {v}" for k, v in e["payload"].items() if k != "transcript")
+        lines.append(f"- [{e['event_type']}] {e['created_at']}")
+        if payload_summary:
+            lines.append(f"  {payload_summary}")
+    return [TextContent(type="text", text="\n".join(lines))]
+
+
+def _handle_webhook_subscribe(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    instance_id = args["instance_id"]
+    callback_url = args["callback_url"]
+    event_types = args.get("event_types", [])
+    secret = args.get("secret", "")
+    result = d.subscribe_webhook(instance_id, user_id, callback_url, event_types=event_types, secret=secret)
+    lines = [f"Webhook subscribed: {result['callback_url']}"]
+    lines.append(f"Instance: {instance_id}")
+    if event_types:
+        lines.append(f"Events: {', '.join(event_types)}")
+    else:
+        lines.append("Events: all")
+    if secret:
+        lines.append("Signing: HMAC-SHA256 enabled")
+    return [TextContent(type="text", text="\n".join(lines))]
+
+
+def _handle_webhook_list(d: DuggDB, user_id: str) -> list[TextContent]:
+    webhooks = d.list_webhooks(user_id)
+    if not webhooks:
+        return [TextContent(type="text", text="No webhook subscriptions.")]
+    lines = [f"{len(webhooks)} webhook(s):\n"]
+    for wh in webhooks:
+        types_str = ", ".join(wh["event_types"]) if wh["event_types"] else "all"
+        lines.append(f"- [{wh['id']}] {wh['callback_url']}")
+        lines.append(f"  Instance: {wh['instance_id']} | Events: {types_str} | Status: {wh['status']}")
+        if wh["failure_count"] > 0:
+            lines.append(f"  Failures: {wh['failure_count']}")
+    return [TextContent(type="text", text="\n".join(lines))]
+
+
+def _handle_webhook_delete(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    webhook_id = args["webhook_id"]
+    deleted = d.unsubscribe_webhook(webhook_id, user_id)
+    if not deleted:
+        return [TextContent(type="text", text=f"Webhook {webhook_id} not found or not yours")]
+    return [TextContent(type="text", text=f"Webhook {webhook_id} deleted.")]
+
+
+def _handle_ingest(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    url = args["url"]
+    source_instance_id = args["source_instance_id"]
+    collection_name = args.get("collection", "")
+
+    # Resolve target collection
+    if collection_name:
+        collections = d.list_collections(user_id)
+        coll_id = None
+        for c in collections:
+            if c["name"].lower() == collection_name.lower():
+                coll_id = c["id"]
+                break
+        if not coll_id:
+            result = d.create_collection(collection_name, user_id, visibility="private")
+            coll_id = result["id"]
+    else:
+        coll_id = ensure_default_collection(user_id)
+
+    resource_data = {
+        "url": url,
+        "title": args.get("title", ""),
+        "description": args.get("description", ""),
+        "source_type": args.get("source_type", "unknown"),
+        "author": args.get("author", ""),
+        "note": args.get("note", ""),
+        "tags": args.get("tags", []),
+    }
+    result = d.ingest_remote_publish(resource_data, source_instance_id, coll_id)
+    if not result:
+        return [TextContent(type="text", text="Ingest failed — invalid URL or collection")]
+    if result["status"] == "duplicate":
+        return [TextContent(type="text", text=f"Already exists: {url} (ID: {result['id']})")]
+    return [TextContent(type="text", text=f"Ingested: {result.get('title') or url}\nID: {result['id']}\nFrom instance: {source_instance_id}")]
+
+
 def _handle_rate_limit(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
     instance_id = args["instance_id"]
     initial = args.get("initial")
@@ -1019,10 +1247,17 @@ def _handle_get(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
 # --- Main ---
 
 def main():
-    """Run the Dugg MCP server over stdio."""
+    """Run the Dugg MCP server over stdio with background sync daemon."""
     async def _run():
-        async with stdio_server() as (read_stream, write_stream):
-            await server.run(read_stream, write_stream, server.create_initialization_options())
+        # Start the sync daemon as a background task
+        d = get_db()
+        sync_task = start_sync_daemon(d, interval=30)
+
+        try:
+            async with stdio_server() as (read_stream, write_stream):
+                await server.run(read_stream, write_stream, server.create_initialization_options())
+        finally:
+            sync_task.cancel()
 
     asyncio.run(_run())
 

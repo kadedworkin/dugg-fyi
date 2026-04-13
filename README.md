@@ -24,6 +24,10 @@ Dugg is an MCP server that acts as a shared, searchable filing cabinet for links
 - **Ban cascades** — Ban a user and prune their invite tree. Depth 1 = hard prune, depth 2+ = credit score decides survival
 - **Appeals** — Banned users appeal with their contribution history. Owner (or owner's agent) decides
 - **Rate limiting** — Tenure-based submission caps. New members start at N posts/day (owner-configured, default 5), growing by X per day of membership. Longer in the mix = higher cap. Prevents fresh-account spam without punishing established contributors
+- **Publish sync** — Durable outbound delivery of published resources to remote Dugg instances. Queue with exponential backoff retry (30s → 2m → 8m → 32m → ~2h). Failed publishes can be retried manually
+- **Event log** — Every significant action (resource added, published, member joined, banned, publish delivered) is logged. Agents poll events to stay informed
+- **Webhooks** — Subscribe callback URLs to receive real-time POST notifications for events on subscribed instances. HMAC-SHA256 signing, auto-pause after 5 consecutive failures
+- **Remote ingest** — Receive published resources from other Dugg instances. URL-level deduplication, source instance tracked in metadata
 - **Auto-routing** — Agents pull topic descriptors from subscribed instances and auto-route published content to matching targets
 - **Feed** — Reverse-chron view of everything across your accessible collections
 
@@ -124,6 +128,13 @@ Add to your OpenClaw config:
 | `dugg_routing_manifest` | Get topic descriptors for agent auto-routing decisions. |
 | `dugg_rate_limit` | Set tenure-based rate limit config for an instance (owner only). |
 | `dugg_rate_limit_status` | Check your current daily post usage vs. cap for a collection. |
+| `dugg_publish_status` | Check publish sync queue status — pending, delivered, failed counts. |
+| `dugg_publish_retry` | Retry all failed publishes — resets them back to pending. |
+| `dugg_events` | Get recent events across subscribed instances (add, publish, join, ban). |
+| `dugg_webhook_subscribe` | Subscribe a callback URL to receive real-time event notifications. |
+| `dugg_webhook_list` | List your active webhook subscriptions. |
+| `dugg_webhook_delete` | Remove a webhook subscription. |
+| `dugg_ingest` | Receive a published resource from a remote Dugg instance. Deduplicates by URL. |
 | `dugg_share` | Share a collection with another user, with optional tag filters. |
 | `dugg_create_user` | Create a new user and get their API key. |
 
@@ -335,6 +346,104 @@ dugg_rate_limit_status(collection_id="xyz789")
 - No instance configured = no rate limit (unlimited)
 - Pairs with ban cascades — bot armies invited by a bad actor all start at the initial cap and can't firehose
 
+## Publish sync daemon
+
+When you call `dugg_publish`, the resource is flagged locally _and_ queued for delivery to remote Dugg instances with `endpoint_url` set.
+
+**How it works:**
+
+1. `dugg_publish(resource_id, targets)` → writes to `publish_targets` (local) + `publish_queue` (outbound)
+2. Background sync loop picks up pending entries every 30 seconds
+3. POSTs resource data to each remote instance's `/ingest` endpoint
+4. Success → marked `delivered`. Failure → exponential backoff retry
+
+**Retry schedule:** 30s → 2min → 8min → 32min → ~2h. After 5 failures, marked `failed`. Use `dugg_publish_retry` to reset all failed entries for another round.
+
+```
+# Set a remote endpoint on an instance
+dugg_instance_update(instance_id="abc123", endpoint_url="https://remote.dugg.fyi")
+
+# Check what's stuck
+dugg_publish_status()
+# Returns: pending: 2, delivering: 0, delivered: 47, failed: 1
+
+# Retry failures
+dugg_publish_retry()
+# Returns: Reset 1 failed publish(es) back to pending
+```
+
+**Design:** The sync daemon runs as an asyncio background task alongside the MCP server. No separate process needed. If httpx isn't installed, deliveries are skipped with a warning — install it for remote sync.
+
+## Event emission
+
+Every significant action emits an event to the event log. Agents use this to stay informed without polling individual resources.
+
+**Event types:**
+
+| Event | Emitted when |
+|-------|-------------|
+| `resource_added` | A resource is added to any collection |
+| `resource_published` | A resource is published to a target |
+| `member_joined` | A member is invited to a collection |
+| `member_banned` | A ban cascade is executed |
+| `publish_delivered` | A publish is successfully delivered to a remote instance |
+
+```
+# Poll for recent events
+dugg_events()
+dugg_events(event_types=["resource_published"], since="2026-04-12T00:00:00Z")
+```
+
+Events are scoped — you only see events for instances you're subscribed to and collections you're a member of.
+
+## Webhooks
+
+For agents that want push instead of poll. Subscribe a callback URL to an instance and receive POST requests when events happen.
+
+```
+# Subscribe to all events
+dugg_webhook_subscribe(instance_id="abc123", callback_url="https://my-agent.com/hooks/dugg")
+
+# Subscribe to specific events with HMAC signing
+dugg_webhook_subscribe(
+    instance_id="abc123",
+    callback_url="https://my-agent.com/hooks/dugg",
+    event_types=["resource_published", "member_joined"],
+    secret="my-webhook-secret"
+)
+
+# List and manage
+dugg_webhook_list()
+dugg_webhook_delete(webhook_id="def456")
+```
+
+**Reliability:**
+- Each delivery attempt has a 15-second timeout
+- On success, failure counter resets to 0
+- On failure, counter increments
+- After 5 consecutive failures, webhook auto-pauses (status = `failed`)
+- Re-subscribe to reactivate
+
+**Signing:** If a `secret` is set, payloads are signed with HMAC-SHA256. The signature is sent in the `X-Dugg-Signature` header as `sha256=<hex>`.
+
+## Remote ingest
+
+The receiving side of publish sync. When a remote Dugg instance pushes content, `dugg_ingest` (or the `/ingest` HTTP endpoint) handles it.
+
+```
+dugg_ingest(
+    url="https://example.com/cool-article",
+    title="Cool Article",
+    source_type="article",
+    tags=["ai", "agents"],
+    source_instance_id="remote123"
+)
+```
+
+**Deduplication:** Same URL in the same collection = skip (returns `duplicate` status). Different collections = allowed (cross-pollination is intentional).
+
+**Source tracking:** The originating instance ID is stored in `raw_metadata._source_instance` so you always know where content came from.
+
 ## Enrichment
 
 When you add a URL, Dugg automatically:
@@ -372,8 +481,11 @@ uv run pytest tests/test_db.py -v
 - [x] Appeal system with contribution-based credit scores
 - [x] Routing manifest for agent-driven auto-publishing
 - [ ] Resource relationship mapping (agent-built connections between resources)
-- [ ] Publish sync daemon (push flagged resources to remote Dugg instances)
-- [ ] Event emission for real-time notifications to connected agents
+- [x] Publish sync daemon with exponential backoff retry
+- [x] Event emission for resource_added, resource_published, member_joined, member_banned
+- [x] Webhook subscriptions with HMAC signing and auto-pause
+- [x] Remote ingest endpoint for receiving published content
+- [x] Tenure-based rate limiting
 - [ ] Django/AEV web UI wrapper
 
 ## License
