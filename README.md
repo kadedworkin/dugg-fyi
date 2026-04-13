@@ -24,6 +24,11 @@ Dugg is an MCP server that acts as a shared, searchable filing cabinet for links
 - **Ban cascades** — Ban a user and prune their invite tree. Depth 1 = hard prune, depth 2+ = credit score decides survival
 - **Appeals** — Banned users appeal with their contribution history. Owner (or owner's agent) decides
 - **Rate limiting** — Tenure-based submission caps. New members start at N posts/day (owner-configured, default 5), growing by X per day of membership. Longer in the mix = higher cap. Prevents fresh-account spam without punishing established contributors
+- **Read horizon** — Graduated content visibility based on membership tenure. New members see the last 30 days of content, unlocking 7 more days per week of membership. Instance owners control the base window and growth rate, or set `-1` for full history
+- **Content indexing policy** — Per-instance control over what gets stored from enrichment: `summary` (auto-generated summary + metadata), `full` (raw content, transcripts, everything), or `metadata_only` (title, URL, tags only). Balances search quality vs. storage
+- **Article extraction** — Clean article text extraction from web pages via readability-lxml, with auto-generated summaries searchable via FTS5
+- **Storage cap + eviction** — IMAP-style local storage management. Per-instance MB cap (default 512 MB). When exceeded, oldest content not owned by the local user gets evicted — metadata preserved, body cleared. Your own content is never touched
+- **Instance policy** — Unified view of all governance settings (read horizon, index mode, storage cap, rate limits). Onboarding presets: `graduated` (safe defaults) or `full_access` (everything unlocked) in one call
 - **Publish sync** — Durable outbound delivery of published resources to remote Dugg instances. Queue with exponential backoff retry (30s → 2m → 8m → 32m → ~2h). Failed publishes can be retried manually
 - **Event log** — Every significant action (resource added, published, member joined, banned, publish delivered, reaction added) is logged. Agents poll events or use catchup to stay informed
 - **Read cursors** — Per-user cursor tracking so agents can ask "what's new since I last checked" without managing state themselves. Powers the catchup flow
@@ -193,6 +198,7 @@ Add to your OpenClaw config:
 | `dugg_share` | Share a collection with another user, with optional tag filters. |
 | `dugg_create_user` | Create a new user and get their API key. |
 | `dugg_invite_user` | Create an invite token with a browser redemption link — send via any channel. |
+| `dugg_instance_policy` | Get the current policy configuration for an instance — read horizon, index mode, storage cap, and rate limits. |
 | `dugg_welcome` | Orientation for new connections. Returns instance topics, recent activity, and rate limit status. |
 
 ## Architecture
@@ -210,7 +216,7 @@ Add to your OpenClaw config:
                    │ MCP protocol (stdio or HTTP/SSE)
                    │
 ┌──────────────────▼──────────────────────────┐
-│  Dugg MCP Server — tool handlers (38)       │
+│  Dugg MCP Server — tool handlers (39)       │
 │                                             │
 │  - Auth (API key per user)                  │
 │  - Rate limiting (tenure-based)             │
@@ -222,7 +228,7 @@ Add to your OpenClaw config:
         │                     │
 ┌───────▼───────┐    ┌────────▼────────┐
 │  Storage      │    │  Endpoints      │
-│  16 tables    │    │  /ingest        │
+│  17 tables    │    │  /ingest        │
 │  FTS5 index   │    │  /tools/{name}  │
 │  Event log    │    │  /events/stream │
 │  Publish queue│    │  /feed/{key}    │
@@ -608,6 +614,8 @@ uv run pytest tests/test_db.py -v
 **Publishing** — Named publish targets, publish sync daemon with exponential backoff retry, remote ingest with URL deduplication
 
 **Social layer** — Silent reactions with private aggregates, invite trees, ban cascades with depth-aware credit scoring, appeals
+
+**Content governance** — Read horizon (graduated content visibility by tenure), content indexing policy (summary/full/metadata_only), article extraction via readability-lxml, IMAP-style storage cap + eviction, unified instance policy with onboarding presets
 
 **Infrastructure** — Dual transport (stdio + HTTP/SSE), hosted instances with topic descriptors, agent auto-routing via routing manifest, tenure-based rate limiting
 
