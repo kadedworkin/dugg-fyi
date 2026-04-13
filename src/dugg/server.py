@@ -273,6 +273,8 @@ async def list_tools() -> list[Tool]:
                     "name": {"type": "string", "description": "Instance name (e.g. 'Chino Bandito', 'AEV Team')"},
                     "topic": {"type": "string", "description": "What belongs in this Dugg — used by agents for auto-routing", "default": ""},
                     "access_mode": {"type": "string", "enum": ["public", "invite"], "description": "public = anyone can subscribe, invite = member-invites-member", "default": "invite"},
+                    "rate_limit_initial": {"type": "integer", "description": "Starting daily post cap for new members (default: 5)", "default": 5},
+                    "rate_limit_growth": {"type": "integer", "description": "Additional posts/day earned per day of membership (default: 2)", "default": 2},
                     "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
                 },
                 "required": ["name"],
@@ -380,6 +382,32 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="dugg_rate_limit",
+            description="Set rate limit config for a Dugg instance. New members start at 'initial' posts/day, growing by 'growth' per day of membership. Owner only.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "instance_id": {"type": "string", "description": "Instance to configure"},
+                    "initial": {"type": "integer", "description": "Starting daily post cap for new members (default: 5)", "default": 5},
+                    "growth": {"type": "integer", "description": "Additional posts/day earned per day of membership (default: 2)", "default": 2},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+                "required": ["instance_id"],
+            },
+        ),
+        Tool(
+            name="dugg_rate_limit_status",
+            description="Check your current rate limit status for a collection — how many posts you've used today vs. your cap.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "collection_id": {"type": "string", "description": "Collection to check rate limit for"},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+                "required": ["collection_id"],
+            },
+        ),
+        Tool(
             name="dugg_get",
             description="Get full details for a specific resource by ID.",
             inputSchema={
@@ -450,6 +478,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return _handle_appeal_resolve(d, user_id, arguments)
         elif name == "dugg_routing_manifest":
             return _handle_routing_manifest(d, user_id)
+        elif name == "dugg_rate_limit":
+            return _handle_rate_limit(d, user_id, arguments)
+        elif name == "dugg_rate_limit_status":
+            return _handle_rate_limit_status(d, user_id, arguments)
         elif name == "dugg_get":
             return _handle_get(d, user_id, arguments)
         else:
@@ -482,6 +514,11 @@ async def _handle_add(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
             coll_id = result["id"]
     else:
         coll_id = ensure_default_collection(user_id)
+
+    # Check rate limit before doing any work
+    rate_status = d.check_rate_limit(coll_id, user_id)
+    if not rate_status["allowed"] and rate_status["cap"] != -1:
+        return [TextContent(type="text", text=f"Rate limit exceeded. You've used {rate_status['current']}/{rate_status['cap']} posts today (member for {rate_status['days_member']} day(s)). Try again tomorrow.")]
 
     # Enrich the URL
     enriched = await enrich_url(url)
@@ -777,11 +814,15 @@ def _handle_instance_create(d: DuggDB, user_id: str, args: dict) -> list[TextCon
     name = args["name"]
     topic = args.get("topic", "")
     access_mode = args.get("access_mode", "invite")
-    result = d.create_instance(name, user_id, topic=topic, access_mode=access_mode)
+    rate_limit_initial = args.get("rate_limit_initial", 5)
+    rate_limit_growth = args.get("rate_limit_growth", 2)
+    result = d.create_instance(name, user_id, topic=topic, access_mode=access_mode,
+                               rate_limit_initial=rate_limit_initial, rate_limit_growth=rate_limit_growth)
     lines = [f"Created Dugg instance: {result['name']} [{result['id']}]"]
     lines.append(f"Access: {result['access_mode']}")
     if topic:
         lines.append(f"Topic: {topic}")
+    lines.append(f"Rate limit: {result['rate_limit_initial']} initial, +{result['rate_limit_growth']}/day")
     return [TextContent(type="text", text="\n".join(lines))]
 
 
@@ -907,6 +948,26 @@ def _handle_routing_manifest(d: DuggDB, user_id: str) -> list[TextContent]:
         else:
             lines.append(f"  Topic: (none set — set one with dugg_instance_update)")
     return [TextContent(type="text", text="\n".join(lines))]
+
+
+def _handle_rate_limit(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    instance_id = args["instance_id"]
+    initial = args.get("initial")
+    growth = args.get("growth")
+    result = d.set_rate_limit(instance_id, user_id, initial=initial, growth=growth)
+    if not result:
+        return [TextContent(type="text", text=f"Instance {instance_id} not found or you're not the owner")]
+    return [TextContent(type="text", text=f"Rate limit updated for {result['name']}:\n  Initial cap: {result['rate_limit_initial']} posts/day\n  Growth: +{result['rate_limit_growth']} posts/day per day of membership")]
+
+
+def _handle_rate_limit_status(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    collection_id = args["collection_id"]
+    status = d.check_rate_limit(collection_id, user_id)
+    if not status["allowed"] and status["reason"] == "not a member":
+        return [TextContent(type="text", text="You're not a member of this collection")]
+    if status["cap"] == -1:
+        return [TextContent(type="text", text="No rate limit configured for this collection.")]
+    return [TextContent(type="text", text=f"Rate limit status:\n  Today: {status['current']}/{status['cap']} posts used\n  Member for: {status['days_member']} day(s)\n  {'Can post' if status['allowed'] else 'Rate limit reached — try again tomorrow'}")]
 
 
 def _handle_get(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:

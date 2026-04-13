@@ -582,6 +582,112 @@ def test_deny_appeal(db):
 
 # --- Routing Manifest ---
 
+# --- Rate Limiting ---
+
+def test_rate_limit_default_config(db):
+    kade = db.create_user("Kade")
+    inst = db.create_instance("AI", kade["id"])
+    config = db.get_rate_limit_config(inst["id"])
+    assert config["rate_limit_initial"] == 5
+    assert config["rate_limit_growth"] == 2
+
+
+def test_rate_limit_custom_config(db):
+    kade = db.create_user("Kade")
+    inst = db.create_instance("AI", kade["id"], rate_limit_initial=10, rate_limit_growth=3)
+    config = db.get_rate_limit_config(inst["id"])
+    assert config["rate_limit_initial"] == 10
+    assert config["rate_limit_growth"] == 3
+
+
+def test_set_rate_limit(db):
+    kade = db.create_user("Kade")
+    inst = db.create_instance("AI", kade["id"])
+    result = db.set_rate_limit(inst["id"], kade["id"], initial=20, growth=5)
+    assert result is not None
+    config = db.get_rate_limit_config(inst["id"])
+    assert config["rate_limit_initial"] == 20
+    assert config["rate_limit_growth"] == 5
+
+
+def test_set_rate_limit_owner_only(db):
+    kade = db.create_user("Kade")
+    rocco = db.create_user("Rocco")
+    inst = db.create_instance("AI", kade["id"])
+    result = db.set_rate_limit(inst["id"], rocco["id"], initial=100)
+    assert result is None
+
+
+def test_rate_limit_check_no_instance(db):
+    """No instance = no rate limit (unlimited)."""
+    kade = db.create_user("Kade")
+    coll = db.create_collection("AI", kade["id"])
+    status = db.check_rate_limit(coll["id"], kade["id"])
+    assert status["allowed"] is True
+    assert status["cap"] == -1
+
+
+def test_rate_limit_check_under_limit(db):
+    kade = db.create_user("Kade")
+    inst = db.create_instance("AI", kade["id"], rate_limit_initial=5, rate_limit_growth=0)
+    coll = db.create_collection("AI", kade["id"])
+    # Add 3 resources — under the limit of 5
+    for i in range(3):
+        db.add_resource(url=f"https://example.com/{i}", collection_id=coll["id"], submitted_by=kade["id"])
+    status = db.check_rate_limit(coll["id"], kade["id"])
+    assert status["allowed"] is True
+    assert status["current"] == 3
+    assert status["cap"] == 5
+
+
+def test_rate_limit_check_at_limit(db):
+    kade = db.create_user("Kade")
+    inst = db.create_instance("AI", kade["id"], rate_limit_initial=3, rate_limit_growth=0)
+    coll = db.create_collection("AI", kade["id"])
+    for i in range(3):
+        db.add_resource(url=f"https://example.com/{i}", collection_id=coll["id"], submitted_by=kade["id"])
+    status = db.check_rate_limit(coll["id"], kade["id"])
+    assert status["allowed"] is False
+    assert status["current"] == 3
+    assert status["cap"] == 3
+    assert status["reason"] == "rate limit exceeded"
+
+
+def test_rate_limit_not_a_member(db):
+    kade = db.create_user("Kade")
+    rocco = db.create_user("Rocco")
+    coll = db.create_collection("AI", kade["id"])
+    status = db.check_rate_limit(coll["id"], rocco["id"])
+    assert status["allowed"] is False
+    assert status["reason"] == "not a member"
+
+
+def test_rate_limit_tenure_growth(db):
+    """Members who joined earlier get a higher cap."""
+    from datetime import datetime, timezone, timedelta
+    kade = db.create_user("Kade")
+    rocco = db.create_user("Rocco")
+    inst = db.create_instance("AI", kade["id"], rate_limit_initial=5, rate_limit_growth=2)
+    coll = db.create_collection("AI", kade["id"], visibility="shared")
+    db.invite_member(coll["id"], kade["id"], rocco["id"])
+
+    # Manually backdate Rocco's join date to 10 days ago
+    ten_days_ago = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
+    db.conn.execute(
+        "UPDATE collection_members SET joined_at = ? WHERE collection_id = ? AND user_id = ?",
+        (ten_days_ago, coll["id"], rocco["id"]),
+    )
+    db.conn.commit()
+
+    status = db.check_rate_limit(coll["id"], rocco["id"])
+    # Cap should be 5 + (10 * 2) = 25
+    assert status["cap"] == 25
+    assert status["days_member"] == 10
+    assert status["allowed"] is True
+
+
+# --- Routing Manifest ---
+
 def test_routing_manifest(db):
     kade = db.create_user("Kade")
     db.create_instance("Food Dugg", kade["id"], topic="Food, restaurants, recipes")

@@ -65,6 +65,8 @@ class DuggDB:
                 name TEXT NOT NULL,
                 topic TEXT DEFAULT '',
                 access_mode TEXT DEFAULT 'invite' CHECK(access_mode IN ('public', 'invite')),
+                rate_limit_initial INTEGER DEFAULT 5,
+                rate_limit_growth INTEGER DEFAULT 2,
                 owner_id TEXT NOT NULL REFERENCES users(id),
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -557,12 +559,13 @@ class DuggDB:
 
     # --- Instances ---
 
-    def create_instance(self, name: str, owner_id: str, topic: str = "", access_mode: str = "invite") -> dict:
+    def create_instance(self, name: str, owner_id: str, topic: str = "", access_mode: str = "invite",
+                        rate_limit_initial: int = 5, rate_limit_growth: int = 2) -> dict:
         inst_id = _uuid()
         now = _now()
         self.conn.execute(
-            "INSERT INTO dugg_instances (id, name, topic, access_mode, owner_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (inst_id, name, topic, access_mode, owner_id, now, now),
+            "INSERT INTO dugg_instances (id, name, topic, access_mode, rate_limit_initial, rate_limit_growth, owner_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (inst_id, name, topic, access_mode, rate_limit_initial, rate_limit_growth, owner_id, now, now),
         )
         # Owner is auto-subscribed
         self.conn.execute(
@@ -570,7 +573,9 @@ class DuggDB:
             (inst_id, owner_id, now),
         )
         self.conn.commit()
-        return {"id": inst_id, "name": name, "topic": topic, "access_mode": access_mode, "owner_id": owner_id, "created_at": now}
+        return {"id": inst_id, "name": name, "topic": topic, "access_mode": access_mode,
+                "rate_limit_initial": rate_limit_initial, "rate_limit_growth": rate_limit_growth,
+                "owner_id": owner_id, "created_at": now}
 
     def get_instance(self, instance_id: str) -> Optional[dict]:
         row = self.conn.execute("SELECT * FROM dugg_instances WHERE id = ?", (instance_id,)).fetchone()
@@ -590,7 +595,7 @@ class DuggDB:
         inst = self.get_instance(instance_id)
         if not inst or inst["owner_id"] != owner_id:
             return None
-        allowed = {"name", "topic", "access_mode"}
+        allowed = {"name", "topic", "access_mode", "rate_limit_initial", "rate_limit_growth"}
         updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
         if not updates:
             return inst
@@ -790,6 +795,95 @@ class DuggDB:
             (user_id,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    # --- Rate Limiting ---
+
+    def get_rate_limit_config(self, instance_id: str) -> Optional[dict]:
+        """Get rate limit settings for an instance."""
+        row = self.conn.execute(
+            "SELECT rate_limit_initial, rate_limit_growth FROM dugg_instances WHERE id = ?",
+            (instance_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def set_rate_limit(self, instance_id: str, owner_id: str, initial: Optional[int] = None, growth: Optional[int] = None) -> Optional[dict]:
+        """Set rate limit config for an instance. Owner only."""
+        inst = self.get_instance(instance_id)
+        if not inst or inst["owner_id"] != owner_id:
+            return None
+        updates = {}
+        if initial is not None:
+            updates["rate_limit_initial"] = initial
+        if growth is not None:
+            updates["rate_limit_growth"] = growth
+        if not updates:
+            return inst
+        updates["updated_at"] = _now()
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        values = list(updates.values()) + [instance_id]
+        self.conn.execute(f"UPDATE dugg_instances SET {set_clause} WHERE id = ?", values)
+        self.conn.commit()
+        return self.get_instance(instance_id)
+
+    def check_rate_limit(self, collection_id: str, user_id: str) -> dict:
+        """Check if a user can submit to a collection based on tenure-based rate limits.
+
+        Returns dict with: allowed (bool), current (int), cap (int), days_member (int).
+        Rate limit is derived from the instance that owns this collection's owner.
+        If no instance is configured, submissions are unlimited.
+        """
+        # Get member tenure
+        member = self.get_member_status(collection_id, user_id)
+        if not member:
+            return {"allowed": False, "current": 0, "cap": 0, "days_member": 0, "reason": "not a member"}
+
+        # Find the instance owned by the collection owner
+        coll = self.conn.execute("SELECT created_by FROM collections WHERE id = ?", (collection_id,)).fetchone()
+        if not coll:
+            return {"allowed": True, "current": 0, "cap": -1, "days_member": 0, "reason": "no collection"}
+
+        owner_id = coll["created_by"]
+        # Find instances owned by the collection owner
+        instances = self.conn.execute(
+            "SELECT id, rate_limit_initial, rate_limit_growth FROM dugg_instances WHERE owner_id = ?",
+            (owner_id,),
+        ).fetchall()
+
+        if not instances:
+            # No instance = no rate limit
+            return {"allowed": True, "current": 0, "cap": -1, "days_member": 0, "reason": "no instance configured"}
+
+        # Use the first instance's rate limit config (owner's primary instance)
+        inst = dict(instances[0])
+        initial = inst["rate_limit_initial"]
+        growth = inst["rate_limit_growth"]
+
+        # Calculate tenure in days
+        joined_at = member["joined_at"]
+        now = datetime.now(timezone.utc)
+        try:
+            joined = datetime.fromisoformat(joined_at.replace("Z", "+00:00"))
+            days_member = max(0, (now - joined).days)
+        except (ValueError, AttributeError):
+            days_member = 0
+
+        # Calculate cap: initial + (days * growth)
+        cap = initial + (days_member * growth)
+
+        # Count today's submissions by this user in this collection
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        current = self.conn.execute(
+            "SELECT COUNT(*) as count FROM resources WHERE collection_id = ? AND submitted_by = ? AND created_at >= ?",
+            (collection_id, user_id, today_start),
+        ).fetchone()["count"]
+
+        return {
+            "allowed": current < cap,
+            "current": current,
+            "cap": cap,
+            "days_member": days_member,
+            "reason": "ok" if current < cap else "rate limit exceeded",
+        }
 
     # --- Helpers ---
 

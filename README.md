@@ -23,6 +23,7 @@ Dugg is an MCP server that acts as a shared, searchable filing cabinet for links
 - **Invite trees** — Member-invites-member with tracked lineage. Accountability flows through the chain
 - **Ban cascades** — Ban a user and prune their invite tree. Depth 1 = hard prune, depth 2+ = credit score decides survival
 - **Appeals** — Banned users appeal with their contribution history. Owner (or owner's agent) decides
+- **Rate limiting** — Tenure-based submission caps. New members start at N posts/day (owner-configured, default 5), growing by X per day of membership. Longer in the mix = higher cap. Prevents fresh-account spam without punishing established contributors
 - **Auto-routing** — Agents pull topic descriptors from subscribed instances and auto-route published content to matching targets
 - **Feed** — Reverse-chron view of everything across your accessible collections
 
@@ -121,6 +122,8 @@ Add to your OpenClaw config:
 | `dugg_appeals` | List pending appeals with credit scores (owner only). |
 | `dugg_appeal_resolve` | Approve or deny a ban appeal (owner only). |
 | `dugg_routing_manifest` | Get topic descriptors for agent auto-routing decisions. |
+| `dugg_rate_limit` | Set tenure-based rate limit config for an instance (owner only). |
+| `dugg_rate_limit_status` | Check your current daily post usage vs. cap for a collection. |
 | `dugg_share` | Share a collection with another user, with optional tag filters. |
 | `dugg_create_user` | Create a new user and get their API key. |
 
@@ -300,6 +303,37 @@ dugg_routing_manifest()
 4. User verifies/overrides after the fact if needed
 
 The extra step is verification, not decision. Don't slow the user down on provenance.
+
+## Rate limiting
+
+Tenure-based submission caps prevent fresh accounts from flooding a Dugg instance while letting established members post freely.
+
+```
+cap = initial + (days_as_member × growth)
+```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `rate_limit_initial` | 5 | Posts/day for a brand-new member |
+| `rate_limit_growth` | 2 | Extra posts/day earned per day of membership |
+
+**Example:** With defaults, a member who joined 10 days ago can post 25 times/day (5 + 10×2). A member who joined today can post 5 times.
+
+```
+# Owner configures rate limits
+dugg_rate_limit(instance_id="abc123", initial=5, growth=2)
+
+# Members check their status
+dugg_rate_limit_status(collection_id="xyz789")
+# Returns: 3/25 posts used today, member for 10 days
+```
+
+**Design:**
+- Rate limits are per-instance, set by the owner
+- Cap is enforced on `dugg_add` — the submission is rejected before enrichment runs
+- The counter resets daily (UTC midnight)
+- No instance configured = no rate limit (unlimited)
+- Pairs with ban cascades — bot armies invited by a bad actor all start at the initial cap and can't firehose
 
 ## Enrichment
 
