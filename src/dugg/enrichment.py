@@ -1,12 +1,86 @@
 """URL enrichment: metadata extraction, YouTube transcripts, OG tags."""
 
 import json
+import logging
 import re
+from pathlib import Path
 from typing import Optional
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import httpx
 from bs4 import BeautifulSoup
+
+logger = logging.getLogger("dugg.enrichment")
+
+# Tracking parameters to strip during URL sanitization
+_TRACKING_PARAMS = {
+    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+    "fbclid", "gclid", "gclsrc", "dclid", "msclkid", "twclid",
+    "mc_cid", "mc_eid", "oly_enc_id", "oly_anon_id",
+    "_ga", "_gl", "ref", "ref_src",
+}
+
+# Blocked URL schemes
+_ALLOWED_SCHEMES = {"http", "https"}
+
+# Default blocklist path (ships with the package)
+_BLOCKLIST_PATH = Path(__file__).parent.parent.parent / "blocklist.txt"
+_blocklist_cache: Optional[set] = None
+
+
+def _load_blocklist() -> set:
+    """Load domain blocklist from file. Cached after first load."""
+    global _blocklist_cache
+    if _blocklist_cache is not None:
+        return _blocklist_cache
+    _blocklist_cache = set()
+    if _BLOCKLIST_PATH.exists():
+        for line in _BLOCKLIST_PATH.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                _blocklist_cache.add(line.lower())
+    return _blocklist_cache
+
+
+def validate_url(url: str) -> tuple[bool, str]:
+    """Validate a URL for safety. Returns (is_valid, reason)."""
+    if not url:
+        return False, "Empty URL"
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False, "Malformed URL"
+
+    if not parsed.scheme:
+        return False, "Missing URL scheme"
+    if parsed.scheme.lower() not in _ALLOWED_SCHEMES:
+        return False, f"Blocked scheme: {parsed.scheme}"
+    if not parsed.hostname:
+        return False, "Missing hostname"
+
+    # Check domain blocklist
+    hostname = parsed.hostname.lower()
+    blocklist = _load_blocklist()
+    if hostname in blocklist:
+        return False, f"Blocked domain: {hostname}"
+    # Also check without www. prefix
+    bare_host = hostname.removeprefix("www.")
+    if bare_host in blocklist:
+        return False, f"Blocked domain: {bare_host}"
+
+    return True, "ok"
+
+
+def sanitize_url(url: str) -> str:
+    """Strip tracking parameters from a URL to normalize for dedup."""
+    try:
+        parsed = urlparse(url)
+        params = parse_qs(parsed.query, keep_blank_values=True)
+        cleaned = {k: v for k, v in params.items() if k.lower() not in _TRACKING_PARAMS}
+        new_query = urlencode(cleaned, doseq=True) if cleaned else ""
+        return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, ""))
+    except Exception:
+        return url
 
 
 def detect_source_type(url: str) -> str:
@@ -200,7 +274,27 @@ async def fetch_youtube_description(video_id: str) -> str:
 
 
 async def enrich_url(url: str) -> dict:
-    """Full enrichment pipeline for a URL. Returns structured metadata."""
+    """Full enrichment pipeline for a URL. Returns structured metadata.
+
+    Validates URL scheme and checks against domain blocklist before enriching.
+    Strips tracking parameters for normalization.
+    """
+    # Validate URL
+    is_valid, reason = validate_url(url)
+    if not is_valid:
+        logger.warning(f"URL validation failed for {url}: {reason}")
+        return {
+            "source_type": "unknown",
+            "title": "",
+            "description": "",
+            "thumbnail": "",
+            "transcript": "",
+            "raw_metadata": {"_validation_error": reason},
+        }
+
+    # Sanitize tracking params
+    url = sanitize_url(url)
+
     source_type = detect_source_type(url)
     result = {
         "source_type": source_type,

@@ -1,0 +1,13 @@
+# Dugg Domain Blocklist
+# Default list sourced from URLhaus (abuse.ch) and community-maintained blocklists.
+# Instance owners can extend or replace this file.
+# Format: one domain per line. Lines starting with # are comments.
+#
+# To update from URLhaus:
+#   curl -sL https://urlhaus.abuse.ch/downloads/hostfile/ | grep -v '^#' | awk '{print $2}' > blocklist.txt
+#
+# This ships with a minimal seed list. For production deployments,
+# pull the full URLhaus feed and/or Steven Black's hosts list.
+
+# --- Known malware distribution domains (seed list) ---
+# These are illustrative — pull the full URLhaus feed for production.

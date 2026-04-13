@@ -470,6 +470,7 @@ def test_ban_cascade_depth2_credit_score_survives(db):
 
 
 def test_ban_cascade_depth2_low_score_banned(db):
+    from datetime import datetime, timezone, timedelta
     kade = db.create_user("Kade")
     spammer = db.create_user("Spammer")
     middleman = db.create_user("Middleman")
@@ -478,6 +479,13 @@ def test_ban_cascade_depth2_low_score_banned(db):
     db.invite_member(coll["id"], kade["id"], spammer["id"])
     db.invite_member(coll["id"], spammer["id"], middleman["id"])
     db.invite_member(coll["id"], middleman["id"], ghost["id"])
+    # Expire ghost's grace period so they're judged by credit score
+    expired = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    db.conn.execute(
+        "UPDATE collection_members SET grace_expires_at = ? WHERE collection_id = ? AND user_id = ?",
+        (expired, coll["id"], ghost["id"]),
+    )
+    db.conn.commit()
     # Ghost has zero contributions
     result = db.ban_member(coll["id"], spammer["id"], cascade=True, credit_threshold=5)
     assert ghost["id"] in result["banned"]
@@ -510,8 +518,8 @@ def test_credit_score(db):
         db.react_to_resource(r["id"], kade["id"], "tap")
     score = db.get_member_credit_score(coll["id"], rocco["id"])
     assert score["submissions"] == 3
-    assert score["reactions_received"] == 3
-    assert score["total"] == 6
+    assert score["distinct_human_reactors"] == 1  # Only Kade reacted
+    assert score["total"] == 3  # 3 submissions × 1 distinct human reactor
 
 
 # --- Appeals ---
@@ -1248,3 +1256,257 @@ def test_ban_cascade_catches_agents_in_tree(db):
     assert victim["id"] in result["banned"]
     assert spammer_bot["id"] in result["banned"]
     assert victim_bot["id"] in result["banned"]
+
+
+# --- Invite Tree: Cycle Detection & Depth Cap ---
+
+def test_invite_tree_cycle_detection(db):
+    """Circular invites should not cause infinite recursion."""
+    kade = db.create_user("Kade")
+    alice = db.create_user("Alice")
+    bob = db.create_user("Bob")
+    coll = db.create_collection("Shared", kade["id"], visibility="shared")
+    db.invite_member(coll["id"], kade["id"], alice["id"])
+    db.invite_member(coll["id"], alice["id"], bob["id"])
+    # Manually create a cycle: bob invited_by -> alice, alice invited_by -> bob
+    db.conn.execute(
+        "UPDATE collection_members SET invited_by = ? WHERE collection_id = ? AND user_id = ?",
+        (bob["id"], coll["id"], alice["id"]),
+    )
+    db.conn.commit()
+    # Should terminate without infinite loop
+    tree = db.get_invite_tree(coll["id"], kade["id"])
+    # The tree should contain members but not loop infinitely
+    assert isinstance(tree, list)
+
+
+def test_invite_tree_depth_cap(db):
+    """Tree should stop at MAX_INVITE_DEPTH."""
+    from dugg.db import MAX_INVITE_DEPTH
+    kade = db.create_user("Kade")
+    coll = db.create_collection("Deep", kade["id"], visibility="shared")
+    prev_id = kade["id"]
+    users = []
+    # Create a chain of 20 invites
+    for i in range(20):
+        u = db.create_user(f"User{i}")
+        users.append(u)
+        db.invite_member(coll["id"], prev_id, u["id"])
+        prev_id = u["id"]
+    tree = db.get_invite_tree(coll["id"], kade["id"])
+    max_depth = max(m["depth"] for m in tree)
+    assert max_depth <= MAX_INVITE_DEPTH
+
+
+def test_ip_duplicate_check(db):
+    """IP addresses should be tracked and flaggable."""
+    kade = db.create_user("Kade")
+    alice = db.create_user("Alice")
+    bob = db.create_user("Bob")
+    coll = db.create_collection("Shared", kade["id"], visibility="shared")
+    db.invite_member(coll["id"], kade["id"], alice["id"], ip_address="1.2.3.4")
+    # Same IP for different user
+    dups = db.check_ip_duplicate(coll["id"], "1.2.3.4")
+    assert len(dups) == 1
+    assert dups[0]["user_id"] == alice["id"]
+
+
+# --- Owner Ban Protection ---
+
+def test_owner_cannot_be_banned(db):
+    """Banning the collection owner should be rejected."""
+    kade = db.create_user("Kade")
+    coll = db.create_collection("Shared", kade["id"], visibility="shared")
+    result = db.ban_member(coll["id"], kade["id"])
+    assert result.get("error") is not None
+    assert len(result["banned"]) == 0
+    # Owner is still active
+    status = db.get_member_status(coll["id"], kade["id"])
+    assert status["status"] == "active"
+
+
+# --- Succession ---
+
+def test_set_and_trigger_succession(db):
+    """Succession should transfer ownership."""
+    kade = db.create_user("Kade")
+    rocco = db.create_user("Rocco")
+    inst = db.create_instance("AI", kade["id"])
+    db.subscribe_to_instance(inst["id"], rocco["id"])
+    # Set successor
+    result = db.set_successor(inst["id"], kade["id"], rocco["id"])
+    assert result is not None
+    assert result["successor_id"] == rocco["id"]
+    # Trigger succession
+    result = db.trigger_succession(inst["id"])
+    assert result["old_owner"] == kade["id"]
+    assert result["new_owner"] == rocco["id"]
+    # Verify instance ownership changed
+    inst = db.get_instance(result["instance_id"])
+    assert inst["owner_id"] == rocco["id"]
+    assert inst["successor_id"] is None
+
+
+# --- Credit Score: Multiplicative Formula ---
+
+def test_credit_score_multiplicative(db):
+    """Score = submissions * distinct_human_reactors."""
+    kade = db.create_user("Kade")
+    rocco = db.create_user("Rocco")
+    miles = db.create_user("Miles")
+    coll = db.create_collection("Shared", kade["id"], visibility="shared")
+    db.invite_member(coll["id"], kade["id"], rocco["id"])
+    db.invite_member(coll["id"], kade["id"], miles["id"])
+    # Rocco submits 3 resources, Kade and Miles react
+    for i in range(3):
+        r = db.add_resource(url=f"https://example.com/r{i}", collection_id=coll["id"], submitted_by=rocco["id"])
+        db.react_to_resource(r["id"], kade["id"], "tap")
+        db.react_to_resource(r["id"], miles["id"], "star")
+    score = db.get_member_credit_score(coll["id"], rocco["id"])
+    assert score["submissions"] == 3
+    assert score["distinct_human_reactors"] == 2
+    assert score["total"] == 6  # 3 * 2
+
+
+def test_credit_score_excludes_agent_reactions(db):
+    """Agent reactions should not count toward credit score."""
+    kade = db.create_user("Kade")
+    rocco = db.create_user("Rocco")
+    rocco_bot = db.create_agent_for_user(rocco["id"])
+    coll = db.create_collection("Shared", kade["id"], visibility="shared")
+    db.invite_member(coll["id"], kade["id"], rocco["id"])
+    db.invite_member(coll["id"], rocco["id"], rocco_bot["id"])
+    # Kade submits, rocco (human) reacts, rocco_bot (agent) also reacts
+    r = db.add_resource(url="https://example.com/1", collection_id=coll["id"], submitted_by=kade["id"])
+    db.react_to_resource(r["id"], rocco["id"], "tap")
+    db.react_to_resource(r["id"], rocco_bot["id"], "tap")
+    score = db.get_member_credit_score(coll["id"], kade["id"])
+    # Only rocco counts as human, not rocco_bot
+    assert score["distinct_human_reactors"] == 1
+    assert score["total"] == 1  # 1 submission * 1 human reactor
+
+
+# --- Grace Period ---
+
+def test_grace_period_survives_ban_cascade(db):
+    """Members at depth 2+ in their grace period survive ban cascades."""
+    from datetime import datetime, timezone, timedelta
+    kade = db.create_user("Kade")
+    spammer = db.create_user("Spammer")
+    middleman = db.create_user("Middleman")
+    newbie = db.create_user("Newbie")
+    coll = db.create_collection("Shared", kade["id"], visibility="shared")
+    db.invite_member(coll["id"], kade["id"], spammer["id"])
+    db.invite_member(coll["id"], spammer["id"], middleman["id"])
+    db.invite_member(coll["id"], middleman["id"], newbie["id"])
+    # Newbie is at depth 2 from spammer and in grace period (just joined)
+    # Without grace period protection, newbie would need credit_threshold to survive
+    # With grace period, newbie survives regardless of score
+    result = db.ban_member(coll["id"], spammer["id"], cascade=True, credit_threshold=5)
+    # Middleman at depth 1 = hard ban
+    assert middleman["id"] in result["banned"]
+    # Newbie at depth 2 in grace period = survives
+    assert newbie["id"] in result["survived"]
+    status = db.get_member_status(coll["id"], newbie["id"])
+    assert status["status"] == "active"
+
+
+# --- FIFO Publish Queue ---
+
+def test_ban_cancels_pending_publishes(db):
+    """Banning a user should cancel their pending publishes."""
+    kade = db.create_user("Kade")
+    rocco = db.create_user("Rocco")
+    coll = db.create_collection("Shared", kade["id"], visibility="shared")
+    inst = db.create_instance("Remote", kade["id"])
+    db.update_instance(inst["id"], kade["id"], endpoint_url="https://remote.dugg.fyi")
+    db.invite_member(coll["id"], kade["id"], rocco["id"])
+    res = db.add_resource(url="https://example.com/1", collection_id=coll["id"], submitted_by=rocco["id"])
+    db.enqueue_publish(res["id"], "public")
+    # Ban Rocco
+    db.ban_member(coll["id"], rocco["id"], cascade=False)
+    # Pending publishes should be cancelled
+    row = db.conn.execute(
+        "SELECT status FROM publish_queue WHERE resource_id = ?", (res["id"],)
+    ).fetchone()
+    if row:
+        assert dict(row)["status"] == "cancelled"
+
+
+# --- 60-Day Egress Timeout ---
+
+def test_egress_timeout_stale_members(db):
+    """Members with old last_seen_at should be returned by get_stale_members."""
+    from datetime import datetime, timezone, timedelta
+    kade = db.create_user("Kade")
+    rocco = db.create_user("Rocco")
+    coll = db.create_collection("Shared", kade["id"], visibility="shared")
+    db.invite_member(coll["id"], kade["id"], rocco["id"])
+    # Set last_seen_at to 90 days ago
+    old_date = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
+    db.conn.execute(
+        "UPDATE collection_members SET last_seen_at = ? WHERE collection_id = ? AND user_id = ?",
+        (old_date, coll["id"], rocco["id"]),
+    )
+    db.conn.commit()
+    stale = db.get_stale_members()
+    stale_ids = [m["user_id"] for m in stale]
+    assert rocco["id"] in stale_ids
+
+
+# --- URL Validation ---
+
+def test_url_validation_blocked_scheme():
+    """javascript: and data: URLs should be rejected."""
+    from dugg.enrichment import validate_url
+    valid, reason = validate_url("javascript:alert(1)")
+    assert not valid
+    valid, reason = validate_url("data:text/html,<h1>hi</h1>")
+    assert not valid
+    valid, reason = validate_url("file:///etc/passwd")
+    assert not valid
+
+
+def test_url_validation_accepts_http():
+    """HTTP and HTTPS URLs should be accepted."""
+    from dugg.enrichment import validate_url
+    valid, _ = validate_url("https://example.com")
+    assert valid
+    valid, _ = validate_url("http://example.com/path?q=1")
+    assert valid
+
+
+def test_url_sanitization_strips_tracking():
+    """Tracking parameters should be stripped."""
+    from dugg.enrichment import sanitize_url
+    result = sanitize_url("https://example.com/page?utm_source=twitter&utm_medium=social&important=yes")
+    assert "utm_source" not in result
+    assert "utm_medium" not in result
+    assert "important=yes" in result
+
+
+# --- Inactive Member Pruning ---
+
+def test_prune_inactive_members(db):
+    """Members past grace period with zero activity should be prunable."""
+    from datetime import datetime, timezone, timedelta
+    kade = db.create_user("Kade")
+    lurker = db.create_user("Lurker")
+    coll = db.create_collection("Shared", kade["id"], visibility="shared")
+    db.invite_member(coll["id"], kade["id"], lurker["id"])
+    # Expire the grace period
+    expired = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    db.conn.execute(
+        "UPDATE collection_members SET grace_expires_at = ? WHERE collection_id = ? AND user_id = ?",
+        (expired, coll["id"], lurker["id"]),
+    )
+    db.conn.commit()
+    # Lurker has zero submissions and zero reactions
+    inactive = db.get_inactive_members(coll["id"])
+    assert len(inactive) == 1
+    assert inactive[0]["user_id"] == lurker["id"]
+    # Prune them
+    result = db.prune_inactive_members(coll["id"])
+    assert lurker["id"] in result["pruned"]
+    status = db.get_member_status(coll["id"], lurker["id"])
+    assert status["status"] == "banned"

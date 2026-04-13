@@ -154,9 +154,11 @@ async def sync_loop(db, interval: int = 30):
     logger.info(f"Publish sync daemon started (interval: {interval}s)")
 
     eviction_counter = 0
+    ttl_counter = 0
     while True:
         try:
-            pending = db.get_pending_publishes(limit=20)
+            # Use FIFO-gated fetch to prevent backlog leapfrogging
+            pending = db.get_pending_publishes_fifo(limit=20)
             if pending:
                 logger.info(f"Processing {len(pending)} pending publish(es)")
                 for entry in pending:
@@ -178,6 +180,17 @@ async def sync_loop(db, interval: int = 30):
         if eviction_counter >= 10:
             eviction_counter = 0
             await run_storage_eviction(db)
+
+        # Purge old failed publishes every ~100 cycles (~50 min at 30s)
+        ttl_counter += 1
+        if ttl_counter >= 100:
+            ttl_counter = 0
+            try:
+                purged = db.purge_old_failed_publishes()
+                if purged > 0:
+                    logger.info(f"Purged {purged} expired failed publish(es)")
+            except Exception as e:
+                logger.error(f"TTL purge error: {e}")
 
         await asyncio.sleep(interval)
 

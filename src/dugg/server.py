@@ -579,6 +579,55 @@ async def list_tools() -> list[Tool]:
                 },
             },
         ),
+        Tool(
+            name="dugg_publish_clear",
+            description="Delete failed publish queue entries. Optionally scoped to a target instance. Owner only.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "target_instance_id": {"type": "string", "description": "Only clear failures targeting this instance (omit for all)", "default": ""},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+            },
+        ),
+        Tool(
+            name="dugg_publish_retry_selective",
+            description="Retry specific failed publishes — by ID or by target instance. More surgical than dugg_publish_retry.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "publish_id": {"type": "string", "description": "Specific publish queue entry ID to retry", "default": ""},
+                    "target_instance_id": {"type": "string", "description": "Retry all failed entries for this target instance", "default": ""},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+            },
+        ),
+        Tool(
+            name="dugg_prune_inactive",
+            description="List or remove members past their 14-day grace period with zero activity (no submissions, no reactions). No lurking policy.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "collection_id": {"type": "string", "description": "Collection to check for inactive members"},
+                    "execute": {"type": "boolean", "description": "If true, actually ban inactive members. If false, just list them.", "default": False},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+                "required": ["collection_id"],
+            },
+        ),
+        Tool(
+            name="dugg_set_successor",
+            description="Designate a successor for a Dugg instance. If the owner is incapacitated, ownership can be transferred to this user. Owner only.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "instance_id": {"type": "string", "description": "Instance to set successor for"},
+                    "successor_id": {"type": "string", "description": "User ID of the designated successor (must be a subscriber)"},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+                "required": ["instance_id", "successor_id"],
+            },
+        ),
     ]
 
 
@@ -670,6 +719,14 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             # Welcome already provides full orientation — no banner needed
             _welcomed_keys.add(api_key or "dugg_local_default")
             return _handle_welcome(d, user_id, user)
+        elif name == "dugg_publish_clear":
+            result = _handle_publish_clear(d, arguments)
+        elif name == "dugg_publish_retry_selective":
+            result = _handle_publish_retry_selective(d, arguments)
+        elif name == "dugg_prune_inactive":
+            result = _handle_prune_inactive(d, user_id, arguments)
+        elif name == "dugg_set_successor":
+            result = _handle_set_successor(d, user_id, arguments)
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
@@ -1107,8 +1164,6 @@ def _handle_instance_update(d: DuggDB, user_id: str, args: dict) -> list[TextCon
         updates["name"] = args["name"]
     if args.get("topic"):
         updates["topic"] = args["topic"]
-    if args.get("access_mode"):
-        updates["access_mode"] = args["access_mode"]
     if args.get("endpoint_url"):
         updates["endpoint_url"] = args["endpoint_url"]
     if "read_horizon_base_days" in args and args["read_horizon_base_days"] is not None:
@@ -1184,6 +1239,8 @@ def _handle_ban(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
     if not member or member["role"] != "owner":
         return [TextContent(type="text", text="Only the collection owner can ban members")]
     result = d.ban_member(collection_id, target_user_id, cascade=cascade, credit_threshold=credit_threshold)
+    if result.get("error"):
+        return [TextContent(type="text", text=result["error"])]
     lines = [f"Banned {len(result['banned'])} member(s)"]
     if result["survived"]:
         lines.append(f"Survived via credit score: {len(result['survived'])} member(s) (re-rooted under owner)")
@@ -1207,7 +1264,7 @@ def _handle_appeal(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
     on_behalf = ""
     if result["appealed_by"] != result["user_id"]:
         on_behalf = f" (filed by agent on behalf of {result['user_id']})"
-    return [TextContent(type="text", text=f"Appeal submitted{on_behalf}. Credit score: {result['submissions']} submissions, {result['reactions_received']} reactions received ({result['total']} total)")]
+    return [TextContent(type="text", text=f"Appeal submitted{on_behalf}. Credit score: {result['submissions']} submissions x {result['distinct_human_reactors']} distinct human reactors = {result['total']}")]
 
 
 def _handle_appeals(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
@@ -1222,7 +1279,7 @@ def _handle_appeals(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
     lines = [f"{len(appeals)} pending appeal(s):\n"]
     for a in appeals:
         lines.append(f"- {a['name']} ({a['user_id']})")
-        lines.append(f"  Submissions: {a['submissions']} | Reactions received: {a['reactions_received']} | Total score: {a['total']}")
+        lines.append(f"  Submissions: {a['submissions']} x Distinct human reactors: {a['distinct_human_reactors']} = Score: {a['total']}")
         lines.append(f"  Joined: {a['joined_at']}")
     return [TextContent(type="text", text="\n".join(lines))]
 
@@ -1420,6 +1477,55 @@ def _handle_rate_limit_status(d: DuggDB, user_id: str, args: dict) -> list[TextC
     if status["cap"] == -1:
         return [TextContent(type="text", text="No rate limit configured for this collection.")]
     return [TextContent(type="text", text=f"Rate limit status:\n  Today: {status['current']}/{status['cap']} posts used\n  Member for: {status['days_member']} day(s)\n  {'Can post' if status['allowed'] else 'Rate limit reached — try again tomorrow'}")]
+
+
+def _handle_publish_clear(d: DuggDB, args: dict) -> list[TextContent]:
+    target = args.get("target_instance_id", "") or None
+    count = d.clear_failed_publishes(target_instance_id=target)
+    if count == 0:
+        return [TextContent(type="text", text="No failed publishes to clear.")]
+    scope = f" for instance {target}" if target else ""
+    return [TextContent(type="text", text=f"Cleared {count} failed publish(es){scope}.")]
+
+
+def _handle_publish_retry_selective(d: DuggDB, args: dict) -> list[TextContent]:
+    publish_id = args.get("publish_id", "") or None
+    target = args.get("target_instance_id", "") or None
+    count = d.retry_publish_selective(publish_id=publish_id, target_instance_id=target)
+    if count == 0:
+        return [TextContent(type="text", text="No failed publishes matching criteria.")]
+    return [TextContent(type="text", text=f"Reset {count} failed publish(es) back to pending.")]
+
+
+def _handle_prune_inactive(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    collection_id = args["collection_id"]
+    execute = args.get("execute", False)
+    # Only owner can prune
+    member = d.get_member_status(collection_id, user_id)
+    if not member or member["role"] != "owner":
+        return [TextContent(type="text", text="Only the collection owner can prune inactive members")]
+    inactive = d.get_inactive_members(collection_id)
+    if not inactive:
+        return [TextContent(type="text", text="No inactive members past grace period. Everyone is contributing.")]
+    if not execute:
+        lines = [f"{len(inactive)} inactive member(s) past grace period:\n"]
+        for m in inactive:
+            lines.append(f"- {m['name']} ({m['user_id']}) — joined {m['joined_at']}, 0 submissions, 0 reactions")
+        lines.append(f"\nRun with execute=true to ban them.")
+        return [TextContent(type="text", text="\n".join(lines))]
+    result = d.prune_inactive_members(collection_id)
+    return [TextContent(type="text", text=f"Pruned {result['count']} inactive member(s).")]
+
+
+def _handle_set_successor(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    instance_id = args["instance_id"]
+    successor_id = args["successor_id"]
+    result = d.set_successor(instance_id, user_id, successor_id)
+    if not result:
+        return [TextContent(type="text", text="Failed — instance not found, you're not the owner, or successor is not a subscriber")]
+    successor = d.get_user(successor_id)
+    name = successor["name"] if successor else successor_id
+    return [TextContent(type="text", text=f"Successor set to {name} ({successor_id}) for instance {instance_id}. If ownership needs to transfer, it's ready.")]
 
 
 def _handle_get(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:

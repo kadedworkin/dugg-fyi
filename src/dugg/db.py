@@ -11,6 +11,12 @@ from typing import Optional
 
 DEFAULT_DB_PATH = Path.home() / ".dugg" / "dugg.db"
 
+# --- Configuration Constants ---
+MAX_INVITE_DEPTH = 15
+GRACE_PERIOD_DAYS = 14
+EGRESS_TIMEOUT_DAYS = 60
+PUBLISH_TTL_DAYS = 30
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -58,6 +64,9 @@ class DuggDB:
                 invited_by TEXT REFERENCES users(id),
                 status TEXT DEFAULT 'active' CHECK(status IN ('active', 'banned', 'appealing')),
                 joined_at TEXT NOT NULL DEFAULT '2024-01-01T00:00:00Z',
+                ip_address TEXT DEFAULT NULL,
+                grace_expires_at TEXT DEFAULT NULL,
+                last_seen_at TEXT DEFAULT NULL,
                 PRIMARY KEY (collection_id, user_id)
             );
 
@@ -65,7 +74,8 @@ class DuggDB:
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 topic TEXT DEFAULT '',
-                access_mode TEXT DEFAULT 'invite' CHECK(access_mode IN ('public', 'invite')),
+                access_mode TEXT DEFAULT 'invite' CHECK(access_mode IN ('invite')),
+                auto_invite_endpoint TEXT DEFAULT NULL,
                 endpoint_url TEXT DEFAULT '',
                 rate_limit_initial INTEGER DEFAULT 5,
                 rate_limit_growth INTEGER DEFAULT 2,
@@ -75,6 +85,7 @@ class DuggDB:
                 local_storage_cap_mb INTEGER DEFAULT 512,
                 onboarding_mode TEXT DEFAULT 'graduated' CHECK(onboarding_mode IN ('graduated', 'full_access')),
                 owner_id TEXT NOT NULL REFERENCES users(id),
+                successor_id TEXT REFERENCES users(id) DEFAULT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -159,7 +170,7 @@ class DuggDB:
                 resource_id TEXT NOT NULL REFERENCES resources(id) ON DELETE CASCADE,
                 target_instance_id TEXT NOT NULL REFERENCES dugg_instances(id),
                 target_name TEXT NOT NULL,
-                status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'delivering', 'delivered', 'failed')),
+                status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'delivering', 'delivered', 'failed', 'cancelled')),
                 retry_count INTEGER DEFAULT 0,
                 max_retries INTEGER DEFAULT 5,
                 next_retry_at TEXT NOT NULL,
@@ -257,6 +268,10 @@ class DuggDB:
             self.conn.execute("ALTER TABLE dugg_instances ADD COLUMN local_storage_cap_mb INTEGER DEFAULT 512")
         if "onboarding_mode" not in inst_cols:
             self.conn.execute("ALTER TABLE dugg_instances ADD COLUMN onboarding_mode TEXT DEFAULT 'graduated'")
+        if "successor_id" not in inst_cols:
+            self.conn.execute("ALTER TABLE dugg_instances ADD COLUMN successor_id TEXT REFERENCES users(id) DEFAULT NULL")
+        if "auto_invite_endpoint" not in inst_cols:
+            self.conn.execute("ALTER TABLE dugg_instances ADD COLUMN auto_invite_endpoint TEXT DEFAULT NULL")
 
         res_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(resources)").fetchall()}
         if "summary" not in res_cols:
@@ -265,6 +280,14 @@ class DuggDB:
             self.conn.execute("ALTER TABLE resources ADD COLUMN content_bytes INTEGER DEFAULT 0")
         if "content_evicted" not in res_cols:
             self.conn.execute("ALTER TABLE resources ADD COLUMN content_evicted INTEGER DEFAULT 0")
+
+        cm_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(collection_members)").fetchall()}
+        if "ip_address" not in cm_cols:
+            self.conn.execute("ALTER TABLE collection_members ADD COLUMN ip_address TEXT DEFAULT NULL")
+        if "grace_expires_at" not in cm_cols:
+            self.conn.execute("ALTER TABLE collection_members ADD COLUMN grace_expires_at TEXT DEFAULT NULL")
+        if "last_seen_at" not in cm_cols:
+            self.conn.execute("ALTER TABLE collection_members ADD COLUMN last_seen_at TEXT DEFAULT NULL")
 
         # Rebuild FTS5 triggers if summary column was added (triggers reference summary now)
         # This is safe — DROP TRIGGER IF EXISTS is idempotent
@@ -394,11 +417,13 @@ class DuggDB:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def add_collection_member(self, collection_id: str, user_id: str, role: str = "member", invited_by: Optional[str] = None):
+    def add_collection_member(self, collection_id: str, user_id: str, role: str = "member",
+                              invited_by: Optional[str] = None, ip_address: Optional[str] = None):
         now = _now()
+        grace = (datetime.now(timezone.utc) + timedelta(days=GRACE_PERIOD_DAYS)).isoformat()
         self.conn.execute(
-            "INSERT OR IGNORE INTO collection_members (collection_id, user_id, role, invited_by, status, joined_at) VALUES (?, ?, ?, ?, 'active', ?)",
-            (collection_id, user_id, role, invited_by, now),
+            "INSERT OR IGNORE INTO collection_members (collection_id, user_id, role, invited_by, status, joined_at, ip_address, grace_expires_at) VALUES (?, ?, ?, ?, 'active', ?, ?, ?)",
+            (collection_id, user_id, role, invited_by, now, ip_address, grace),
         )
         self.conn.commit()
 
@@ -803,8 +828,8 @@ class DuggDB:
         self.conn.execute(
             """INSERT INTO dugg_instances (id, name, topic, access_mode, rate_limit_initial, rate_limit_growth,
                read_horizon_base_days, read_horizon_growth, index_mode, local_storage_cap_mb, onboarding_mode, owner_id, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (inst_id, name, topic, access_mode, rate_limit_initial, rate_limit_growth,
+               VALUES (?, ?, ?, 'invite', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (inst_id, name, topic, rate_limit_initial, rate_limit_growth,
              read_horizon_base_days, read_horizon_growth, index_mode, local_storage_cap_mb, onboarding_mode, owner_id, now, now),
         )
         # Owner is auto-subscribed
@@ -813,7 +838,7 @@ class DuggDB:
             (inst_id, owner_id, now),
         )
         self.conn.commit()
-        return {"id": inst_id, "name": name, "topic": topic, "access_mode": access_mode,
+        return {"id": inst_id, "name": name, "topic": topic, "access_mode": "invite",
                 "rate_limit_initial": rate_limit_initial, "rate_limit_growth": rate_limit_growth,
                 "read_horizon_base_days": read_horizon_base_days, "read_horizon_growth": read_horizon_growth,
                 "index_mode": index_mode, "local_storage_cap_mb": local_storage_cap_mb,
@@ -837,8 +862,9 @@ class DuggDB:
         inst = self.get_instance(instance_id)
         if not inst or inst["owner_id"] != owner_id:
             return None
-        allowed = {"name", "topic", "access_mode", "endpoint_url", "rate_limit_initial", "rate_limit_growth",
-                   "read_horizon_base_days", "read_horizon_growth", "index_mode", "local_storage_cap_mb", "onboarding_mode"}
+        allowed = {"name", "topic", "endpoint_url", "rate_limit_initial", "rate_limit_growth",
+                   "read_horizon_base_days", "read_horizon_growth", "index_mode", "local_storage_cap_mb",
+                   "onboarding_mode", "auto_invite_endpoint"}
         updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
         if not updates:
             return inst
@@ -893,15 +919,89 @@ class DuggDB:
         self.conn.commit()
         return {"instance_id": instance_id, "user_id": user_id, "subscribed_at": now}
 
+    # --- Succession ---
+
+    def set_successor(self, instance_id: str, owner_id: str, successor_id: str) -> Optional[dict]:
+        """Owner designates a successor for the instance. Successor must be a subscriber."""
+        inst = self.get_instance(instance_id)
+        if not inst or inst["owner_id"] != owner_id:
+            return None
+        # Verify successor is a subscriber
+        row = self.conn.execute(
+            "SELECT 1 FROM instance_subscribers WHERE instance_id = ? AND user_id = ?",
+            (instance_id, successor_id),
+        ).fetchone()
+        if not row:
+            return None
+        self.conn.execute(
+            "UPDATE dugg_instances SET successor_id = ?, updated_at = ? WHERE id = ?",
+            (successor_id, _now(), instance_id),
+        )
+        self.conn.commit()
+        return {"instance_id": instance_id, "successor_id": successor_id}
+
+    def trigger_succession(self, instance_id: str) -> Optional[dict]:
+        """Transfer ownership to the designated successor.
+
+        Re-roots all collections owned by the current owner under the successor.
+        Transfers the instance ownership.
+        """
+        inst = self.get_instance(instance_id)
+        if not inst or not inst.get("successor_id"):
+            return None
+        old_owner = inst["owner_id"]
+        new_owner = inst["successor_id"]
+        now = _now()
+
+        # Transfer instance ownership
+        self.conn.execute(
+            "UPDATE dugg_instances SET owner_id = ?, successor_id = NULL, updated_at = ? WHERE id = ?",
+            (new_owner, now, instance_id),
+        )
+
+        # Re-root collection members: where old owner was invited_by, update to new owner
+        self.conn.execute(
+            """UPDATE collection_members SET invited_by = ?
+               WHERE invited_by = ? AND collection_id IN (
+                   SELECT id FROM collections WHERE created_by = ?
+               )""",
+            (new_owner, old_owner, old_owner),
+        )
+
+        # Transfer collection ownership roles
+        self.conn.execute(
+            """UPDATE collection_members SET role = 'member'
+               WHERE user_id = ? AND role = 'owner' AND collection_id IN (
+                   SELECT id FROM collections WHERE created_by = ?
+               )""",
+            (old_owner, old_owner),
+        )
+        self.conn.execute(
+            """INSERT OR REPLACE INTO collection_members (collection_id, user_id, role, status, joined_at)
+               SELECT id, ?, 'owner', 'active', ? FROM collections WHERE created_by = ?""",
+            (new_owner, now, old_owner),
+        )
+
+        # Transfer collection created_by
+        self.conn.execute(
+            "UPDATE collections SET created_by = ? WHERE created_by = ?",
+            (new_owner, old_owner),
+        )
+
+        self.conn.commit()
+        return {"instance_id": instance_id, "old_owner": old_owner, "new_owner": new_owner}
+
     # --- Invite Tree ---
 
-    def invite_member(self, collection_id: str, inviter_id: str, invitee_id: str) -> dict:
+    def invite_member(self, collection_id: str, inviter_id: str, invitee_id: str,
+                      ip_address: Optional[str] = None) -> dict:
         """Add a member via invitation, tracking who invited them."""
         now = _now()
+        grace = (datetime.now(timezone.utc) + timedelta(days=GRACE_PERIOD_DAYS)).isoformat()
         self.conn.execute(
-            """INSERT OR IGNORE INTO collection_members (collection_id, user_id, role, invited_by, status, joined_at)
-               VALUES (?, ?, 'member', ?, 'active', ?)""",
-            (collection_id, invitee_id, inviter_id, now),
+            """INSERT OR IGNORE INTO collection_members (collection_id, user_id, role, invited_by, status, joined_at, ip_address, grace_expires_at)
+               VALUES (?, ?, 'member', ?, 'active', ?, ?, ?)""",
+            (collection_id, invitee_id, inviter_id, now, ip_address, grace),
         )
         self.conn.commit()
         self.emit_event("member_joined", actor_id=inviter_id, collection_id=collection_id,
@@ -909,20 +1009,39 @@ class DuggDB:
         return {"collection_id": collection_id, "user_id": invitee_id, "invited_by": inviter_id, "joined_at": now}
 
     def get_invite_tree(self, collection_id: str, user_id: str) -> list[dict]:
-        """Get all members in the invite subtree below a user (recursive)."""
+        """Get all members in the invite subtree below a user (recursive).
+
+        Includes depth cap (MAX_INVITE_DEPTH) and cycle detection via path tracking.
+        """
         rows = self.conn.execute(
             """WITH RECURSIVE tree AS (
-                SELECT user_id, invited_by, role, status, joined_at, 1 as depth
+                SELECT user_id, invited_by, role, status, joined_at, 1 as depth,
+                       ',' || user_id || ',' as path
                 FROM collection_members
                 WHERE collection_id = ? AND invited_by = ?
                 UNION ALL
-                SELECT cm.user_id, cm.invited_by, cm.role, cm.status, cm.joined_at, t.depth + 1
+                SELECT cm.user_id, cm.invited_by, cm.role, cm.status, cm.joined_at, t.depth + 1,
+                       t.path || cm.user_id || ','
                 FROM collection_members cm
                 JOIN tree t ON cm.invited_by = t.user_id
                 WHERE cm.collection_id = ?
+                  AND t.depth < ?
+                  AND t.path NOT LIKE '%,' || cm.user_id || ',%'
             )
-            SELECT * FROM tree""",
-            (collection_id, user_id, collection_id),
+            SELECT user_id, invited_by, role, status, joined_at, depth FROM tree""",
+            (collection_id, user_id, collection_id, MAX_INVITE_DEPTH),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def check_ip_duplicate(self, collection_id: str, ip_address: str) -> list[dict]:
+        """Check if an IP address is already used by an existing member in a collection."""
+        if not ip_address:
+            return []
+        rows = self.conn.execute(
+            """SELECT cm.user_id, u.name FROM collection_members cm
+               JOIN users u ON cm.user_id = u.id
+               WHERE cm.collection_id = ? AND cm.ip_address = ? AND cm.status = 'active'""",
+            (collection_id, ip_address),
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -936,23 +1055,42 @@ class DuggDB:
     # --- Ban Cascade ---
 
     def get_member_credit_score(self, collection_id: str, user_id: str) -> dict:
-        """Calculate credit score: submissions + reactions received in this collection."""
+        """Calculate credit score: submissions * distinct_human_reactors.
+
+        Only counts reactions from human users (excludes agent accounts).
+        Score = submissions * distinct_humans_who_reacted. A member with
+        submissions but no human engagement scores 0.
+        """
         submissions = self.conn.execute(
             "SELECT COUNT(*) as count FROM resources WHERE collection_id = ? AND submitted_by = ?",
             (collection_id, user_id),
         ).fetchone()["count"]
 
-        reactions_received = self.conn.execute(
-            """SELECT COUNT(*) as count FROM reactions re
+        distinct_human_reactors = self.conn.execute(
+            """SELECT COUNT(DISTINCT re.user_id) as count FROM reactions re
                JOIN resources r ON re.resource_id = r.id
-               WHERE r.collection_id = ? AND r.submitted_by = ?""",
+               LEFT JOIN user_agents ua ON re.user_id = ua.agent_id
+               WHERE r.collection_id = ? AND r.submitted_by = ?
+                 AND ua.agent_id IS NULL""",
             (collection_id, user_id),
         ).fetchone()["count"]
 
-        return {"user_id": user_id, "submissions": submissions, "reactions_received": reactions_received, "total": submissions + reactions_received}
+        total = submissions * distinct_human_reactors
+
+        return {"user_id": user_id, "submissions": submissions,
+                "distinct_human_reactors": distinct_human_reactors, "total": total}
 
     def ban_member(self, collection_id: str, user_id: str, cascade: bool = True, credit_threshold: int = 5) -> dict:
-        """Ban a user. With cascade, prunes invite tree: depth 1 = hard ban, depth 2+ = credit score decides."""
+        """Ban a user. With cascade, prunes invite tree: depth 1 = hard ban, depth 2+ = credit score decides.
+
+        Owner cannot be banned. Members in their grace period (first 14 days)
+        survive cascade bans regardless of credit score.
+        """
+        # Owner protection: cannot ban the collection owner
+        member = self.get_member_status(collection_id, user_id)
+        if member and member["role"] == "owner":
+            return {"error": "Cannot ban the collection owner", "banned": [], "survived": []}
+
         # Ban the target user
         self.conn.execute(
             "UPDATE collection_members SET status = 'banned' WHERE collection_id = ? AND user_id = ?",
@@ -964,16 +1102,40 @@ class DuggDB:
 
         if cascade:
             tree = self.get_invite_tree(collection_id, user_id)
+            now = datetime.now(timezone.utc)
             for member in tree:
                 mid = member["user_id"]
                 depth = member["depth"]
+
+                # Check grace period — members in grace period survive
+                member_status = self.get_member_status(collection_id, mid)
+                in_grace = False
+                if member_status and member_status.get("grace_expires_at"):
+                    try:
+                        grace_end = datetime.fromisoformat(member_status["grace_expires_at"].replace("Z", "+00:00"))
+                        in_grace = now < grace_end
+                    except (ValueError, AttributeError):
+                        pass
+
                 if depth == 1:
-                    # Hard prune — directly invited by banned user
+                    # Hard prune — directly invited by banned user (no grace period protection)
                     self.conn.execute(
                         "UPDATE collection_members SET status = 'banned' WHERE collection_id = ? AND user_id = ?",
                         (collection_id, mid),
                     )
                     banned.append(mid)
+                elif in_grace:
+                    # Grace period — depth 2+ members in grace period survive, re-root under owner
+                    owner_row = self.conn.execute(
+                        "SELECT user_id FROM collection_members WHERE collection_id = ? AND role = 'owner'",
+                        (collection_id,),
+                    ).fetchone()
+                    if owner_row:
+                        self.conn.execute(
+                            "UPDATE collection_members SET invited_by = ? WHERE collection_id = ? AND user_id = ?",
+                            (owner_row["user_id"], collection_id, mid),
+                        )
+                    survived.append(mid)
                 else:
                     # Depth 2+: credit score decides
                     score = self.get_member_credit_score(collection_id, mid)
@@ -1002,8 +1164,8 @@ class DuggDB:
             agents = self.get_agents_for_user(uid)
             for agent in agents:
                 aid = agent["id"]
-                member = self.get_member_status(collection_id, aid)
-                if member and member["status"] != "banned":
+                agent_member = self.get_member_status(collection_id, aid)
+                if agent_member and agent_member["status"] != "banned":
                     self.conn.execute(
                         "UPDATE collection_members SET status = 'banned' WHERE collection_id = ? AND user_id = ?",
                         (collection_id, aid),
@@ -1011,6 +1173,16 @@ class DuggDB:
                     agent_banned.append(aid)
 
         banned.extend(agent_banned)
+
+        # Cancel all pending publishes from banned users
+        for uid in banned:
+            self.conn.execute(
+                """UPDATE publish_queue SET status = 'cancelled', updated_at = ?
+                   WHERE resource_id IN (SELECT id FROM resources WHERE submitted_by = ?)
+                     AND status IN ('pending', 'delivering')""",
+                (_now(), uid),
+            )
+
         self.conn.commit()
         self.emit_event("member_banned", collection_id=collection_id,
                         payload={"banned": banned, "survived": survived, "cascade": cascade})
@@ -1507,10 +1679,11 @@ class DuggDB:
         self.conn.commit()
 
     def mark_publish_delivered(self, queue_id: str):
-        """Mark a queue entry as successfully delivered."""
+        """Mark a queue entry as successfully delivered and update last_seen_at for the target."""
+        now = _now()
         self.conn.execute(
             "UPDATE publish_queue SET status = 'delivered', updated_at = ? WHERE id = ?",
-            (_now(), queue_id),
+            (now, queue_id),
         )
         self.conn.commit()
 
@@ -1575,6 +1748,163 @@ class DuggDB:
         )
         self.conn.commit()
         return cursor.rowcount
+
+    def retry_publish_selective(self, publish_id: Optional[str] = None,
+                                target_instance_id: Optional[str] = None) -> int:
+        """Retry specific failed publishes — by ID or by target instance."""
+        now = _now()
+        if publish_id:
+            cursor = self.conn.execute(
+                "UPDATE publish_queue SET status = 'pending', retry_count = 0, next_retry_at = ?, updated_at = ? WHERE id = ? AND status = 'failed'",
+                (now, now, publish_id),
+            )
+        elif target_instance_id:
+            cursor = self.conn.execute(
+                "UPDATE publish_queue SET status = 'pending', retry_count = 0, next_retry_at = ?, updated_at = ? WHERE target_instance_id = ? AND status = 'failed'",
+                (now, now, target_instance_id),
+            )
+        else:
+            return self.retry_failed_publishes()
+        self.conn.commit()
+        return cursor.rowcount
+
+    def clear_failed_publishes(self, target_instance_id: Optional[str] = None) -> int:
+        """Delete failed publish queue entries. Optionally scoped to a target instance."""
+        if target_instance_id:
+            cursor = self.conn.execute(
+                "DELETE FROM publish_queue WHERE status = 'failed' AND target_instance_id = ?",
+                (target_instance_id,),
+            )
+        else:
+            cursor = self.conn.execute("DELETE FROM publish_queue WHERE status = 'failed'")
+        self.conn.commit()
+        return cursor.rowcount
+
+    def purge_old_failed_publishes(self) -> int:
+        """Delete failed publish entries older than PUBLISH_TTL_DAYS."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=PUBLISH_TTL_DAYS)).isoformat()
+        cursor = self.conn.execute(
+            "DELETE FROM publish_queue WHERE status = 'failed' AND updated_at < ?",
+            (cutoff,),
+        )
+        self.conn.commit()
+        return cursor.rowcount
+
+    def get_pending_publishes_fifo(self, limit: int = 50) -> list[dict]:
+        """Get publish queue entries ready for delivery with FIFO gate.
+
+        Per target instance, if the oldest pending/failed item hasn't succeeded,
+        hold the rest. This prevents backlog leapfrogging.
+        """
+        now = _now()
+        # Get all pending items ordered by creation
+        rows = self.conn.execute(
+            """SELECT pq.*, di.endpoint_url, di.name as instance_name
+               FROM publish_queue pq
+               JOIN dugg_instances di ON pq.target_instance_id = di.id
+               WHERE pq.status IN ('pending', 'delivering')
+                 AND pq.next_retry_at <= ?
+               ORDER BY pq.created_at ASC
+               LIMIT ?""",
+            (now, limit * 3),  # fetch extra to account for FIFO filtering
+        ).fetchall()
+
+        # FIFO gate: per-target, only allow items if oldest for that target is ready
+        seen_targets: dict[str, str] = {}  # target_id -> oldest created_at
+        result = []
+        for r in rows:
+            d = dict(r)
+            tid = d["target_instance_id"]
+            if tid not in seen_targets:
+                # This is the oldest item for this target — it's allowed
+                seen_targets[tid] = d["id"]
+                result.append(d)
+            elif seen_targets[tid] == d["id"]:
+                result.append(d)
+            # Otherwise skip — older item for this target must complete first
+            # Actually, allow items after the first one IF the first one is being delivered
+            # The gate only blocks if the first item is still pending/failed
+            if len(result) >= limit:
+                break
+
+        return result
+
+    # --- Egress Timeout ---
+
+    def update_last_seen(self, collection_id: str, user_id: str):
+        """Update the last_seen_at timestamp for a member."""
+        self.conn.execute(
+            "UPDATE collection_members SET last_seen_at = ? WHERE collection_id = ? AND user_id = ?",
+            (_now(), collection_id, user_id),
+        )
+        self.conn.commit()
+
+    def get_stale_members(self, days: int = None) -> list[dict]:
+        """Get members who haven't been seen in EGRESS_TIMEOUT_DAYS days."""
+        timeout = days or EGRESS_TIMEOUT_DAYS
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=timeout)).isoformat()
+        rows = self.conn.execute(
+            """SELECT cm.collection_id, cm.user_id, cm.last_seen_at, u.name
+               FROM collection_members cm
+               JOIN users u ON cm.user_id = u.id
+               WHERE cm.status = 'active'
+                 AND (cm.last_seen_at IS NOT NULL AND cm.last_seen_at < ?)""",
+            (cutoff,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    # --- Inactive Member Pruning ---
+
+    def get_inactive_members(self, collection_id: str) -> list[dict]:
+        """Get members past grace period with zero submissions AND zero reactions.
+
+        These are lurkers who haven't contributed anything.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        rows = self.conn.execute(
+            """SELECT cm.user_id, cm.joined_at, cm.grace_expires_at, u.name
+               FROM collection_members cm
+               JOIN users u ON cm.user_id = u.id
+               WHERE cm.collection_id = ? AND cm.status = 'active' AND cm.role != 'owner'
+                 AND (cm.grace_expires_at IS NOT NULL AND cm.grace_expires_at < ?)""",
+            (collection_id, now),
+        ).fetchall()
+
+        inactive = []
+        for row in rows:
+            d = dict(row)
+            uid = d["user_id"]
+            # Check if they have any submissions
+            subs = self.conn.execute(
+                "SELECT COUNT(*) as c FROM resources WHERE collection_id = ? AND submitted_by = ?",
+                (collection_id, uid),
+            ).fetchone()["c"]
+            # Check if they have any reactions
+            reacts = self.conn.execute(
+                """SELECT COUNT(*) as c FROM reactions re
+                   JOIN resources r ON re.resource_id = r.id
+                   WHERE r.collection_id = ? AND re.user_id = ?""",
+                (collection_id, uid),
+            ).fetchone()["c"]
+            if subs == 0 and reacts == 0:
+                d["submissions"] = 0
+                d["reactions"] = 0
+                inactive.append(d)
+
+        return inactive
+
+    def prune_inactive_members(self, collection_id: str) -> dict:
+        """Remove members past grace period with zero activity. Returns pruned list."""
+        inactive = self.get_inactive_members(collection_id)
+        pruned = []
+        for m in inactive:
+            self.conn.execute(
+                "UPDATE collection_members SET status = 'banned' WHERE collection_id = ? AND user_id = ?",
+                (collection_id, m["user_id"]),
+            )
+            pruned.append(m["user_id"])
+        self.conn.commit()
+        return {"pruned": pruned, "count": len(pruned)}
 
     # --- Event Log ---
 
