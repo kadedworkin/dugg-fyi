@@ -59,6 +59,7 @@ async def deliver_publish(db, queue_entry: dict) -> bool:
         },
         "target": target_name,
         "source_instance_id": queue_entry["target_instance_id"],
+        "source_server": db.get_config("server_url", ""),
     }
 
     db.mark_publish_delivering(queue_id)
