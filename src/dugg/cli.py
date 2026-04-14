@@ -75,7 +75,17 @@ def cmd_add_user(args):
         import urllib.request
         api_key = getattr(args, "key", None)
         if not api_key:
-            print("--key is required when using --server (owner API key for auth).")
+            env_file = _find_env_file()
+            try:
+                if env_file.exists():
+                    for line in env_file.read_text().splitlines():
+                        if line.startswith("DUGG_API_KEY="):
+                            api_key = line.split("=", 1)[1].strip()
+                            break
+            except (OSError, PermissionError):
+                pass
+        if not api_key:
+            print("No API key found. Either run 'dugg login <key>' first or pass --key.")
             sys.exit(1)
         url = f"{server.rstrip('/')}/tools/dugg_create_user"
         data = json.dumps({"name": args.name}).encode()
