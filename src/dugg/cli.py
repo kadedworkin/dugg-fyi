@@ -310,12 +310,19 @@ def cmd_add(args):
     db.close()
 
 
+def _user_name_cache(db):
+    """Build a user ID → name lookup."""
+    rows = db.conn.execute("SELECT id, name FROM users").fetchall()
+    return {r["id"]: r["name"] for r in rows}
+
+
 def cmd_search(args):
     """Search Dugg for resources."""
     from pathlib import Path
     db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
     db = DuggDB(db_path)
     user = _resolve_user(db, args)
+    names = _user_name_cache(db)
 
     results = db.search(args.query, user["id"], limit=getattr(args, "limit", 20))
     db.close()
@@ -327,8 +334,11 @@ def cmd_search(args):
     print(f"{len(results)} result(s) for \"{args.query}\":\n")
     for r in results:
         title = r.get("title") or r["url"]
+        added_by = names.get(r.get("submitted_by", ""), "")
         print(f"  {title}")
         print(f"    {r['url']}")
+        if added_by:
+            print(f"    Added by: {added_by}")
         if r.get("note"):
             print(f"    Note: {r['note']}")
         print()
@@ -340,6 +350,7 @@ def cmd_feed(args):
     db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
     db = DuggDB(db_path)
     user = _resolve_user(db, args)
+    names = _user_name_cache(db)
 
     limit = getattr(args, "limit", 20)
     results = db.get_feed(user["id"], limit=limit)
@@ -353,12 +364,18 @@ def cmd_feed(args):
     for r in results:
         title = r.get("title") or r["url"]
         date = r.get("created_at", "")[:10]
+        added_by = names.get(r.get("submitted_by", ""), "")
         print(f"  {title}")
         print(f"    {r['url']}")
+        meta = []
+        if added_by:
+            meta.append(f"by {added_by}")
+        if date:
+            meta.append(date)
+        if meta:
+            print(f"    {' · '.join(meta)}")
         if r.get("note"):
             print(f"    Note: {r['note']}")
-        if date:
-            print(f"    Added: {date}")
         print()
 
 
