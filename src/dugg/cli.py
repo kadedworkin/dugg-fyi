@@ -182,6 +182,136 @@ def cmd_list_users(args):
         print(f"  {r['id']}  {r['name']}  (created {r['created_at']})")
 
 
+def _resolve_user(db, args):
+    """Get user from --key flag or fall back to local user."""
+    api_key = getattr(args, "key", None)
+    if api_key:
+        user = db.get_user_by_api_key(api_key)
+        if not user:
+            print("Invalid API key.")
+            db.close()
+            sys.exit(1)
+        return user
+    user = db.get_user_by_api_key("dugg_local_default")
+    if not user:
+        db.conn.execute(
+            "INSERT OR IGNORE INTO users (id, name, api_key, created_at) VALUES (?, ?, ?, ?)",
+            ("local", "Local User", "dugg_local_default", "2024-01-01T00:00:00Z"),
+        )
+        db.conn.commit()
+        user = db.get_user_by_api_key("dugg_local_default")
+    return user
+
+
+def _ensure_default_collection(db, user_id):
+    """Ensure user has a default collection, return its ID."""
+    collections = db.list_collections(user_id)
+    for c in collections:
+        if c["name"] == "Default":
+            return c["id"]
+    result = db.create_collection("Default", user_id, description="Default collection", visibility="private")
+    return result["id"]
+
+
+def cmd_add(args):
+    """Add a URL to Dugg."""
+    import asyncio
+    from pathlib import Path
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+    user = _resolve_user(db, args)
+
+    coll_id = _ensure_default_collection(db, user["id"])
+    note = getattr(args, "note", "") or ""
+    tags = [t.strip() for t in (getattr(args, "tags", "") or "").split(",") if t.strip()]
+
+    print(f"Adding {args.url} ...")
+
+    # Enrich
+    try:
+        from dugg.enrichment import enrich_url
+        enriched = asyncio.run(enrich_url(args.url))
+    except Exception:
+        enriched = {}
+
+    resource = db.add_resource(
+        url=args.url,
+        collection_id=coll_id,
+        submitted_by=user["id"],
+        note=note,
+        title=enriched.get("title", ""),
+        description=enriched.get("description", ""),
+        thumbnail=enriched.get("thumbnail", ""),
+        source_type=enriched.get("source_type", "unknown"),
+        author=enriched.get("raw_metadata", {}).get("author", ""),
+        transcript=enriched.get("transcript", ""),
+        raw_metadata=enriched.get("raw_metadata"),
+        tags=tags,
+        tag_source="human" if tags else "agent",
+    )
+
+    title = resource.get("title") or args.url
+    print(f"  Added: {title}")
+    print(f"  ID: {resource['id']}")
+    if enriched.get("transcript"):
+        print(f"  Transcript: {len(enriched['transcript'])} chars")
+    if note:
+        print(f"  Note: {note}")
+    db.close()
+
+
+def cmd_search(args):
+    """Search Dugg for resources."""
+    from pathlib import Path
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+    user = _resolve_user(db, args)
+
+    results = db.search(args.query, user["id"], limit=getattr(args, "limit", 20))
+    db.close()
+
+    if not results:
+        print(f"No results for \"{args.query}\"")
+        return
+
+    print(f"{len(results)} result(s) for \"{args.query}\":\n")
+    for r in results:
+        title = r.get("title") or r["url"]
+        print(f"  {title}")
+        print(f"    {r['url']}")
+        if r.get("note"):
+            print(f"    Note: {r['note']}")
+        print()
+
+
+def cmd_feed(args):
+    """Show recent resources."""
+    from pathlib import Path
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+    user = _resolve_user(db, args)
+
+    limit = getattr(args, "limit", 20)
+    results = db.get_feed(user["id"], limit=limit)
+    db.close()
+
+    if not results:
+        print("Feed is empty. Add something with: dugg add <url>")
+        return
+
+    print(f"Latest {len(results)} resource(s):\n")
+    for r in results:
+        title = r.get("title") or r["url"]
+        date = r.get("created_at", "")[:10]
+        print(f"  {title}")
+        print(f"    {r['url']}")
+        if r.get("note"):
+            print(f"    Note: {r['note']}")
+        if date:
+            print(f"    Added: {date}")
+        print()
+
+
 def cmd_welcome(args):
     """Show orientation info for the current Dugg installation."""
     from pathlib import Path
@@ -397,6 +527,21 @@ def main():
 
     sub.add_parser("list-users", help="List all users")
 
+    p_add = sub.add_parser("add", help="Add a URL to Dugg")
+    p_add.add_argument("url", help="URL to add")
+    p_add.add_argument("--note", default="", help="Why this resource matters")
+    p_add.add_argument("--tags", default="", help="Comma-separated tags")
+    p_add.add_argument("--key", default=None, help="Your API key (uses local user if omitted)")
+
+    p_search = sub.add_parser("search", help="Search Dugg for resources")
+    p_search.add_argument("query", help="Search query")
+    p_search.add_argument("--limit", type=int, default=20, help="Max results (default: 20)")
+    p_search.add_argument("--key", default=None, help="Your API key (uses local user if omitted)")
+
+    p_feed = sub.add_parser("feed", help="Show recent resources")
+    p_feed.add_argument("--limit", type=int, default=20, help="Max results (default: 20)")
+    p_feed.add_argument("--key", default=None, help="Your API key (uses local user if omitted)")
+
     p_doctor = sub.add_parser("doctor", help="Check Dugg installation health")
     p_doctor.add_argument("--host", default="127.0.0.1", help="HTTP host to check (default: 127.0.0.1)")
     p_doctor.add_argument("--port", type=int, default=None, help="If set, also check HTTP server reachability")
@@ -426,6 +571,12 @@ def main():
         cmd_redeem(args)
     elif args.command == "list-users":
         cmd_list_users(args)
+    elif args.command == "add":
+        cmd_add(args)
+    elif args.command == "search":
+        cmd_search(args)
+    elif args.command == "feed":
+        cmd_feed(args)
     elif args.command == "admin":
         cmd_admin(args)
     elif args.command == "doctor":
