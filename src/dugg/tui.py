@@ -102,7 +102,10 @@ class DuggAdmin(App):
         Binding("c", "switch_collections", "Collections"),
         Binding("a", "show_appeals", "Appeals"),
         Binding("m", "show_members", "Members"),
+        Binding("s", "show_resources", "Resources"),
         Binding("b", "ban_member", "Ban"),
+        Binding("p", "ban_purge", "Ban+Purge"),
+        Binding("x", "delete_resource", "Delete Resource"),
         Binding("u", "unban_member", "Unban/Approve"),
         Binding("d", "deny_appeal", "Deny"),
         Binding("r", "refresh", "Refresh"),
@@ -345,6 +348,104 @@ class DuggAdmin(App):
             self.push_screen(ConfirmScreen(f"Unban {name}?"), do_unban)
         else:
             self._set_status(f"{name} is not banned or appealing.")
+
+    def _show_resources(self) -> None:
+        self._view = "resources"
+        dt = self.query_one("#detail-table", DataTable)
+        dt.clear(columns=True)
+        self.query_one("#detail-title", Label).update("Resources")
+
+        if not self._selected_collection:
+            return
+
+        dt.add_columns("Title", "URL", "Submitted By", "Added", "ID")
+        rows = self.db.conn.execute(
+            """SELECT r.id, r.url, r.title, r.submitted_by, r.created_at, u.name as submitter_name
+               FROM resources r
+               LEFT JOIN users u ON r.submitted_by = u.id
+               WHERE r.collection_id = ?
+               ORDER BY r.created_at DESC LIMIT 100""",
+            (self._selected_collection["id"],),
+        ).fetchall()
+        for r in rows:
+            r = dict(r)
+            title = r.get("title") or r["url"][:40]
+            url_short = r["url"][:50] + ("…" if len(r["url"]) > 50 else "")
+            dt.add_row(
+                title[:40],
+                url_short,
+                r.get("submitter_name") or r["submitted_by"],
+                r["created_at"][:10],
+                r["id"],
+                key=r["id"],
+            )
+        self._set_status(f"{len(rows)} resource(s).")
+
+    def action_show_resources(self) -> None:
+        self._show_resources()
+        self.query_one("#detail-table", DataTable).focus()
+
+    def action_delete_resource(self) -> None:
+        if not self._selected_collection:
+            self._set_status("No collection selected.")
+            return
+        if self._view != "resources":
+            self._set_status("Switch to Resources view first (s).")
+            return
+        resource_id = self._get_selected_row_key()
+        if not resource_id:
+            self._set_status("No resource selected.")
+            return
+
+        resource = self.db.get_resource(resource_id)
+        title = resource.get("title", resource["url"][:40]) if resource else resource_id
+
+        def do_delete(confirmed: bool) -> None:
+            if confirmed:
+                result = self.db.delete_resource(
+                    resource_id, self._selected_collection["id"], self._user["id"]
+                )
+                if result.get("error"):
+                    self._set_status(f"Error: {result['error']}")
+                else:
+                    self._set_status(f"Deleted: {title}")
+                self._refresh_detail()
+            else:
+                self._set_status("Delete cancelled.")
+
+        self.push_screen(ConfirmScreen(f"Delete resource: {title}?"), do_delete)
+
+    def action_ban_purge(self) -> None:
+        if not self._selected_collection:
+            self._set_status("No collection selected.")
+            return
+        if self._view != "members":
+            self._set_status("Switch to Members view first (m).")
+            return
+        user_id = self._get_selected_row_key()
+        if not user_id:
+            self._set_status("No member selected.")
+            return
+        user = self.db.get_user(user_id)
+        name = user["name"] if user else user_id
+
+        def do_ban_purge(confirmed: bool) -> None:
+            if confirmed:
+                result = self.db.ban_member(
+                    self._selected_collection["id"], user_id, cascade=True, purge=True
+                )
+                banned_count = len(result.get("banned", []))
+                purged = result.get("purged_resources", 0)
+                self._set_status(
+                    f"Banned {name} ({banned_count} affected, {purged} resource(s) purged)."
+                )
+                self._refresh_detail()
+            else:
+                self._set_status("Ban+purge cancelled.")
+
+        self.push_screen(
+            ConfirmScreen(f"Ban {name} AND delete all their resources?"), do_ban_purge
+        )
 
     def action_deny_appeal(self) -> None:
         if not self._selected_collection:

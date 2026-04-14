@@ -192,7 +192,7 @@ class DuggDB:
 
             CREATE TABLE IF NOT EXISTS event_log (
                 id TEXT PRIMARY KEY,
-                event_type TEXT NOT NULL CHECK(event_type IN ('resource_added', 'resource_published', 'member_joined', 'member_banned', 'publish_delivered', 'invite_created', 'invite_redeemed', 'reaction_added')),
+                event_type TEXT NOT NULL CHECK(event_type IN ('resource_added', 'resource_published', 'resource_deleted', 'member_joined', 'member_banned', 'publish_delivered', 'invite_created', 'invite_redeemed', 'reaction_added')),
                 instance_id TEXT REFERENCES dugg_instances(id),
                 collection_id TEXT REFERENCES collections(id),
                 actor_id TEXT REFERENCES users(id),
@@ -720,6 +720,48 @@ class DuggDB:
                                      "title": resource.get("title", "") if resource else ""})
         return results
 
+    def delete_resource(self, resource_id: str, collection_id: str, requester_id: str) -> dict:
+        """Permanently delete a resource. Only the collection owner can delete.
+
+        Cascades: removes tags, reactions, publish_targets, publish_queue entries,
+        resource_edges, and the resource itself.
+        """
+        member = self.get_member_status(collection_id, requester_id)
+        if not member or member["role"] != "owner":
+            return {"error": "Only the collection owner can delete resources"}
+        row = self.conn.execute(
+            "SELECT id, url, title, submitted_by FROM resources WHERE id = ? AND collection_id = ?",
+            (resource_id, collection_id),
+        ).fetchone()
+        if not row:
+            return {"error": "Resource not found in this collection"}
+        info = dict(row)
+        # CASCADE handles tags, reactions, publish_targets, resource_edges via FK
+        self.conn.execute("DELETE FROM publish_queue WHERE resource_id = ?", (resource_id,))
+        self.conn.execute("DELETE FROM resources WHERE id = ?", (resource_id,))
+        self.conn.commit()
+        self.emit_event("resource_deleted", actor_id=requester_id,
+                        collection_id=collection_id,
+                        payload={"resource_id": resource_id, "url": info["url"],
+                                 "title": info.get("title", ""), "submitted_by": info["submitted_by"]})
+        return {"deleted": resource_id, "url": info["url"], "title": info.get("title", "")}
+
+    def purge_user_resources(self, collection_id: str, user_ids: list[str]) -> int:
+        """Delete all resources submitted by given users in a collection. Returns count deleted."""
+        if not user_ids:
+            return 0
+        placeholders = ",".join("?" for _ in user_ids)
+        rows = self.conn.execute(
+            f"SELECT id FROM resources WHERE collection_id = ? AND submitted_by IN ({placeholders})",
+            [collection_id] + user_ids,
+        ).fetchall()
+        count = len(rows)
+        for row in rows:
+            self.conn.execute("DELETE FROM publish_queue WHERE resource_id = ?", (row["id"],))
+            self.conn.execute("DELETE FROM resources WHERE id = ?", (row["id"],))
+        self.conn.commit()
+        return count
+
     def unpublish_resource(self, resource_id: str, targets: Optional[list[str]] = None):
         """Remove a resource from specific targets, or all targets if none specified."""
         if targets:
@@ -1080,11 +1122,14 @@ class DuggDB:
         return {"user_id": user_id, "submissions": submissions,
                 "distinct_human_reactors": distinct_human_reactors, "total": total}
 
-    def ban_member(self, collection_id: str, user_id: str, cascade: bool = True, credit_threshold: int = 5) -> dict:
+    def ban_member(self, collection_id: str, user_id: str, cascade: bool = True,
+                   credit_threshold: int = 5, purge: bool = False) -> dict:
         """Ban a user. With cascade, prunes invite tree: depth 1 = hard ban, depth 2+ = credit score decides.
 
         Owner cannot be banned. Members in their grace period (first 14 days)
         survive cascade bans regardless of credit score.
+
+        If purge=True, all resources submitted by banned users are permanently deleted.
         """
         # Owner protection: cannot ban the collection owner
         member = self.get_member_status(collection_id, user_id)
@@ -1183,10 +1228,15 @@ class DuggDB:
                 (_now(), uid),
             )
 
+        purged_count = 0
+        if purge:
+            purged_count = self.purge_user_resources(collection_id, banned)
+
         self.conn.commit()
         self.emit_event("member_banned", collection_id=collection_id,
-                        payload={"banned": banned, "survived": survived, "cascade": cascade})
-        return {"banned": banned, "survived": survived}
+                        payload={"banned": banned, "survived": survived, "cascade": cascade,
+                                 "purge": purge, "purged_resources": purged_count})
+        return {"banned": banned, "survived": survived, "purged_resources": purged_count}
 
     # --- Appeals ---
 

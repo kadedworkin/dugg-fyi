@@ -345,7 +345,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="dugg_ban",
-            description="Ban a user from a collection. Cascades through their invite tree: depth 1 = hard ban, depth 2+ = credit score decides survival. Owner only.",
+            description="Ban a user from a collection. Cascades through their invite tree: depth 1 = hard ban, depth 2+ = credit score decides survival. With purge=true, permanently deletes all resources submitted by banned users. Owner only.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -353,6 +353,7 @@ async def list_tools() -> list[Tool]:
                     "user_id": {"type": "string", "description": "User to ban"},
                     "cascade": {"type": "boolean", "description": "Whether to cascade through invite tree", "default": True},
                     "credit_threshold": {"type": "integer", "description": "Minimum credit score (submissions + reactions) to survive cascade at depth 2+", "default": 5},
+                    "purge": {"type": "boolean", "description": "Permanently delete all resources submitted by banned users (for malware/spam removal)", "default": False},
                     "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
                 },
                 "required": ["collection_id", "user_id"],
@@ -628,6 +629,19 @@ async def list_tools() -> list[Tool]:
                 "required": ["instance_id", "successor_id"],
             },
         ),
+        Tool(
+            name="dugg_delete_resource",
+            description="Permanently delete a single resource from a collection. Removes the resource and all its tags, reactions, publish targets, and queue entries. Owner only — use for malware links, spam, or policy violations.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "resource_id": {"type": "string", "description": "ID of the resource to delete"},
+                    "collection_id": {"type": "string", "description": "Collection the resource belongs to"},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+                "required": ["resource_id", "collection_id"],
+            },
+        ),
     ]
 
 
@@ -727,6 +741,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = _handle_prune_inactive(d, user_id, arguments)
         elif name == "dugg_set_successor":
             result = _handle_set_successor(d, user_id, arguments)
+        elif name == "dugg_delete_resource":
+            result = _handle_delete_resource(d, user_id, arguments)
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
@@ -1234,14 +1250,18 @@ def _handle_ban(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
     target_user_id = args["user_id"]
     cascade = args.get("cascade", True)
     credit_threshold = args.get("credit_threshold", 5)
+    purge = args.get("purge", False)
     # Only owner can ban
     member = d.get_member_status(collection_id, user_id)
     if not member or member["role"] != "owner":
         return [TextContent(type="text", text="Only the collection owner can ban members")]
-    result = d.ban_member(collection_id, target_user_id, cascade=cascade, credit_threshold=credit_threshold)
+    result = d.ban_member(collection_id, target_user_id, cascade=cascade,
+                          credit_threshold=credit_threshold, purge=purge)
     if result.get("error"):
         return [TextContent(type="text", text=result["error"])]
     lines = [f"Banned {len(result['banned'])} member(s)"]
+    if purge and result.get("purged_resources", 0) > 0:
+        lines.append(f"Purged {result['purged_resources']} resource(s) from banned users")
     if result["survived"]:
         lines.append(f"Survived via credit score: {len(result['survived'])} member(s) (re-rooted under owner)")
     for uid in result["banned"]:
@@ -1526,6 +1546,15 @@ def _handle_set_successor(d: DuggDB, user_id: str, args: dict) -> list[TextConte
     successor = d.get_user(successor_id)
     name = successor["name"] if successor else successor_id
     return [TextContent(type="text", text=f"Successor set to {name} ({successor_id}) for instance {instance_id}. If ownership needs to transfer, it's ready.")]
+
+
+def _handle_delete_resource(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    resource_id = args["resource_id"]
+    collection_id = args["collection_id"]
+    result = d.delete_resource(resource_id, collection_id, user_id)
+    if result.get("error"):
+        return [TextContent(type="text", text=result["error"])]
+    return [TextContent(type="text", text=f"Deleted resource {result['deleted']}: {result.get('title') or result['url']}")]
 
 
 def _handle_get(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:

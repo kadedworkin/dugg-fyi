@@ -1510,3 +1510,69 @@ def test_prune_inactive_members(db):
     assert lurker["id"] in result["pruned"]
     status = db.get_member_status(coll["id"], lurker["id"])
     assert status["status"] == "banned"
+
+
+def test_ban_with_purge(db):
+    """Ban with purge=True deletes all resources submitted by the banned user."""
+    kade = db.create_user("Kade")
+    spammer = db.create_user("Spammer")
+    coll = db.create_collection("Shared", kade["id"], visibility="shared")
+    db.invite_member(coll["id"], kade["id"], spammer["id"])
+    # Spammer adds some resources
+    r1 = db.add_resource(url="https://malware.example.com/1", collection_id=coll["id"], submitted_by=spammer["id"], title="Bad 1")
+    r2 = db.add_resource(url="https://malware.example.com/2", collection_id=coll["id"], submitted_by=spammer["id"], title="Bad 2")
+    # Kade adds a good resource
+    r3 = db.add_resource(url="https://good.example.com", collection_id=coll["id"], submitted_by=kade["id"], title="Good")
+    result = db.ban_member(coll["id"], spammer["id"], cascade=False, purge=True)
+    assert spammer["id"] in result["banned"]
+    assert result["purged_resources"] == 2
+    # Spammer's resources are gone
+    assert db.get_resource(r1["id"]) is None
+    assert db.get_resource(r2["id"]) is None
+    # Kade's resource is untouched
+    assert db.get_resource(r3["id"]) is not None
+
+
+def test_ban_without_purge_keeps_resources(db):
+    """Ban with purge=False (default) keeps resources intact."""
+    kade = db.create_user("Kade")
+    spammer = db.create_user("Spammer")
+    coll = db.create_collection("Shared", kade["id"], visibility="shared")
+    db.invite_member(coll["id"], kade["id"], spammer["id"])
+    r1 = db.add_resource(url="https://example.com/keep", collection_id=coll["id"], submitted_by=spammer["id"], title="Keep")
+    result = db.ban_member(coll["id"], spammer["id"], cascade=False, purge=False)
+    assert spammer["id"] in result["banned"]
+    assert result.get("purged_resources", 0) == 0
+    assert db.get_resource(r1["id"]) is not None
+
+
+def test_delete_resource_by_owner(db):
+    """Owner can delete any resource in their collection."""
+    kade = db.create_user("Kade")
+    contributor = db.create_user("Contributor")
+    coll = db.create_collection("Shared", kade["id"], visibility="shared")
+    db.invite_member(coll["id"], kade["id"], contributor["id"])
+    r = db.add_resource(url="https://bad-link.example.com", collection_id=coll["id"], submitted_by=contributor["id"], title="Bad Link")
+    result = db.delete_resource(r["id"], coll["id"], kade["id"])
+    assert result["deleted"] == r["id"]
+    assert db.get_resource(r["id"]) is None
+
+
+def test_delete_resource_non_owner_denied(db):
+    """Non-owner cannot delete resources."""
+    kade = db.create_user("Kade")
+    member = db.create_user("Member")
+    coll = db.create_collection("Shared", kade["id"], visibility="shared")
+    db.invite_member(coll["id"], kade["id"], member["id"])
+    r = db.add_resource(url="https://example.com/safe", collection_id=coll["id"], submitted_by=member["id"], title="Safe")
+    result = db.delete_resource(r["id"], coll["id"], member["id"])
+    assert "error" in result
+    assert db.get_resource(r["id"]) is not None
+
+
+def test_delete_resource_not_found(db):
+    """Deleting a nonexistent resource returns an error."""
+    kade = db.create_user("Kade")
+    coll = db.create_collection("Shared", kade["id"], visibility="shared")
+    result = db.delete_resource("nonexistent", coll["id"], kade["id"])
+    assert "error" in result
