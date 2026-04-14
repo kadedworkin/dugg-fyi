@@ -1,6 +1,7 @@
 """Dugg CLI — manage the server, users, and database."""
 
 import argparse
+import json
 import sys
 
 from dugg.db import DuggDB, DEFAULT_DB_PATH, DEFAULT_API_KEY
@@ -69,6 +70,32 @@ def cmd_set_config(args):
 
 def cmd_add_user(args):
     """Create a user and print their API key."""
+    server = getattr(args, "server", None)
+    if server:
+        import urllib.request
+        api_key = getattr(args, "key", None)
+        if not api_key:
+            print("--key is required when using --server (owner API key for auth).")
+            sys.exit(1)
+        url = f"{server.rstrip('/')}/tools/dugg_create_user"
+        data = json.dumps({"name": args.name}).encode()
+        req = urllib.request.Request(
+            url, data=data,
+            headers={"X-Dugg-Key": api_key, "Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req) as resp:
+                result = json.loads(resp.read())
+                print(result.get("result", result))
+        except urllib.error.HTTPError as e:
+            body = e.read().decode()
+            print(f"Server error ({e.code}): {body}")
+            sys.exit(1)
+        except urllib.error.URLError as e:
+            print(f"Connection failed: {e.reason}")
+            sys.exit(1)
+        return
+
     from pathlib import Path
     db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
     db = DuggDB(db_path)
@@ -921,6 +948,8 @@ def main():
 
     p_user = sub.add_parser("add-user", help="Create a new user")
     p_user.add_argument("name", help="User display name")
+    p_user.add_argument("--server", default=None, help="Remote server URL — create user via HTTP instead of local DB")
+    p_user.add_argument("--key", default=None, help="Owner API key for remote auth (required with --server)")
 
     p_invite = sub.add_parser("invite-user", help="Create an invite token for a new user")
     p_invite.add_argument("name", help="Name of the person being invited")
