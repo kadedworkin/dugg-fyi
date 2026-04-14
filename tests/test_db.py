@@ -933,33 +933,36 @@ def test_events_filtered_by_since(db):
 
 def test_subscribe_webhook(db):
     kade = db.create_user("Kade")
-    inst = db.create_instance("AI", kade["id"])
-    result = db.subscribe_webhook(inst["id"], kade["id"], "https://hooks.example.com/dugg")
+    result = db.subscribe_webhook(kade["id"], "https://hooks.example.com/dugg")
     assert result["callback_url"] == "https://hooks.example.com/dugg"
     assert result["status"] == "active"
 
 
-def test_subscribe_webhook_with_event_filter(db):
+def test_subscribe_webhook_with_instance(db):
     kade = db.create_user("Kade")
     inst = db.create_instance("AI", kade["id"])
-    result = db.subscribe_webhook(inst["id"], kade["id"], "https://hooks.example.com/dugg",
+    result = db.subscribe_webhook(kade["id"], "https://hooks.example.com/dugg", instance_id=inst["id"])
+    assert result["instance_id"] == inst["id"]
+
+
+def test_subscribe_webhook_with_event_filter(db):
+    kade = db.create_user("Kade")
+    result = db.subscribe_webhook(kade["id"], "https://hooks.example.com/dugg",
                                    event_types=["resource_published"])
     assert result["event_types"] == ["resource_published"]
 
 
 def test_list_webhooks(db):
     kade = db.create_user("Kade")
-    inst = db.create_instance("AI", kade["id"])
-    db.subscribe_webhook(inst["id"], kade["id"], "https://hooks.example.com/a")
-    db.subscribe_webhook(inst["id"], kade["id"], "https://hooks.example.com/b")
+    db.subscribe_webhook(kade["id"], "https://hooks.example.com/a")
+    db.subscribe_webhook(kade["id"], "https://hooks.example.com/b")
     webhooks = db.list_webhooks(kade["id"])
     assert len(webhooks) == 2
 
 
 def test_unsubscribe_webhook(db):
     kade = db.create_user("Kade")
-    inst = db.create_instance("AI", kade["id"])
-    result = db.subscribe_webhook(inst["id"], kade["id"], "https://hooks.example.com/dugg")
+    result = db.subscribe_webhook(kade["id"], "https://hooks.example.com/dugg")
     deleted = db.unsubscribe_webhook(result["id"], kade["id"])
     assert deleted is True
     webhooks = db.list_webhooks(kade["id"])
@@ -969,37 +972,42 @@ def test_unsubscribe_webhook(db):
 def test_unsubscribe_webhook_wrong_user(db):
     kade = db.create_user("Kade")
     rocco = db.create_user("Rocco")
-    inst = db.create_instance("AI", kade["id"])
-    result = db.subscribe_webhook(inst["id"], kade["id"], "https://hooks.example.com/dugg")
+    result = db.subscribe_webhook(kade["id"], "https://hooks.example.com/dugg")
     deleted = db.unsubscribe_webhook(result["id"], rocco["id"])
     assert deleted is False
 
 
 def test_get_webhooks_for_event(db):
     kade = db.create_user("Kade")
-    inst = db.create_instance("AI", kade["id"])
-    db.subscribe_webhook(inst["id"], kade["id"], "https://hooks.example.com/all")  # All events
-    db.subscribe_webhook(inst["id"], kade["id"], "https://hooks.example.com/pub",
+    db.subscribe_webhook(kade["id"], "https://hooks.example.com/all")
+    db.subscribe_webhook(kade["id"], "https://hooks.example.com/pub",
                           event_types=["resource_published"])
     # resource_published should match both
-    matches = db.get_webhooks_for_event("resource_published", instance_id=inst["id"])
+    matches = db.get_webhooks_for_event("resource_published")
     assert len(matches) == 2
     # resource_added should only match the "all" webhook
-    matches = db.get_webhooks_for_event("resource_added", instance_id=inst["id"])
+    matches = db.get_webhooks_for_event("resource_added")
     assert len(matches) == 1
+
+
+def test_get_webhooks_for_event_includes_server_wide(db):
+    kade = db.create_user("Kade")
+    inst = db.create_instance("AI", kade["id"])
+    db.subscribe_webhook(kade["id"], "https://hooks.example.com/global")
+    rocco = db.create_user("Rocco")
+    db.subscribe_webhook(rocco["id"], "https://hooks.example.com/inst", instance_id=inst["id"])
+    matches = db.get_webhooks_for_event("resource_added", instance_id=inst["id"])
+    assert len(matches) == 2
 
 
 def test_webhook_failure_tracking(db):
     kade = db.create_user("Kade")
-    inst = db.create_instance("AI", kade["id"])
-    result = db.subscribe_webhook(inst["id"], kade["id"], "https://hooks.example.com/dugg")
-    # Fail 4 times — still active
+    result = db.subscribe_webhook(kade["id"], "https://hooks.example.com/dugg")
     for _ in range(4):
         db.mark_webhook_failure(result["id"])
     webhooks = db.list_webhooks(kade["id"])
     assert webhooks[0]["status"] == "active"
     assert webhooks[0]["failure_count"] == 4
-    # 5th failure — auto-paused
     db.mark_webhook_failure(result["id"])
     webhooks = db.list_webhooks(kade["id"])
     assert webhooks[0]["status"] == "failed"
@@ -1007,8 +1015,7 @@ def test_webhook_failure_tracking(db):
 
 def test_webhook_success_resets_failures(db):
     kade = db.create_user("Kade")
-    inst = db.create_instance("AI", kade["id"])
-    result = db.subscribe_webhook(inst["id"], kade["id"], "https://hooks.example.com/dugg")
+    result = db.subscribe_webhook(kade["id"], "https://hooks.example.com/dugg")
     db.mark_webhook_failure(result["id"])
     db.mark_webhook_failure(result["id"])
     db.mark_webhook_success(result["id"])

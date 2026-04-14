@@ -1409,7 +1409,7 @@ def _handle_webhook_subscribe(d: DuggDB, user_id: str, args: dict) -> list[TextC
     callback_url = args["callback_url"]
     event_types = args.get("event_types", [])
     secret = args.get("secret", "")
-    result = d.subscribe_webhook(instance_id, user_id, callback_url, event_types=event_types, secret=secret)
+    result = d.subscribe_webhook(user_id, callback_url, instance_id=instance_id, event_types=event_types, secret=secret)
     lines = [f"Webhook subscribed: {result['callback_url']}"]
     lines.append(f"Instance: {instance_id}")
     if event_types:

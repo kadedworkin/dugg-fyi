@@ -430,6 +430,61 @@ def cmd_feed(args):
             print(f"Server: {server_url} · unreachable · {now}")
 
 
+def cmd_webhook(args):
+    """Manage webhook subscriptions."""
+    from pathlib import Path
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+    user = _resolve_user(db, args)
+    action = getattr(args, "webhook_action", None)
+
+    if action == "add":
+        url = args.url
+        events = [e.strip() for e in (getattr(args, "events", "") or "").split(",") if e.strip()] or None
+        secret = getattr(args, "secret", "") or ""
+        result = db.subscribe_webhook(user["id"], url, event_types=events, secret=secret)
+        db.close()
+        print(f"Webhook registered: {result['id'][:12]}")
+        print(f"  URL: {url}")
+        print(f"  Events: {', '.join(events) if events else 'all'}")
+        if "hooks.slack.com" in url:
+            print("  Format: Slack (auto-detected)")
+
+    elif action == "list":
+        hooks = db.list_webhooks(user["id"])
+        db.close()
+        if not hooks:
+            print("No webhooks. Add one with: dugg webhook add <url>")
+            return
+        for h in hooks:
+            events = ", ".join(h["event_types"]) if h["event_types"] else "all"
+            print(f"  {h['id'][:12]}  {h['callback_url']}")
+            print(f"    Events: {events} · Status: {h['status']} · Failures: {h['failure_count']}")
+
+    elif action == "remove":
+        removed = db.unsubscribe_webhook(args.webhook_id, user["id"])
+        db.close()
+        if removed:
+            print("Webhook removed.")
+        else:
+            print("Webhook not found (wrong ID or not yours).")
+
+    elif action == "test":
+        hooks = db.list_webhooks(user["id"])
+        if not hooks:
+            db.close()
+            print("No webhooks to test. Add one with: dugg webhook add <url>")
+            return
+        db.emit_event("resource_added", actor_id=user["id"],
+                       payload={"url": "https://example.com/test", "title": "Webhook Test", "note": "This is a test notification from Dugg"})
+        db.close()
+        print(f"Test event fired to {len(hooks)} webhook(s). Check your channel.")
+
+    else:
+        print("Usage: dugg webhook {add,list,remove,test}")
+        db.close()
+
+
 def cmd_welcome(args):
     """Show orientation info for the current Dugg installation."""
     from pathlib import Path
@@ -665,6 +720,21 @@ def main():
 
     sub.add_parser("health", help="Check server health")
 
+    p_webhook = sub.add_parser("webhook", help="Manage webhook notifications (e.g. Slack)")
+    webhook_sub = p_webhook.add_subparsers(dest="webhook_action")
+    pw_add = webhook_sub.add_parser("add", help="Subscribe a webhook URL")
+    pw_add.add_argument("url", help="Webhook callback URL (e.g. Slack incoming webhook URL)")
+    pw_add.add_argument("--events", default="", help="Comma-separated event types to subscribe to (default: all)")
+    pw_add.add_argument("--secret", default="", help="HMAC secret for signature verification")
+    pw_add.add_argument("--key", default=None, help="Your API key")
+    pw_list = webhook_sub.add_parser("list", help="List your webhook subscriptions")
+    pw_list.add_argument("--key", default=None, help="Your API key")
+    pw_rm = webhook_sub.add_parser("remove", help="Remove a webhook subscription")
+    pw_rm.add_argument("webhook_id", help="Webhook ID (first 12 chars is enough)")
+    pw_rm.add_argument("--key", default=None, help="Your API key")
+    pw_test = webhook_sub.add_parser("test", help="Fire a test event to your webhooks")
+    pw_test.add_argument("--key", default=None, help="Your API key")
+
     p_doctor = sub.add_parser("doctor", help="Full installation diagnostics (schema, FTS, users)")
     p_doctor.add_argument("--host", default="127.0.0.1", help="HTTP host to check (default: 127.0.0.1)")
     p_doctor.add_argument("--port", type=int, default=None, help="If set, also check HTTP server reachability")
@@ -708,6 +778,8 @@ def main():
         cmd_feed(args)
     elif args.command == "health":
         cmd_health(args)
+    elif args.command == "webhook":
+        cmd_webhook(args)
     elif args.command == "admin":
         cmd_admin(args)
     elif args.command == "doctor":

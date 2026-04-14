@@ -74,6 +74,7 @@ class DuggDB:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self._init_schema()
+        self._migrate()
 
     def _init_schema(self):
         self.conn.executescript("""
@@ -239,7 +240,7 @@ class DuggDB:
 
             CREATE TABLE IF NOT EXISTS webhook_subscriptions (
                 id TEXT PRIMARY KEY,
-                instance_id TEXT NOT NULL REFERENCES dugg_instances(id) ON DELETE CASCADE,
+                instance_id TEXT REFERENCES dugg_instances(id) ON DELETE CASCADE,
                 user_id TEXT NOT NULL REFERENCES users(id),
                 callback_url TEXT NOT NULL,
                 event_types TEXT DEFAULT '[]',
@@ -248,7 +249,7 @@ class DuggDB:
                 failure_count INTEGER DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
-                UNIQUE(instance_id, user_id, callback_url)
+                UNIQUE(user_id, callback_url)
             );
 
             CREATE TABLE IF NOT EXISTS user_cursors (
@@ -356,6 +357,35 @@ class DuggDB:
                     VALUES (new.rowid, new.title, new.description, new.author, new.transcript, new.note, new.summary);
                 END;
             """)
+
+        # Migrate webhook_subscriptions: make instance_id nullable, update unique constraint
+        wh_cols = {row[1]: row[2] for row in self.conn.execute("PRAGMA table_info(webhook_subscriptions)").fetchall()}
+        if wh_cols.get("instance_id") and self.conn.execute(
+            "SELECT COUNT(*) FROM webhook_subscriptions"
+        ).fetchone()[0] == 0:
+            # Safe to recreate since no data exists
+            needs_recreate = False
+            for row in self.conn.execute("PRAGMA table_info(webhook_subscriptions)").fetchall():
+                if row[1] == "instance_id" and row[3] == 1:  # notnull=1
+                    needs_recreate = True
+                    break
+            if needs_recreate:
+                self.conn.executescript("""
+                    DROP TABLE IF EXISTS webhook_subscriptions;
+                    CREATE TABLE webhook_subscriptions (
+                        id TEXT PRIMARY KEY,
+                        instance_id TEXT REFERENCES dugg_instances(id) ON DELETE CASCADE,
+                        user_id TEXT NOT NULL REFERENCES users(id),
+                        callback_url TEXT NOT NULL,
+                        event_types TEXT DEFAULT '[]',
+                        secret TEXT DEFAULT '',
+                        status TEXT DEFAULT 'active' CHECK(status IN ('active', 'paused', 'failed')),
+                        failure_count INTEGER DEFAULT 0,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        UNIQUE(user_id, callback_url)
+                    );
+                """)
 
         self.conn.commit()
 
@@ -521,7 +551,7 @@ class DuggDB:
             "collection_id": collection_id, "tags": tags or [], "created_at": now,
         }
         self.emit_event("resource_added", actor_id=submitted_by, collection_id=collection_id,
-                        payload={"resource_id": res_id, "url": url, "title": title, "source_type": source_type})
+                        payload={"resource_id": res_id, "url": url, "title": title, "note": note, "source_type": source_type})
         return result
 
     def update_resource(self, resource_id: str, **fields) -> Optional[dict]:
@@ -2016,7 +2046,7 @@ class DuggDB:
     def emit_event(self, event_type: str, actor_id: Optional[str] = None,
                    instance_id: Optional[str] = None, collection_id: Optional[str] = None,
                    payload: Optional[dict] = None) -> dict:
-        """Log an event. Returns the event dict."""
+        """Log an event and fire matching webhooks."""
         event_id = _uuid()
         now = _now()
         self.conn.execute(
@@ -2025,9 +2055,67 @@ class DuggDB:
             (event_id, event_type, instance_id, collection_id, actor_id, json.dumps(payload or {}), now),
         )
         self.conn.commit()
-        return {"id": event_id, "event_type": event_type, "actor_id": actor_id,
+        event = {"id": event_id, "event_type": event_type, "actor_id": actor_id,
                 "instance_id": instance_id, "collection_id": collection_id,
                 "payload": payload or {}, "created_at": now}
+        self._dispatch_webhooks(event)
+        return event
+
+    def _dispatch_webhooks(self, event: dict):
+        """Fire webhooks matching this event. Runs in a thread to avoid blocking."""
+        import threading
+        hooks = self.get_webhooks_for_event(event["event_type"], event.get("instance_id"))
+        if not hooks:
+            return
+        actor_name = ""
+        if event.get("actor_id"):
+            row = self.conn.execute("SELECT name FROM users WHERE id = ?", (event["actor_id"],)).fetchone()
+            if row:
+                actor_name = row["name"]
+        server_url = self.get_config("server_url", "")
+        for hook in hooks:
+            threading.Thread(target=self._fire_webhook, args=(hook, event, actor_name, server_url), daemon=True).start()
+
+    def _fire_webhook(self, hook: dict, event: dict, actor_name: str, server_url: str):
+        """POST to a webhook callback URL."""
+        import urllib.request
+        import urllib.error
+        payload = event.get("payload", {})
+        url = payload.get("url", "")
+        title = payload.get("title", url)
+        note = payload.get("note", "")
+        event_type = event["event_type"]
+
+        # Slack-formatted payload
+        if "hooks.slack.com" in hook["callback_url"]:
+            lines = [f"*{title}*"]
+            if url:
+                lines.append(f"<{url}>")
+            if actor_name:
+                lines.append(f"Added by {actor_name}")
+            if note:
+                lines.append(f"_{note}_")
+            if server_url:
+                lines.append(f"<{server_url}/feed/{hook.get('user_id', '')}|View feed>")
+            body = json.dumps({"text": "\n".join(lines)}).encode()
+        else:
+            body = json.dumps({"event": event, "actor_name": actor_name, "server_url": server_url}).encode()
+
+        req = urllib.request.Request(
+            hook["callback_url"],
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        if hook.get("secret"):
+            import hashlib, hmac
+            sig = hmac.new(hook["secret"].encode(), body, hashlib.sha256).hexdigest()
+            req.add_header("X-Dugg-Signature", sig)
+        try:
+            urllib.request.urlopen(req, timeout=10)
+            self.mark_webhook_success(hook["id"])
+        except Exception:
+            self.mark_webhook_failure(hook["id"])
 
     def get_events(self, user_id: str, event_types: Optional[list[str]] = None,
                    since: Optional[str] = None, limit: int = 50) -> list[dict]:
@@ -2122,16 +2210,17 @@ class DuggDB:
 
     # --- Webhook Subscriptions ---
 
-    def subscribe_webhook(self, instance_id: str, user_id: str, callback_url: str,
+    def subscribe_webhook(self, user_id: str, callback_url: str,
+                          instance_id: Optional[str] = None,
                           event_types: Optional[list[str]] = None, secret: str = "") -> dict:
-        """Subscribe a webhook to an instance's events."""
+        """Subscribe a webhook. If instance_id is None, fires on all server events."""
         sub_id = _uuid()
         now = _now()
         types_json = json.dumps(event_types or [])
         self.conn.execute(
             """INSERT INTO webhook_subscriptions (id, instance_id, user_id, callback_url, event_types, secret, status, created_at, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)
-               ON CONFLICT(instance_id, user_id, callback_url) DO UPDATE SET
+               ON CONFLICT(user_id, callback_url) DO UPDATE SET
                event_types = ?, secret = ?, status = 'active', failure_count = 0, updated_at = ?""",
             (sub_id, instance_id, user_id, callback_url, types_json, secret, now, now, types_json, secret, now),
         )
@@ -2140,10 +2229,10 @@ class DuggDB:
                 "callback_url": callback_url, "event_types": event_types or [], "status": "active"}
 
     def get_webhooks_for_event(self, event_type: str, instance_id: Optional[str] = None) -> list[dict]:
-        """Get active webhook subscriptions that match an event type."""
+        """Get active webhook subscriptions that match an event type. Always includes server-wide (NULL instance_id) hooks."""
         if instance_id:
             rows = self.conn.execute(
-                "SELECT * FROM webhook_subscriptions WHERE instance_id = ? AND status = 'active'",
+                "SELECT * FROM webhook_subscriptions WHERE (instance_id = ? OR instance_id IS NULL) AND status = 'active'",
                 (instance_id,),
             ).fetchall()
         else:
