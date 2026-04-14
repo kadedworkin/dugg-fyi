@@ -653,6 +653,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         user_id = user["id"]
         d = get_db()
 
+        d.touch_user(user_id)
+
         if name == "dugg_add":
             result = await _handle_add(d, user_id, arguments)
         elif name == "dugg_search":

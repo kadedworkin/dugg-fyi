@@ -525,6 +525,8 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
         if not user:
             return HTMLResponse(_html_page("Not Found", "<h1>Invalid key</h1><p>This feed URL is not valid.</p>"), status_code=404)
 
+        d.touch_user(user["id"])
+
         # Check Accept header for Atom/RSS preference
         accept = request.headers.get("accept", "")
         want_atom = "application/atom+xml" in accept or "application/rss+xml" in accept

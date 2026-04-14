@@ -1977,6 +1977,22 @@ class DuggDB:
         )
         self.conn.commit()
 
+    def touch_user(self, user_id: str):
+        """Update last_seen_at on all active memberships for a user.
+        If user_id is an agent, also touches the parent human's memberships."""
+        now = _now()
+        self.conn.execute(
+            "UPDATE collection_members SET last_seen_at = ? WHERE user_id = ? AND status = 'active'",
+            (now, user_id),
+        )
+        parent = self.get_parent_user(user_id)
+        if parent:
+            self.conn.execute(
+                "UPDATE collection_members SET last_seen_at = ? WHERE user_id = ? AND status = 'active'",
+                (now, parent["id"]),
+            )
+        self.conn.commit()
+
     def get_stale_members(self, days: int = None) -> list[dict]:
         """Get members who haven't been seen in EGRESS_TIMEOUT_DAYS days."""
         timeout = days or EGRESS_TIMEOUT_DAYS
@@ -1994,30 +2010,30 @@ class DuggDB:
     # --- Inactive Member Pruning ---
 
     def get_inactive_members(self, collection_id: str) -> list[dict]:
-        """Get members past grace period with zero submissions AND zero reactions.
-
-        These are lurkers who haven't contributed anything.
+        """Get members past grace period with zero submissions, zero reactions,
+        and no recent activity (feed visits, agent touches).
         """
         now = datetime.now(timezone.utc).isoformat()
+        grace_cutoff = now
+        seen_cutoff = (datetime.now(timezone.utc) - timedelta(days=GRACE_PERIOD_DAYS)).isoformat()
         rows = self.conn.execute(
-            """SELECT cm.user_id, cm.joined_at, cm.grace_expires_at, u.name
+            """SELECT cm.user_id, cm.joined_at, cm.grace_expires_at, cm.last_seen_at, u.name
                FROM collection_members cm
                JOIN users u ON cm.user_id = u.id
                WHERE cm.collection_id = ? AND cm.status = 'active' AND cm.role != 'owner'
-                 AND (cm.grace_expires_at IS NOT NULL AND cm.grace_expires_at < ?)""",
-            (collection_id, now),
+                 AND (cm.grace_expires_at IS NOT NULL AND cm.grace_expires_at < ?)
+                 AND (cm.last_seen_at IS NULL OR cm.last_seen_at < ?)""",
+            (collection_id, grace_cutoff, seen_cutoff),
         ).fetchall()
 
         inactive = []
         for row in rows:
             d = dict(row)
             uid = d["user_id"]
-            # Check if they have any submissions
             subs = self.conn.execute(
                 "SELECT COUNT(*) as c FROM resources WHERE collection_id = ? AND submitted_by = ?",
                 (collection_id, uid),
             ).fetchone()["c"]
-            # Check if they have any reactions
             reacts = self.conn.execute(
                 """SELECT COUNT(*) as c FROM reactions re
                    JOIN resources r ON re.resource_id = r.id
