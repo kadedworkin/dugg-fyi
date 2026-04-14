@@ -71,9 +71,12 @@ def cmd_invite_user(args):
     result = db.create_invite_token(user["id"], name_hint=args.name, expires_hours=expires)
     token = result["token"]
 
-    # Check for endpoint URL
+    # Resolve server URL: explicit --server flag > instance endpoint > none
+    server_url = getattr(args, "server", None) or ""
+    if not server_url:
+        instance = db.get_instance_for_owner(user["id"])
+        server_url = (instance.get("endpoint_url", "") if instance else "")
     instance = db.get_instance_for_owner(user["id"])
-    endpoint = instance.get("endpoint_url", "") if instance else ""
     instance_name = instance.get("name", "a Dugg server") if instance else "a Dugg server"
     instance_topic = instance.get("topic", "") if instance else ""
 
@@ -87,8 +90,10 @@ def cmd_invite_user(args):
     print(f"{user['name']} invited you to {instance_name}!")
     if instance_topic:
         print(instance_topic)
-    if endpoint:
-        print(f"\nGet set up here: {endpoint.rstrip('/')}/invite/{token}")
+    if server_url:
+        invite_url = f"{server_url.rstrip('/')}/invite/{token}"
+        print(f"\nJoin in your browser: {invite_url}")
+        print(f"\nOr via CLI: dugg redeem {token} --server {server_url.rstrip('/')}")
     else:
         print(f"\nRedeem via CLI: dugg redeem {token}")
     print(f"\nThis invite expires in {expires} hours.")
@@ -346,6 +351,7 @@ def main():
     p_invite = sub.add_parser("invite-user", help="Create an invite token for a new user")
     p_invite.add_argument("name", help="Name of the person being invited")
     p_invite.add_argument("--key", default=None, help="Your API key (uses local user if omitted)")
+    p_invite.add_argument("--server", default=None, help="Server URL (e.g. https://chino-bandido.kadedworkin.com) — included in invite message")
     p_invite.add_argument("--expires", type=int, default=72, help="Hours until invite expires (default: 72)")
 
     p_redeem = sub.add_parser("redeem", help="Redeem an invite token to join a Dugg server")
