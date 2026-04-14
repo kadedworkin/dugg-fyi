@@ -57,6 +57,16 @@ def cmd_set_url(args):
     print(f"Server URL set to: {args.url.rstrip('/')}")
 
 
+def cmd_set_config(args):
+    """Set a server config value."""
+    from pathlib import Path
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+    db.set_config(args.key, args.value)
+    db.close()
+    print(f"Config set: {args.key} = {args.value}")
+
+
 def cmd_add_user(args):
     """Create a user and print their API key."""
     from pathlib import Path
@@ -687,6 +697,10 @@ def main():
     p_seturl = sub.add_parser("set-url", help="Set or update the server's public URL")
     p_seturl.add_argument("url", help="Public URL (e.g. https://my-dugg.example.com)")
 
+    p_setconf = sub.add_parser("set-config", help="Set a server config value")
+    p_setconf.add_argument("key", help="Config key (e.g. slack_signing_secret)")
+    p_setconf.add_argument("value", help="Config value")
+
     p_user = sub.add_parser("add-user", help="Create a new user")
     p_user.add_argument("name", help="User display name")
 
@@ -762,6 +776,8 @@ def main():
         cmd_init(args)
     elif args.command == "set-url":
         cmd_set_url(args)
+    elif args.command == "set-config":
+        cmd_set_config(args)
     elif args.command == "add-user":
         cmd_add_user(args)
     elif args.command == "invite-user":
