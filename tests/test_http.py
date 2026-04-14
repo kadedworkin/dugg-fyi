@@ -182,7 +182,8 @@ def test_tool_dispatch_create_user(client):
     resp = c.post("/tools/dugg_create_user", json={"name": "NewUser"}, headers=headers)
     assert resp.status_code == 200
     assert "NewUser" in resp.json()["result"]
-    assert "API Key" in resp.json()["result"]
+    assert "User key:" in resp.json()["result"]
+    assert "Agent key:" in resp.json()["result"]
 
 
 def test_tool_dispatch_feed(client):

@@ -166,7 +166,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="dugg_create_user",
-            description="Create a new user and get their API key. Use this to onboard collaborators.",
+            description="Create a new user with a linked agent account. Returns both a user key (for the human) and an agent key (for their AI agent). Ban cascades apply — banning the user revokes the agent key too.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -946,8 +946,16 @@ def _handle_create_collection(d: DuggDB, user_id: str, args: dict) -> list[TextC
 
 def _handle_create_user(d: DuggDB, args: dict) -> list[TextContent]:
     name = args["name"]
-    result = d.create_user(name)
-    return [TextContent(type="text", text=f"Created user: {result['name']}\nID: {result['id']}\nAPI Key: {result['api_key']}\n\nSave this API key — it won't be shown again.")]
+    user = d.create_user(name)
+    agent = d.create_agent_for_user(user["id"])
+    return [TextContent(type="text", text=(
+        f"Created user: {user['name']}\n"
+        f"ID: {user['id']}\n"
+        f"User key:  {user['api_key']}\n"
+        f"Agent key: {agent['api_key']}\n\n"
+        f"The agent key is tied to this user — if the user is banned, the agent key stops working too.\n"
+        f"Save both keys — they won't be shown again."
+    ))]
 
 
 def _handle_invite_user(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
