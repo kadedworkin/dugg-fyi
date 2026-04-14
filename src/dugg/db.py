@@ -2058,11 +2058,16 @@ class DuggDB:
         event = {"id": event_id, "event_type": event_type, "actor_id": actor_id,
                 "instance_id": instance_id, "collection_id": collection_id,
                 "payload": payload or {}, "created_at": now}
-        self._dispatch_webhooks(event)
+        self._pending_webhook_threads = self._dispatch_webhooks(event) or []
         return event
 
-    def _dispatch_webhooks(self, event: dict):
-        """Fire webhooks matching this event. Runs in a thread to avoid blocking."""
+    def wait_for_webhooks(self, timeout: float = 15.0):
+        """Block until pending webhook threads finish. Call before process exit."""
+        for t in getattr(self, "_pending_webhook_threads", []):
+            t.join(timeout=timeout)
+
+    def _dispatch_webhooks(self, event: dict, sync: bool = False):
+        """Fire webhooks matching this event. Async by default; sync=True waits for completion."""
         import threading
         hooks = self.get_webhooks_for_event(event["event_type"], event.get("instance_id"))
         if not hooks:
@@ -2073,8 +2078,16 @@ class DuggDB:
             if row:
                 actor_name = row["name"]
         server_url = self.get_config("server_url", "")
-        for hook in hooks:
-            threading.Thread(target=self._fire_webhook, args=(hook, event, actor_name, server_url), daemon=True).start()
+        if sync:
+            for hook in hooks:
+                self._fire_webhook(hook, event, actor_name, server_url)
+        else:
+            threads = []
+            for hook in hooks:
+                t = threading.Thread(target=self._fire_webhook, args=(hook, event, actor_name, server_url), daemon=True)
+                t.start()
+                threads.append(t)
+            return threads
 
     def _fire_webhook(self, hook: dict, event: dict, actor_name: str, server_url: str):
         """POST to a webhook callback URL."""

@@ -307,6 +307,7 @@ def cmd_add(args):
         print(f"  Transcript: {len(enriched['transcript'])} chars")
     if note:
         print(f"  Note: {note}")
+    db.wait_for_webhooks()
     db.close()
 
 
@@ -477,6 +478,7 @@ def cmd_webhook(args):
             return
         db.emit_event("resource_added", actor_id=user["id"],
                        payload={"url": "https://example.com/test", "title": "Webhook Test", "note": "This is a test notification from Dugg"})
+        db.wait_for_webhooks()
         db.close()
         print(f"Test event fired to {len(hooks)} webhook(s). Check your channel.")
 
