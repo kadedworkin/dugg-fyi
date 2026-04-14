@@ -409,7 +409,10 @@ def main():
 
     args = parser.parse_args()
 
-    if args.command is None or args.command == "serve":
+    if args.command is None:
+        parser.print_help()
+        sys.exit(0)
+    elif args.command == "serve":
         cmd_serve(args)
     elif args.command == "init":
         cmd_init(args)
