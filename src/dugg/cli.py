@@ -622,6 +622,10 @@ def main():
     p_welcome = sub.add_parser("welcome", help="Show orientation info for your Dugg installation")
     p_welcome.add_argument("--key", default=None, help="API key (uses local user if omitted)")
 
+    # If the first arg looks like a URL, treat it as `dugg add <url> ...`
+    if len(sys.argv) > 1 and sys.argv[1].startswith(("http://", "https://")):
+        sys.argv.insert(1, "add")
+
     args = parser.parse_args()
 
     if args.command is None:
