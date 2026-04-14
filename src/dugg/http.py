@@ -459,6 +459,15 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
     <div class="step-label" style="margin-top: 0.5rem;">Health check (no auth needed):</div>
     <code>{server_url}/health</code>
   </div>
+
+  <h3 style="margin-top: 1.5rem;">Want the CLI too?</h3>
+  <p style="font-size: 0.85rem; color: #aaa; margin-bottom: 0.75rem;">Install Dugg locally to manage resources from your terminal:</p>
+  <div class="step-example">
+    <code>git clone https://github.com/kadedworkin/dugg-fyi.git</code>
+    <code>cd dugg-fyi && uv sync</code>
+    <code style="margin-top: 0.5rem;">.venv/bin/dugg welcome --key {user['api_key']}</code>
+  </div>
+  <p style="font-size: 0.8rem; color: #666; margin-top: 0.5rem;">Don't have uv? <code style="font-size: 0.8rem; color: #888;">curl -LsSf https://astral.sh/uv/install.sh | sh</code></p>
 </div>"""
         return HTMLResponse(_html_page("Welcome to Dugg", body))
 

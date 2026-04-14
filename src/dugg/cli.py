@@ -122,9 +122,13 @@ def cmd_invite_user(args):
     if server_url:
         invite_url = f"{server_url.rstrip('/')}/invite/{token}"
         print(f"\nJoin in your browser: {invite_url}")
-        print(f"\nOr via CLI: dugg redeem {token} --server {server_url.rstrip('/')}")
+        print(f"\nOr via CLI:")
+        print(f"  git clone https://github.com/kadedworkin/dugg-fyi.git && cd dugg-fyi && uv sync")
+        print(f"  .venv/bin/dugg redeem {token} --server {server_url.rstrip('/')}")
     else:
-        print(f"\nRedeem via CLI: dugg redeem {token}")
+        print(f"\nVia CLI:")
+        print(f"  git clone https://github.com/kadedworkin/dugg-fyi.git && cd dugg-fyi && uv sync")
+        print(f"  .venv/bin/dugg redeem {token}")
     print(f"\nThis invite expires in {expires} hours.")
     print()
     print("--- End ---")
