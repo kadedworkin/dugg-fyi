@@ -99,6 +99,9 @@ dugg init
 # Create a user and get an API key
 dugg add-user "Kade"
 
+# Save your key so you don't need --key on every command
+dugg login <your-api-key>
+
 # Start the MCP server (stdio mode for local agent connections)
 dugg serve
 
@@ -254,7 +257,7 @@ Add to your OpenClaw config:
 | `dugg_webhook_delete` | Remove a webhook subscription. |
 | `dugg_ingest` | Receive a published resource from a remote Dugg instance. Deduplicates by URL. |
 | `dugg_share` | Share a collection with another user, with optional tag filters. |
-| `dugg_create_user` | Create a new user and get their API key. |
+| `dugg_create_user` | Create a new user with a linked agent account. Returns both a user key and an agent key. Banning the user revokes the agent key too. |
 | `dugg_invite_user` | Create an invite token with a browser redemption link — send via any channel. |
 | `dugg_instance_policy` | Get the current policy configuration for an instance — read horizon, index mode, storage cap, and rate limits. |
 | `dugg_publish_clear` | Delete failed publish queue entries. Optionally scoped to a target instance. Owner only. |
@@ -265,7 +268,7 @@ Add to your OpenClaw config:
 
 ## CLI commands
 
-Beyond `init`, `serve`, `add-user`, and `login`, Dugg ships a full management CLI:
+Beyond `init`, `serve`, `add-user`, `login`, and `redeem`, Dugg ships a full management CLI:
 
 | Command | Description |
 |---------|-------------|
@@ -282,8 +285,9 @@ Beyond `init`, `serve`, `add-user`, and `login`, Dugg ships a full management CL
 | `dugg webhook remove <id>` | Remove a webhook |
 | `dugg webhook test` | Fire a test event to all webhooks |
 | `dugg set-config <key> <value>` | Set server config (e.g., `server_url`, `server_name`) |
-| `dugg invite-user <name>` | Generate an invite token |
-| `dugg redeem <token>` | Redeem an invite token |
+| `dugg add-user <name> [--server URL]` | Create a user (local or remote). Remote mode posts to the server using your saved key |
+| `dugg invite-user <name>` | Generate an invite token. Warns if no server URL is configured |
+| `dugg redeem <token>` | Redeem an invite token (local DB only). Both keys auto-saved to `.dugg-env` |
 | `dugg admin` | Launch the terminal admin UI |
 
 **URL auto-routing:** `dugg https://example.com --note "cool stuff"` automatically maps to `dugg add` — no subcommand needed.
