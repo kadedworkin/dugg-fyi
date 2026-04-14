@@ -26,8 +26,29 @@ def cmd_init(args):
     from pathlib import Path
     db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
     db = DuggDB(db_path)
+
+    server_url = getattr(args, "server", None)
+    if server_url:
+        db.set_config("server_url", server_url.rstrip("/"))
+        print(f"Server URL: {server_url.rstrip('/')}")
+        print()
+        print("DNS setup — point your domain to this server's IP:")
+        print(f"  A Record:  your-subdomain → <server IP>")
+        print(f"  Or CNAME:  your-subdomain → your-root-domain")
+        print()
+
     db.close()
     print(f"Database initialized at {db_path}")
+
+
+def cmd_set_url(args):
+    """Set or update the server's public URL."""
+    from pathlib import Path
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+    db.set_config("server_url", args.url.rstrip("/"))
+    db.close()
+    print(f"Server URL set to: {args.url.rstrip('/')}")
 
 
 def cmd_add_user(args):
@@ -71,8 +92,10 @@ def cmd_invite_user(args):
     result = db.create_invite_token(user["id"], name_hint=args.name, expires_hours=expires)
     token = result["token"]
 
-    # Resolve server URL: explicit --server flag > instance endpoint > none
+    # Resolve server URL: explicit --server flag > db config > instance endpoint
     server_url = getattr(args, "server", None) or ""
+    if not server_url:
+        server_url = db.get_config("server_url", "")
     if not server_url:
         instance = db.get_instance_for_owner(user["id"])
         server_url = (instance.get("endpoint_url", "") if instance else "")
@@ -343,7 +366,11 @@ def main():
                          help="Transport mode: stdio (local agent) or http (remote HTTP/SSE)")
     p_serve.add_argument("--host", default="0.0.0.0", help="HTTP bind address (default: 0.0.0.0)")
     p_serve.add_argument("--port", type=int, default=8411, help="HTTP port (default: 8411)")
-    sub.add_parser("init", help="Initialize the database")
+    p_init = sub.add_parser("init", help="Initialize the database")
+    p_init.add_argument("--server", default=None, help="Public URL of this server (e.g. https://my-dugg.example.com)")
+
+    p_seturl = sub.add_parser("set-url", help="Set or update the server's public URL")
+    p_seturl.add_argument("url", help="Public URL (e.g. https://my-dugg.example.com)")
 
     p_user = sub.add_parser("add-user", help="Create a new user")
     p_user.add_argument("name", help="User display name")
@@ -376,6 +403,8 @@ def main():
         cmd_serve(args)
     elif args.command == "init":
         cmd_init(args)
+    elif args.command == "set-url":
+        cmd_set_url(args)
     elif args.command == "add-user":
         cmd_add_user(args)
     elif args.command == "invite-user":

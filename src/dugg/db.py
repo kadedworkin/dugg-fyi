@@ -230,6 +230,11 @@ class DuggDB:
                 UNIQUE(user_id, agent_id)
             );
 
+            CREATE TABLE IF NOT EXISTS server_config (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+
             CREATE VIRTUAL TABLE IF NOT EXISTS resources_fts USING fts5(
                 title, description, author, transcript, note, summary,
                 content='resources',
@@ -319,6 +324,19 @@ class DuggDB:
 
     def close(self):
         self.conn.close()
+
+    # --- Server Config ---
+
+    def set_config(self, key: str, value: str):
+        self.conn.execute(
+            "INSERT INTO server_config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?",
+            (key, value, value),
+        )
+        self.conn.commit()
+
+    def get_config(self, key: str, default: str = "") -> str:
+        row = self.conn.execute("SELECT value FROM server_config WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else default
 
     # --- Users ---
 
