@@ -829,6 +829,147 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
             lines.append("")
         return JSONResponse({"response_type": "in_channel", "text": "\n".join(lines)})
 
+    # --- Browser admin panel ---
+
+    def _admin_resolve_user(request: Request):
+        """Resolve user from URL path key param."""
+        key = request.path_params.get("key", "")
+        d = get_db()
+        user = d.get_user_by_api_key(key)
+        return d, user
+
+    async def handle_admin_page(request: Request):
+        """GET /admin/{key} — browser-based admin dashboard."""
+        d, user = _admin_resolve_user(request)
+        if not user:
+            return HTMLResponse(_html_page("Unauthorized", "<h1>Invalid API key</h1><p>Check your admin URL.</p>"), status_code=401)
+
+        key = request.path_params["key"]
+        collections = d.list_collections(user["id"])
+        server_url = d.get_config("server_url", "")
+
+        # Gather members and resources per collection
+        sections = []
+        for c in collections:
+            member = d.get_member_status(c["id"], user["id"])
+            is_owner = member and member["role"] == "owner"
+
+            # Members
+            members = d.conn.execute(
+                "SELECT cm.user_id, cm.role, cm.status, u.name FROM collection_members cm JOIN users u ON cm.user_id = u.id WHERE cm.collection_id = ? ORDER BY cm.joined_at",
+                (c["id"],)
+            ).fetchall()
+
+            member_html = ""
+            for m in members:
+                status_badge = ""
+                if m["status"] == "banned":
+                    status_badge = ' <span style="color:#f87171;">banned</span>'
+                elif m["status"] == "appealing":
+                    status_badge = ' <span style="color:#fbbf24;">appealing</span>'
+                actions = ""
+                if is_owner and m["user_id"] != user["id"]:
+                    if m["status"] == "active":
+                        actions = f' <form method="POST" action="/admin/{key}/ban" style="display:inline;"><input type="hidden" name="collection_id" value="{c["id"]}"><input type="hidden" name="user_id" value="{m["user_id"]}"><button type="submit" style="background:#dc2626;padding:0.2rem 0.5rem;font-size:0.75rem;border-radius:4px;border:none;color:#fff;cursor:pointer;">Ban</button></form>'
+                    elif m["status"] in ("banned", "appealing"):
+                        actions = f' <form method="POST" action="/admin/{key}/unban" style="display:inline;"><input type="hidden" name="collection_id" value="{c["id"]}"><input type="hidden" name="user_id" value="{m["user_id"]}"><button type="submit" style="background:#16a34a;padding:0.2rem 0.5rem;font-size:0.75rem;border-radius:4px;border:none;color:#fff;cursor:pointer;">Unban</button></form>'
+                member_html += f'<div style="padding:0.4rem 0;border-bottom:1px solid #222;display:flex;justify-content:space-between;align-items:center;"><span>{_xml_escape(m["name"])} <span style="color:#666;">({m["role"]})</span>{status_badge}</span>{actions}</div>'
+
+            # Resources
+            resources = d.conn.execute(
+                "SELECT r.id, r.url, r.title, r.submitted_by, r.created_at, u.name as submitter_name FROM resources r JOIN users u ON r.submitted_by = u.id WHERE r.collection_id = ? ORDER BY r.created_at DESC LIMIT 50",
+                (c["id"],)
+            ).fetchall()
+
+            resource_html = ""
+            for r in resources:
+                title = r["title"] or r["url"]
+                date = r["created_at"][:10]
+                remove_btn = ""
+                if is_owner or r["submitted_by"] == user["id"]:
+                    remove_btn = f' <form method="POST" action="/admin/{key}/remove" style="display:inline;"><input type="hidden" name="resource_id" value="{r["id"]}"><input type="hidden" name="collection_id" value="{c["id"]}"><button type="submit" style="background:#dc2626;padding:0.15rem 0.4rem;font-size:0.7rem;border-radius:4px;border:none;color:#fff;cursor:pointer;">Remove</button></form>'
+                resource_html += f'<div class="feed-item"><h3><a href="{_xml_escape(r["url"])}" target="_blank">{_xml_escape(title)}</a>{remove_btn}</h3><div class="meta">by {_xml_escape(r["submitter_name"])} · {date}</div></div>'
+
+            if not resource_html:
+                resource_html = '<div class="empty">No resources yet.</div>'
+
+            owner_tag = " (owner)" if is_owner else ""
+            sections.append(f"""
+<div style="margin-bottom:2rem;">
+  <h2 style="font-size:1.1rem;color:#fff;margin-bottom:0.75rem;">{_xml_escape(c['name'])}{owner_tag}</h2>
+  <details style="margin-bottom:1rem;"><summary style="cursor:pointer;color:#aaa;font-size:0.85rem;">Members ({len(members)})</summary><div style="margin-top:0.5rem;">{member_html}</div></details>
+  <div>{resource_html}</div>
+</div>""")
+
+        health_line = ""
+        if server_url:
+            health_line = f'<div style="margin-top:1rem;padding-top:1rem;border-top:1px solid #222;font-size:0.8rem;color:#666;">Server: {_xml_escape(server_url)}</div>'
+
+        body = f"""
+<h1>Dugg Admin</h1>
+<p style="color:#888;margin-bottom:1.5rem;">Logged in as {_xml_escape(user['name'])}</p>
+{''.join(sections)}
+{health_line}
+"""
+        return HTMLResponse(_html_page("Dugg Admin", body))
+
+    async def handle_admin_ban(request: Request):
+        """POST /admin/{key}/ban — ban a user from a collection."""
+        d, user = _admin_resolve_user(request)
+        if not user:
+            return HTMLResponse(_html_page("Unauthorized", "<h1>Invalid API key</h1>"), status_code=401)
+        form = await request.form()
+        collection_id = form.get("collection_id", "")
+        target_user_id = form.get("user_id", "")
+        member = d.get_member_status(collection_id, user["id"])
+        if not member or member["role"] != "owner":
+            return HTMLResponse(_html_page("Forbidden", "<h1>Not the collection owner</h1>"), status_code=403)
+        d.conn.execute("UPDATE collection_members SET status = 'banned' WHERE collection_id = ? AND user_id = ?", (collection_id, target_user_id))
+        d.conn.commit()
+        key = request.path_params["key"]
+        from starlette.responses import RedirectResponse
+        return RedirectResponse(f"/admin/{key}", status_code=303)
+
+    async def handle_admin_unban(request: Request):
+        """POST /admin/{key}/unban — unban a user."""
+        d, user = _admin_resolve_user(request)
+        if not user:
+            return HTMLResponse(_html_page("Unauthorized", "<h1>Invalid API key</h1>"), status_code=401)
+        form = await request.form()
+        collection_id = form.get("collection_id", "")
+        target_user_id = form.get("user_id", "")
+        member = d.get_member_status(collection_id, user["id"])
+        if not member or member["role"] != "owner":
+            return HTMLResponse(_html_page("Forbidden", "<h1>Not the collection owner</h1>"), status_code=403)
+        d.conn.execute("UPDATE collection_members SET status = 'active' WHERE collection_id = ? AND user_id = ?", (collection_id, target_user_id))
+        d.conn.commit()
+        key = request.path_params["key"]
+        from starlette.responses import RedirectResponse
+        return RedirectResponse(f"/admin/{key}", status_code=303)
+
+    async def handle_admin_remove(request: Request):
+        """POST /admin/{key}/remove — remove a resource."""
+        d, user = _admin_resolve_user(request)
+        if not user:
+            return HTMLResponse(_html_page("Unauthorized", "<h1>Invalid API key</h1>"), status_code=401)
+        form = await request.form()
+        resource_id = form.get("resource_id", "")
+        collection_id = form.get("collection_id", "")
+        resource = d.get_resource(resource_id)
+        if not resource:
+            return HTMLResponse(_html_page("Not Found", "<h1>Resource not found</h1>"), status_code=404)
+        member = d.get_member_status(collection_id, user["id"])
+        is_owner = member and member["role"] == "owner"
+        is_submitter = resource.get("submitted_by") == user["id"]
+        if not is_owner and not is_submitter:
+            return HTMLResponse(_html_page("Forbidden", "<h1>Permission denied</h1>"), status_code=403)
+        d.conn.execute("DELETE FROM publish_queue WHERE resource_id = ?", (resource_id,))
+        d.conn.execute("DELETE FROM resources WHERE id = ?", (resource_id,))
+        d.conn.commit()
+        key = request.path_params["key"]
+        from starlette.responses import RedirectResponse
+        return RedirectResponse(f"/admin/{key}", status_code=303)
+
     # --- Lifecycle ---
 
     @asynccontextmanager
@@ -860,6 +1001,10 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
         Route("/events/stream", endpoint=handle_events_stream),
         Route("/tools/{tool_name}", endpoint=handle_tools, methods=["POST"]),
         Route("/slack/command", endpoint=handle_slack_command, methods=["POST"]),
+        Route("/admin/{key}", endpoint=handle_admin_page),
+        Route("/admin/{key}/ban", endpoint=handle_admin_ban, methods=["POST"]),
+        Route("/admin/{key}/unban", endpoint=handle_admin_unban, methods=["POST"]),
+        Route("/admin/{key}/remove", endpoint=handle_admin_remove, methods=["POST"]),
     ]
 
     app = Starlette(
