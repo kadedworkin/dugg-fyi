@@ -119,6 +119,12 @@ def cmd_invite_user(args):
     instance_name = instance.get("name", "a Dugg server") if instance else "a Dugg server"
     instance_topic = instance.get("topic", "") if instance else ""
 
+    if not server_url:
+        print("⚠  No server URL configured. Invites require HTTP mode for browser redemption.")
+        print("   Set one with: dugg set-config server_url https://your-host:8411")
+        print("   Or pass --server https://your-host:8411 to this command.")
+        print()
+
     print(f"Invite created for {args.name}")
     print(f"Token: {token}")
     print(f"Expires: {result['expires_at']}")
@@ -166,12 +172,27 @@ def cmd_redeem(args):
     print(f"Your key:  {user['api_key']}")
     print(f"Agent key: {agent['api_key']}")
     print()
-    print("Save both keys — they won't be shown again.")
+
+    env_file = _find_env_file()
+    existing = {}
+    try:
+        if env_file.exists():
+            for line in env_file.read_text().splitlines():
+                if "=" in line and not line.startswith("#"):
+                    k, v = line.split("=", 1)
+                    existing[k.strip()] = v.strip()
+    except (OSError, PermissionError):
+        pass
+    existing["DUGG_API_KEY"] = user["api_key"]
+    existing["DUGG_AGENT_KEY"] = agent["api_key"]
+    env_file.write_text("\n".join(f"{k}={v}" for k, v in existing.items()) + "\n")
+    print(f"Keys saved to {env_file}")
+
     print("If your account gets banned, your agent goes too.")
     print()
     print("What next?")
     print("  • Got an AI agent? Give it the agent key with X-Dugg-Key")
-    print("  • Use the CLI?    dugg welcome --key <your-key>")
+    print("  • Use the CLI?    dugg welcome")
 
 
 def cmd_list_users(args):
