@@ -698,6 +698,133 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
             },
         )
 
+    # --- Slack slash command ---
+
+    async def handle_slack_command(request: Request):
+        """Handle Slack slash command: /dugg or /dugg <url> [note]"""
+        d = get_db()
+        form = await request.form()
+        text = (form.get("text") or "").strip()
+        slack_user = form.get("user_name", "someone")
+
+        # Verify signing secret if configured
+        signing_secret = d.get_config("slack_signing_secret", "")
+        if signing_secret:
+            import time
+            timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
+            slack_sig = request.headers.get("X-Slack-Signature", "")
+            if abs(time.time() - int(timestamp or 0)) > 300:
+                return JSONResponse({"text": "Request too old."}, status_code=403)
+            sig_basestring = f"v0:{timestamp}:{(await request.body()).decode()}"
+            my_sig = "v0=" + hmac.new(signing_secret.encode(), sig_basestring.encode(), hashlib.sha256).hexdigest()
+            if not hmac.compare_digest(my_sig, slack_sig):
+                return JSONResponse({"text": "Invalid signature."}, status_code=403)
+
+        # Find or create a user for this Slack user
+        # Look up by name match first; if not found, use the first admin user
+        rows = d.conn.execute("SELECT id, name, api_key FROM users").fetchall()
+        user = None
+        for r in rows:
+            if r["name"].lower() == slack_user.lower():
+                user = dict(r)
+                break
+        if not user and rows:
+            user = dict(rows[0])
+
+        if not user:
+            return JSONResponse({"response_type": "ephemeral", "text": "No users on this Dugg server yet."})
+
+        # /dugg with no args → show feed
+        if not text:
+            feed = d.get_feed(user["id"], limit=5)
+            if not feed:
+                return JSONResponse({"response_type": "ephemeral", "text": "Feed is empty. Add something with `/dugg https://...`"})
+            names = {r["id"]: r["name"] for r in d.conn.execute("SELECT id, name FROM users").fetchall()}
+            lines = [f"*Latest {len(feed)} resource(s):*\n"]
+            for r in feed:
+                title = r.get("title") or r["url"]
+                added_by = names.get(r.get("submitted_by", ""), "")
+                date = r.get("created_at", "")[:10]
+                lines.append(f"*{_xml_escape(title)}*")
+                lines.append(f"<{r['url']}>")
+                meta = []
+                if added_by:
+                    meta.append(f"by {added_by}")
+                if date:
+                    meta.append(date)
+                if meta:
+                    lines.append(" · ".join(meta))
+                if r.get("note"):
+                    lines.append(f"_{_xml_escape(r['note'])}_")
+                lines.append("")
+            return JSONResponse({"response_type": "in_channel", "text": "\n".join(lines)})
+
+        # /dugg <url> [--note ...] → add resource
+        url = text.split()[0].strip("<>")
+        if url.startswith("http://") or url.startswith("https://"):
+            note = ""
+            rest = text[len(text.split()[0]):].strip()
+            if rest.startswith("--note "):
+                note = rest[7:].strip().strip('"\'')
+            elif rest:
+                note = rest
+
+            # Ensure user has a default collection
+            collections = d.list_collections(user["id"])
+            coll_id = None
+            for c in collections:
+                if c["name"] == "Default":
+                    coll_id = c["id"]
+                    break
+            if not coll_id:
+                result = d.create_collection("Default", user["id"], description="Default collection", visibility="private")
+                coll_id = result["id"]
+
+            try:
+                from dugg.enrichment import enrich_url
+                enriched = await enrich_url(url)
+            except Exception:
+                enriched = {}
+
+            resource = d.add_resource(
+                url=url,
+                collection_id=coll_id,
+                submitted_by=user["id"],
+                note=note,
+                title=enriched.get("title", ""),
+                description=enriched.get("description", ""),
+                thumbnail=enriched.get("thumbnail", ""),
+                source_type=enriched.get("source_type", "unknown"),
+                author=enriched.get("raw_metadata", {}).get("author", ""),
+                transcript=enriched.get("transcript", ""),
+                raw_metadata=enriched.get("raw_metadata"),
+            )
+            d.wait_for_webhooks()
+
+            title = resource.get("title") or url
+            resp_lines = [f"Added *{_xml_escape(title)}*", f"<{url}>"]
+            if note:
+                resp_lines.append(f"_{_xml_escape(note)}_")
+            return JSONResponse({"response_type": "in_channel", "text": "\n".join(resp_lines)})
+
+        # /dugg <search query> → search
+        results = d.search(text, user["id"], limit=5)
+        if not results:
+            return JSONResponse({"response_type": "ephemeral", "text": f'No results for "{_xml_escape(text)}"'})
+        names = {r["id"]: r["name"] for r in d.conn.execute("SELECT id, name FROM users").fetchall()}
+        lines = [f'*{len(results)} result(s) for "{_xml_escape(text)}":*\n']
+        for r in results:
+            title = r.get("title") or r["url"]
+            added_by = names.get(r.get("submitted_by", ""), "")
+            lines.append(f"*{_xml_escape(title)}*")
+            lines.append(f"<{r['url']}>")
+            if added_by:
+                lines.append(f"by {added_by}")
+            if r.get("note"):
+                lines.append(f"_{_xml_escape(r['note'])}_")
+            lines.append("")
+        return JSONResponse({"response_type": "in_channel", "text": "\n".join(lines)})
+
     # --- Lifecycle ---
 
     @asynccontextmanager
@@ -728,6 +855,7 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
         Route("/appeal/{key}/status", endpoint=handle_appeal_status),
         Route("/events/stream", endpoint=handle_events_stream),
         Route("/tools/{tool_name}", endpoint=handle_tools, methods=["POST"]),
+        Route("/slack/command", endpoint=handle_slack_command, methods=["POST"]),
     ]
 
     app = Starlette(
