@@ -560,7 +560,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="dugg_instance_policy",
-            description="Get the current policy configuration for a Dugg instance — read horizon, index mode, storage cap, onboarding mode, and rate limits.",
+            description="Get the current policy configuration for a Dugg instance — read horizon, index mode, storage cap, onboarding mode, pruning mode, and rate limits.",
             inputSchema={
                 "type": "object",
                 "properties": {

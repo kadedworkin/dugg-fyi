@@ -122,6 +122,7 @@ class DuggDB:
                 index_mode TEXT DEFAULT 'summary' CHECK(index_mode IN ('summary', 'full', 'metadata_only')),
                 local_storage_cap_mb INTEGER DEFAULT 512,
                 onboarding_mode TEXT DEFAULT 'graduated' CHECK(onboarding_mode IN ('graduated', 'full_access')),
+                pruning_mode TEXT DEFAULT 'interaction' CHECK(pruning_mode IN ('none', 'interaction')),
                 owner_id TEXT NOT NULL REFERENCES users(id),
                 successor_id TEXT REFERENCES users(id) DEFAULT NULL,
                 created_at TEXT NOT NULL,
@@ -316,6 +317,8 @@ class DuggDB:
             self.conn.execute("ALTER TABLE dugg_instances ADD COLUMN successor_id TEXT REFERENCES users(id) DEFAULT NULL")
         if "auto_invite_endpoint" not in inst_cols:
             self.conn.execute("ALTER TABLE dugg_instances ADD COLUMN auto_invite_endpoint TEXT DEFAULT NULL")
+        if "pruning_mode" not in inst_cols:
+            self.conn.execute("ALTER TABLE dugg_instances ADD COLUMN pruning_mode TEXT DEFAULT 'interaction'")
 
         res_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(resources)").fetchall()}
         if "summary" not in res_cols:
@@ -994,7 +997,7 @@ class DuggDB:
             return None
         allowed = {"name", "topic", "endpoint_url", "rate_limit_initial", "rate_limit_growth",
                    "read_horizon_base_days", "read_horizon_growth", "index_mode", "local_storage_cap_mb",
-                   "onboarding_mode", "auto_invite_endpoint"}
+                   "onboarding_mode", "auto_invite_endpoint", "pruning_mode"}
         updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
         if not updates:
             return inst
@@ -1021,6 +1024,7 @@ class DuggDB:
             "rate_limit_initial": inst.get("rate_limit_initial", 5),
             "rate_limit_growth": inst.get("rate_limit_growth", 2),
             "access_mode": inst.get("access_mode", "invite"),
+            "pruning_mode": inst.get("pruning_mode", "interaction"),
         }
 
     def apply_onboarding_preset(self, instance_id: str, owner_id: str, mode: str) -> Optional[dict]:
@@ -1994,15 +1998,20 @@ class DuggDB:
         self.conn.commit()
 
     def get_stale_members(self, days: int = None) -> list[dict]:
-        """Get members who haven't been seen in EGRESS_TIMEOUT_DAYS days."""
+        """Get members who haven't been seen in EGRESS_TIMEOUT_DAYS days.
+        Skips members in collections whose instance has pruning_mode='none'.
+        """
         timeout = days or EGRESS_TIMEOUT_DAYS
         cutoff = (datetime.now(timezone.utc) - timedelta(days=timeout)).isoformat()
         rows = self.conn.execute(
             """SELECT cm.collection_id, cm.user_id, cm.last_seen_at, u.name
                FROM collection_members cm
                JOIN users u ON cm.user_id = u.id
+               JOIN collections c ON cm.collection_id = c.id
+               LEFT JOIN dugg_instances di ON di.owner_id = c.created_by
                WHERE cm.status = 'active'
-                 AND (cm.last_seen_at IS NOT NULL AND cm.last_seen_at < ?)""",
+                 AND (cm.last_seen_at IS NOT NULL AND cm.last_seen_at < ?)
+                 AND COALESCE(di.pruning_mode, 'interaction') != 'none'""",
             (cutoff,),
         ).fetchall()
         return [dict(r) for r in rows]
@@ -2012,7 +2021,11 @@ class DuggDB:
     def get_inactive_members(self, collection_id: str) -> list[dict]:
         """Get members past grace period with zero submissions, zero reactions,
         and no recent activity (feed visits, agent touches).
+        Returns empty list if the instance pruning_mode is 'none'.
         """
+        inst = self._get_instance_for_collection_owner(collection_id)
+        if inst and inst.get("pruning_mode", "interaction") == "none":
+            return []
         now = datetime.now(timezone.utc).isoformat()
         grace_cutoff = now
         seen_cutoff = (datetime.now(timezone.utc) - timedelta(days=GRACE_PERIOD_DAYS)).isoformat()
