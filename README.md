@@ -182,7 +182,8 @@ Add to your OpenClaw config:
 | `dugg_instance_list` | List instances you're subscribed to with their topics. |
 | `dugg_instance_update` | Update an instance's topic or access mode (owner only). |
 | `dugg_invite` | Invite a user to a collection with invite tree tracking. |
-| `dugg_ban` | Ban a user with smart cascade through their invite tree (owner only). |
+| `dugg_ban` | Ban a user with smart cascade through their invite tree. Optional `purge` deletes all their resources (owner only). |
+| `dugg_delete_resource` | Permanently delete a single resource from a collection — for malware links, spam, or policy violations (owner only). |
 | `dugg_appeal` | Appeal a ban — shows your credit score to the owner. |
 | `dugg_appeals` | List pending appeals with credit scores (owner only). |
 | `dugg_appeal_resolve` | Approve or deny a ban appeal (owner only). |
@@ -403,6 +404,12 @@ dugg_ban(collection_id="abc", user_id="spammer_id")
 
 # Ban without cascade
 dugg_ban(collection_id="abc", user_id="user_id", cascade=false)
+
+# Ban AND permanently delete all their resources (malware/spam removal)
+dugg_ban(collection_id="abc", user_id="spammer_id", purge=true)
+
+# Delete a single bad resource without banning anyone
+dugg_delete_resource(resource_id="abc123", collection_id="def456")
 ```
 
 **How cascading works:**
@@ -414,7 +421,18 @@ dugg_ban(collection_id="abc", user_id="user_id", cascade=false)
   - If score < threshold: banned with the rest
   - Members still in their grace period automatically survive regardless of credit
 - **Pending publishes auto-cancelled** — all pending/delivering publishes from banned users are set to `cancelled`
+- **Purge mode** — with `purge=true`, all resources submitted by banned users (including cascade victims) are permanently deleted along with their tags, reactions, publish targets, and queue entries. Default is `false` (resources preserved for history)
 - The system self-calibrates — early communities prune aggressively, mature communities with established contributors prune surgically
+
+### Single resource deletion
+
+Owners can delete individual resources without banning anyone — useful when a single malicious link needs immediate removal:
+
+```
+dugg_delete_resource(resource_id="abc123", collection_id="def456")
+```
+
+Deletes the resource and all associated data (tags, reactions, publish targets, queue entries). Emits a `resource_deleted` event for audit trail.
 
 ## Appeals
 
@@ -447,7 +465,7 @@ dugg_appeal_resolve(collection_id="abc", user_id="user_id", action="approve")
 dugg admin              # launch with local user
 dugg admin --key <key>  # launch with specific API key
 ```
-Keyboard-driven: `[c]`ollections, `[m]`embers, `[a]`ppeals, `[b]`an, `[u]`nban/approve, `[d]`eny, `[r]`efresh.
+Keyboard-driven: `[c]`ollections, `[m]`embers, `[a]`ppeals, `[s]` resources, `[b]`an, `[p]` ban+purge, `[x]` delete resource, `[u]`nban/approve, `[d]`eny, `[r]`efresh.
 
 ## Succession
 
