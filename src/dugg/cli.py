@@ -346,10 +346,16 @@ def cmd_search(args):
     for r in results:
         title = r.get("title") or r["url"]
         added_by = names.get(r.get("submitted_by", ""), "")
+        source = r.get("source_server", "")
         print(f"  {title}")
         print(f"    {r['url']}")
+        meta = []
         if added_by:
-            print(f"    Added by: {added_by}")
+            meta.append(f"by {added_by}")
+        if source:
+            meta.append(f"from {source}")
+        if meta:
+            print(f"    {' · '.join(meta)}")
         if r.get("note"):
             print(f"    Note: {r['note']}")
         print()
@@ -419,11 +425,14 @@ def cmd_feed(args):
         title = r.get("title") or r["url"]
         date = r.get("created_at", "")[:10]
         added_by = names.get(r.get("submitted_by", ""), "")
+        source = r.get("source_server", "")
         print(f"  {title}")
         print(f"    {r['url']}")
         meta = []
         if added_by:
             meta.append(f"by {added_by}")
+        if source:
+            meta.append(f"from {source}")
         if date:
             meta.append(date)
         if meta:

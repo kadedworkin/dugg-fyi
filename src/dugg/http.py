@@ -144,7 +144,8 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
         # Find a collection to ingest into — use Default
         coll_id = _ensure_default_collection(d, user["id"])
 
-        result = d.ingest_remote_publish(resource_data, source_instance_id, coll_id)
+        source_server = payload.get("source_server", "")
+        result = d.ingest_remote_publish(resource_data, source_instance_id, coll_id, source_server=source_server)
         if not result:
             return JSONResponse({"error": "Ingest failed"}, status_code=500)
 
@@ -744,12 +745,15 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
             for r in feed:
                 title = r.get("title") or r["url"]
                 added_by = names.get(r.get("submitted_by", ""), "")
+                source = r.get("source_server", "")
                 date = r.get("created_at", "")[:10]
                 lines.append(f"*{_xml_escape(title)}*")
                 lines.append(f"<{r['url']}>")
                 meta = []
                 if added_by:
                     meta.append(f"by {added_by}")
+                if source:
+                    meta.append(f"from {source}")
                 if date:
                     meta.append(date)
                 if meta:

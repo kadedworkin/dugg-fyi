@@ -149,6 +149,7 @@ class DuggDB:
                 summary TEXT DEFAULT '',
                 content_bytes INTEGER DEFAULT 0,
                 content_evicted INTEGER DEFAULT 0,
+                source_server TEXT DEFAULT '',
                 submitted_by TEXT NOT NULL REFERENCES users(id),
                 collection_id TEXT NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
                 created_at TEXT NOT NULL,
@@ -323,6 +324,8 @@ class DuggDB:
             self.conn.execute("ALTER TABLE resources ADD COLUMN content_bytes INTEGER DEFAULT 0")
         if "content_evicted" not in res_cols:
             self.conn.execute("ALTER TABLE resources ADD COLUMN content_evicted INTEGER DEFAULT 0")
+        if "source_server" not in res_cols:
+            self.conn.execute("ALTER TABLE resources ADD COLUMN source_server TEXT DEFAULT ''")
 
         cm_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(collection_members)").fetchall()}
         if "ip_address" not in cm_cols:
@@ -2099,13 +2102,20 @@ class DuggDB:
         note = payload.get("note", "")
         event_type = event["event_type"]
 
+        source = payload.get("source_server", "")
+
         # Slack-formatted payload
         if "hooks.slack.com" in hook["callback_url"]:
             lines = [f"*{title}*"]
             if url:
                 lines.append(f"<{url}>")
+            meta = []
             if actor_name:
-                lines.append(f"Added by {actor_name}")
+                meta.append(f"Added by {actor_name}")
+            if source:
+                meta.append(f"from {source}")
+            if meta:
+                lines.append(" · ".join(meta))
             if note:
                 lines.append(f"_{note}_")
             body = json.dumps({"text": "\n".join(lines)}).encode()
@@ -2327,7 +2337,7 @@ class DuggDB:
 
     # --- Inbound Publish (receiving from remote) ---
 
-    def ingest_remote_publish(self, resource_data: dict, source_instance_id: str, target_collection_id: str) -> Optional[dict]:
+    def ingest_remote_publish(self, resource_data: dict, source_instance_id: str, target_collection_id: str, source_server: str = "") -> Optional[dict]:
         """Receive a published resource from a remote Dugg instance.
 
         Stores the resource in the target collection with the source tracked.
@@ -2359,13 +2369,14 @@ class DuggDB:
 
         self.conn.execute(
             """INSERT INTO resources
-               (id, url, title, description, thumbnail, source_type, author, transcript, raw_metadata, note, submitted_by, collection_id, created_at, updated_at, enriched_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (id, url, title, description, thumbnail, source_type, author, transcript, raw_metadata, note, source_server, submitted_by, collection_id, created_at, updated_at, enriched_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (res_id, url,
              resource_data.get("title", ""), resource_data.get("description", ""),
              resource_data.get("thumbnail", ""), resource_data.get("source_type", "unknown"),
              resource_data.get("author", ""), resource_data.get("transcript", ""),
              meta_json, resource_data.get("note", ""),
+             source_server,
              coll["created_by"], target_collection_id, now, now,
              resource_data.get("enriched_at")),
         )
