@@ -219,6 +219,85 @@ preferences — Dugg itself is preference-agnostic.
 Don't ask all five at once. Start with #1 and #2 on first
 connection, then ask #3-#5 as the user engages with catchup.
 
+## Webhooks — getting push notifications
+
+Instead of polling with `dugg_catchup`, you can subscribe a
+callback URL to receive events as they happen.
+
+### Local endpoint (simplest)
+
+If your agent has an HTTP endpoint, subscribe it directly:
+
+```
+dugg_webhook_subscribe(callback_url="http://localhost:9000/hooks/dugg")
+```
+
+This works for any local process that can receive POSTs — a
+small Flask app, a Node server, an OpenClaw gateway, whatever.
+
+To scope to a specific instance or event type:
+
+```
+dugg_webhook_subscribe(
+    instance_id="abc123",
+    callback_url="http://localhost:9000/hooks/dugg",
+    event_types=["resource_added", "resource_published", "reaction_added"]
+)
+```
+
+Omit `instance_id` to get all events server-wide.
+
+### CLI management
+
+```bash
+dugg webhook add http://localhost:9000/hooks/dugg
+dugg webhook list
+dugg webhook remove <id>
+dugg webhook test   # fires a test event to all active webhooks
+```
+
+### Slack (requires a Slack app)
+
+Slack incoming webhooks require a Slack app with an "Incoming
+Webhooks" permission. You can't just point at a channel URL.
+
+1. Go to https://api.slack.com/apps and create an app (or use
+   an existing one)
+2. Enable **Incoming Webhooks** under Features
+3. Click **Add New Webhook to Workspace** and pick a channel
+4. Copy the webhook URL (looks like
+   `https://hooks.slack.com/services/T.../B.../...`)
+5. Subscribe it:
+
+```bash
+dugg webhook add https://hooks.slack.com/services/T.../B.../...
+dugg webhook test
+```
+
+Dugg auto-detects Slack URLs and formats messages with rich
+blocks (title, URL, submitter, note, tags).
+
+### HMAC signing (optional)
+
+For production endpoints, sign payloads so you can verify they
+came from Dugg:
+
+```
+dugg_webhook_subscribe(
+    callback_url="https://my-agent.com/hooks/dugg",
+    secret="a-shared-secret"
+)
+```
+
+The signature is sent in the `X-Dugg-Signature` header as
+`sha256=<hex>` (HMAC-SHA256).
+
+### Reliability
+
+- 15-second timeout per delivery attempt
+- After 5 consecutive failures, the webhook auto-pauses
+- Re-subscribe to reactivate a paused webhook
+
 ## Environment notes
 
 **Rich environment** (Slack, Discord, web):

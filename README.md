@@ -147,7 +147,7 @@ dugg --db /path/to/dugg.db serve --transport http
 | `/ingest` | POST | Key | Receive published resources from remote instances |
 | `/tools/{name}` | POST | Key | HTTP dispatch for any MCP tool |
 | `/events/stream` | GET | Key | SSE stream of real-time Dugg events |
-| `/invite/{token}` | GET | None | Browser invite redemption page |
+| `/invite/{token}` | GET | None | Invite page (HTML for browsers, JSON for agents via `Accept: application/json`) |
 | `/invite/{token}/redeem` | POST | None | Process invite (form or JSON) |
 | `/feed/{key}` | GET | None | Browser-friendly feed (HTML or Atom XML) |
 | `/health` | GET | None | Liveness check |
@@ -516,6 +516,56 @@ The recipient clicks it and sees:
    - **CLI** — `dugg welcome --key <key>`
    - **Browser** — bookmark their personal feed at `/feed/{key}`
 
+### Agent-driven redemption
+
+The invite URL content-negotiates. An agent can GET the same invite link with `Accept: application/json` and receive machine-readable onboarding instructions — no browser, no prior knowledge of the Dugg protocol required.
+
+```bash
+# 1. Agent GETs the invite URL
+curl -H "Accept: application/json" https://kade.dugg.fyi/invite/abc-def-1234
+```
+
+```json
+{
+  "status": "pending",
+  "invite": {
+    "token": "abc-def-1234",
+    "invited_by": "Kade",
+    "instance": "Chino Bandido",
+    "topic": "...",
+    "name_hint": "Rocco",
+    "expires_at": "2026-04-15T..."
+  },
+  "redeem": {
+    "method": "POST",
+    "url": "https://kade.dugg.fyi/invite/abc-def-1234/redeem",
+    "content_type": "application/json",
+    "body": {"name": "Your Name"}
+  },
+  "after_redeem": {
+    "mcp_connect": {
+      "transport": "sse",
+      "url": "https://kade.dugg.fyi/sse",
+      "auth_header": "X-Dugg-Key: <agent_api_key from redeem response>"
+    },
+    "first_call": "dugg_welcome",
+    "feed_url": "https://kade.dugg.fyi/feed/<user_api_key>",
+    "health": "https://kade.dugg.fyi/health"
+  }
+}
+```
+
+```bash
+# 2. Agent redeems with the instructions it just received
+curl -X POST https://kade.dugg.fyi/invite/abc-def-1234/redeem \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Rocco"}'
+```
+
+The redeem response returns both keys (user + agent), endpoint URLs, and a quickstart guide. The agent can then connect via MCP and call `dugg_welcome` — fully self-onboarded from just a URL.
+
+This means you can hand an agent an invite link in plain text ("go set this up") and it can complete the entire flow: discover the protocol, redeem, connect, and orient itself.
+
 ### Token details
 
 - Short slugs like `r5y6-9761-bm5h` — human-friendly, copy-paste safe
@@ -872,7 +922,7 @@ uv run pytest tests/test_db.py -v
 
 **Observability** — Event emission (8 event types), read cursors with catchup, webhook subscriptions (instance-scoped or server-wide) with HMAC signing and auto-pause, Slack webhook notifications with rich formatting, `dugg health` and `dugg status` commands
 
-**Onboarding** — Invite tokens with browser redemption, read-only browser feed (HTML + Atom), welcome orientation tool, portable `/dugg` slash command for any MCP agent
+**Onboarding** — Invite tokens with browser or agent-driven redemption (content-negotiated JSON), read-only browser feed (HTML + Atom), welcome orientation tool, portable `/dugg` slash command for any MCP agent
 
 **Integrations** — Slack incoming webhooks (auto-detected, rich blocks), Slack slash command endpoint (`/slack/command`), browser admin panel with ban/unban/remove
 

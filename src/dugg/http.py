@@ -292,19 +292,63 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
         invite = d.get_invite_token(token)
 
         if not invite:
+            accept = request.headers.get("accept", "")
+            if "application/json" in accept:
+                return JSONResponse({"error": "Invalid invite token"}, status_code=404)
             return HTMLResponse(_html_page("Invalid Invite", "<h1>Invalid invite</h1><p>This invite link is not valid.</p>"), status_code=404)
 
         if invite.get("redeemed_by"):
+            accept = request.headers.get("accept", "")
+            if "application/json" in accept:
+                return JSONResponse({"error": "This invite has already been redeemed"}, status_code=410)
             return HTMLResponse(_html_page("Already Redeemed", "<h1>Already redeemed</h1><p>This invite has already been used.</p>"), status_code=410)
 
         from datetime import datetime, timezone
         if datetime.fromisoformat(invite["expires_at"]) < datetime.now(timezone.utc):
+            accept = request.headers.get("accept", "")
+            if "application/json" in accept:
+                return JSONResponse({"error": "This invite has expired"}, status_code=410)
             return HTMLResponse(_html_page("Expired Invite", "<h1>Invite expired</h1><p>This invite link has expired. Ask for a new one.</p>"), status_code=410)
 
         inviter = d.get_user(invite["created_by"])
         inviter_name = inviter["name"] if inviter else "Someone"
         instance = d.get_instance_for_owner(invite["created_by"])
         instance_name = instance["name"] if instance else "a Dugg server"
+
+        accept = request.headers.get("accept", "")
+        if "application/json" in accept:
+            endpoint = instance.get("endpoint_url", "").rstrip("/") if instance else ""
+            if not endpoint:
+                endpoint = d.get_config("server_url", "")
+            return JSONResponse({
+                "status": "pending",
+                "invite": {
+                    "token": token,
+                    "invited_by": inviter_name,
+                    "instance": instance_name,
+                    "topic": instance.get("topic") if instance else None,
+                    "name_hint": invite.get("name_hint", ""),
+                    "expires_at": invite["expires_at"],
+                },
+                "redeem": {
+                    "method": "POST",
+                    "url": f"{endpoint}/invite/{token}/redeem",
+                    "content_type": "application/json",
+                    "body": {"name": "Your Name"},
+                    "description": "POST this to redeem the invite. The response contains your user key (for your human) and agent key (for API/MCP access).",
+                },
+                "after_redeem": {
+                    "mcp_connect": {
+                        "transport": "sse",
+                        "url": f"{endpoint}/sse" if endpoint else None,
+                        "auth_header": "X-Dugg-Key: <agent_api_key from redeem response>",
+                    },
+                    "first_call": "dugg_welcome — returns instance orientation, recent activity, and rate limits in one call.",
+                    "feed_url": f"{endpoint}/feed/<user_api_key from redeem response>" if endpoint else None,
+                    "health": f"{endpoint}/health" if endpoint else None,
+                },
+            })
+
         topic_html = f'<p class="topic">{instance["topic"]}</p>' if instance and instance.get("topic") else ""
         name_hint = invite.get("name_hint", "")
 
