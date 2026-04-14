@@ -100,6 +100,11 @@ dugg --db /path/to/dugg.db serve --transport http
 | `/invite/{token}/redeem` | POST | None | Process invite (form or JSON) |
 | `/feed/{key}` | GET | None | Browser-friendly feed (HTML or Atom XML) |
 | `/health` | GET | None | Liveness check |
+| `/slack/command` | POST | Slack | Slack slash command endpoint — `/dugg` in any Slack workspace |
+| `/admin/{key}` | GET | Key-in-URL | Browser admin panel — collections, members, resources |
+| `/admin/{key}/ban` | POST | Key-in-URL | Ban a user (owner only) |
+| `/admin/{key}/unban` | POST | Key-in-URL | Unban a user (owner only) |
+| `/admin/{key}/remove` | POST | Key-in-URL | Remove a resource (owner or submitter) |
 
 **Authentication:** Endpoints marked "Key" require an `X-Dugg-Key` header. Invite and feed endpoints are unauthenticated by design — the token/key in the URL acts as the credential.
 
@@ -111,7 +116,8 @@ curl -X POST http://localhost:8411/ingest \
   -H "Content-Type: application/json" \
   -d '{
     "resource": {"url": "https://example.com/article", "title": "Cool Article"},
-    "source_instance_id": "remote123"
+    "source_instance_id": "remote123",
+    "source_server": "https://remote.dugg.fyi"
   }'
 ```
 
@@ -209,6 +215,91 @@ Add to your OpenClaw config:
 | `dugg_set_successor` | Designate a successor for a Dugg instance. If the owner is incapacitated, ownership transfers to this user. Owner only. |
 | `dugg_welcome` | Orientation for new connections. Returns instance topics, recent activity, and rate limit status. |
 
+## CLI commands
+
+Beyond `init`, `serve`, `add-user`, and `login`, Dugg ships a full management CLI:
+
+| Command | Description |
+|---------|-------------|
+| `dugg add <url> [--note ...]` | Add a resource (URL auto-detected — `dugg https://...` works too) |
+| `dugg feed` | Show recent resources with server health footer |
+| `dugg search <query>` | Full-text search |
+| `dugg status` | Dashboard: user identity, DB path, server, collections, resources, webhooks, health |
+| `dugg health` | Ping the configured server and show status + timestamp |
+| `dugg servers` | List this server, subscribed instances, and publish targets |
+| `dugg remove <id-or-url>` | Delete a resource (submitter or owner) |
+| `dugg edit <id-or-url> [--title ...] [--note ...]` | Edit a resource's title or note (submitter only) |
+| `dugg webhook add <url>` | Subscribe a webhook (Slack URLs auto-detected) |
+| `dugg webhook list` | List active webhooks |
+| `dugg webhook remove <id>` | Remove a webhook |
+| `dugg webhook test` | Fire a test event to all webhooks |
+| `dugg set-config <key> <value>` | Set server config (e.g., `server_url`, `server_name`) |
+| `dugg invite-user <name>` | Generate an invite token |
+| `dugg redeem <token>` | Redeem an invite token |
+| `dugg admin` | Launch the terminal admin UI |
+
+**URL auto-routing:** `dugg https://example.com --note "cool stuff"` automatically maps to `dugg add` — no subcommand needed.
+
+## `/dugg` slash command
+
+A portable `/dugg` command ships at `commands/dugg.md` in the repo. It works with any MCP-compatible agent that supports slash commands.
+
+**Install for Claude Code:**
+
+```bash
+mkdir -p ~/.claude/commands
+cp commands/dugg.md ~/.claude/commands/dugg.md
+```
+
+**Usage:**
+- `/dugg` — show your latest resources (feed)
+- `/dugg https://example.com this is why it matters` — add a URL with a note
+- `/dugg search terms` — search your knowledge base
+
+See [SETUP.md](SETUP.md) for detailed setup instructions across agent platforms.
+
+## Slack integration
+
+### Incoming webhooks (notifications)
+
+Wire up Slack incoming webhooks to get notified when new resources are added:
+
+```bash
+# Add a Slack webhook
+dugg webhook add https://hooks.slack.com/services/T.../B.../...
+
+# Test it
+dugg webhook test
+```
+
+Dugg auto-detects Slack URLs and formats messages with rich blocks (title, URL, submitter, note, tags).
+
+### Slash command (`/dugg` in Slack)
+
+Set up a Slack app with a slash command pointing to your server:
+
+1. Create a Slack app at api.slack.com
+2. Add a slash command `/dugg` with Request URL: `https://your-server/slack/command`
+3. (Optional) Set a signing secret for request verification via `dugg set-config slack_signing_secret <secret>`
+
+**Behavior:**
+- `/dugg` → shows last 5 resources (visible to channel)
+- `/dugg https://...` → adds the URL (rest of text is the note)
+- `/dugg search terms` → searches and shows results
+
+The command auto-matches the Slack `user_name` to a Dugg user by name.
+
+## Browser admin panel
+
+Server owners get a browser-based admin panel at `/admin/{api_key}`:
+
+- View all collections, members, and resources
+- Ban/unban users (owner only)
+- Remove resources (owner or submitter)
+- Django Admin aesthetic — functional, not flashy
+
+The API key in the URL acts as authentication. Matches the existing dark theme from the browser feed.
+
 ## Architecture
 
 ```
@@ -224,7 +315,7 @@ Add to your OpenClaw config:
                    │ MCP protocol (stdio or HTTP/SSE)
                    │
 ┌──────────────────▼──────────────────────────┐
-│  Dugg MCP Server — tool handlers (44)       │
+│  Dugg MCP Server — tool handlers (44+)      │
 │                                             │
 │  - Auth (API key per user)                  │
 │  - Rate limiting (tenure-based)             │
@@ -241,6 +332,8 @@ Add to your OpenClaw config:
 │  Event log    │    │  /events/stream │
 │  Publish queue│    │  /feed/{key}    │
 │  Invite trees │    │  /invite/{token}│
+│               │    │  /admin/{key}   │
+│               │    │  /slack/command  │
 └───────────────┘    └─────────────────┘
 ```
 
@@ -631,15 +724,17 @@ Events are scoped — you only see events for instances you're subscribed to and
 
 ## Webhooks
 
-For agents that want push instead of poll. Subscribe a callback URL to an instance and receive POST requests when events happen.
+For agents that want push instead of poll. Subscribe a callback URL to receive POST requests when events happen. Webhooks can be scoped to a specific instance or server-wide (all events).
 
 ```
-# Subscribe to all events
+# Subscribe to all events server-wide (no instance filter)
+dugg_webhook_subscribe(callback_url="https://my-agent.com/hooks/dugg")
+
+# Subscribe to a specific instance
 dugg_webhook_subscribe(instance_id="abc123", callback_url="https://my-agent.com/hooks/dugg")
 
 # Subscribe to specific events with HMAC signing
 dugg_webhook_subscribe(
-    instance_id="abc123",
     callback_url="https://my-agent.com/hooks/dugg",
     event_types=["resource_published", "member_joined"],
     secret="my-webhook-secret"
@@ -648,6 +743,15 @@ dugg_webhook_subscribe(
 # List and manage
 dugg_webhook_list()
 dugg_webhook_delete(webhook_id="def456")
+```
+
+**CLI management:**
+
+```bash
+dugg webhook add https://hooks.slack.com/services/T.../B.../...
+dugg webhook list
+dugg webhook remove <id>
+dugg webhook test
 ```
 
 **Reliability:**
@@ -675,7 +779,7 @@ dugg_ingest(
 
 **Deduplication:** Same URL in the same collection = skip (returns `duplicate` status). Different collections = allowed (cross-pollination is intentional).
 
-**Source tracking:** The originating instance ID is stored in `raw_metadata._source_instance` so you always know where content came from.
+**Source tracking:** The originating instance ID is stored in `raw_metadata._source_instance` and the originating server URL is stored in the `source_server` field. Feed and search results display the source server so you always know where federated content came from. The publish sync daemon automatically includes `source_server` in outbound deliveries.
 
 ## Enrichment
 
@@ -712,11 +816,15 @@ uv run pytest tests/test_db.py -v
 
 **Content governance** — Read horizon (graduated content visibility by tenure), content indexing policy (summary/full/metadata_only), article extraction via readability-lxml, IMAP-style storage cap + eviction, unified instance policy with onboarding presets
 
-**Infrastructure** — Dual transport (stdio + HTTP/SSE), hosted instances with topic descriptors, agent auto-routing via routing manifest, tenure-based rate limiting
+**Infrastructure** — Dual transport (stdio + HTTP/SSE), hosted instances with topic descriptors, agent auto-routing via routing manifest, tenure-based rate limiting, `.dugg-env` config discovery
 
-**Observability** — Event emission (8 event types), read cursors with catchup, webhook subscriptions with HMAC signing and auto-pause
+**Observability** — Event emission (8 event types), read cursors with catchup, webhook subscriptions (instance-scoped or server-wide) with HMAC signing and auto-pause, Slack webhook notifications with rich formatting, `dugg health` and `dugg status` commands
 
-**Onboarding** — Invite tokens with browser redemption, read-only browser feed (HTML + Atom), welcome orientation tool
+**Onboarding** — Invite tokens with browser redemption, read-only browser feed (HTML + Atom), welcome orientation tool, portable `/dugg` slash command for any MCP agent
+
+**Integrations** — Slack incoming webhooks (auto-detected, rich blocks), Slack slash command endpoint (`/slack/command`), browser admin panel with ban/unban/remove
+
+**CLI** — Full management: `status`, `health`, `servers`, `remove`, `edit`, `webhook` (add/list/remove/test), `set-config`, URL auto-routing
 
 ## License
 
