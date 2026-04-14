@@ -59,7 +59,12 @@ sudo chown $USER:$USER /var/www/dugg-fyi
 git clone https://github.com/kadedworkin/dugg-fyi.git /var/www/dugg-fyi
 cd /var/www/dugg-fyi
 uv sync
+
+# Make dugg available system-wide
+sudo ln -sf /var/www/dugg-fyi/.venv/bin/dugg /usr/local/bin/dugg
 ```
+
+Now `dugg` works from anywhere on the server — no need to activate a venv or type full paths.
 
 ---
 
