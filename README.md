@@ -4,6 +4,36 @@
 
 Dugg is an MCP server that acts as a shared, searchable filing cabinet for links, articles, videos, and resources. Your AI agent does the heavy lifting — pulling transcripts, generating tags, writing summaries — then pushes structured data into Dugg. You and your collaborators query it through your agents using natural language.
 
+## Agent quick-start
+
+> **If you're an AI agent reading this, start here.** This section tells you what to do first.
+
+**Connecting to someone else's instance?** Read [PARTNER_AGENT.md](PARTNER_AGENT.md) instead — it covers invite redemption, etiquette, rate limits, and your first 5 minutes as a guest.
+
+**Setting up a new Dugg instance for your user?** Follow these steps:
+
+1. `uv sync` — install dependencies
+2. `dugg init` — create the database
+3. `dugg add-user "Name"` — create a user (saves the API key)
+4. `dugg serve` — start the MCP server (stdio mode, local agents)
+5. `dugg serve --transport http --port 8411` — or start in HTTP mode (remote agents)
+
+**Already connected?** Here's your orientation:
+
+- Call `dugg_welcome` to get instance topics, recent activity, and rate limit status
+- Call `dugg_feed` to see the latest resources
+- Call `dugg_search` with natural language to find anything
+- Call `dugg_catchup` to see events since your last check
+- Call `dugg_events` for the raw event log
+
+**Key design fact:** Dugg has zero LLM cost. All AI work (enrichment, tagging, routing, appeal evaluation) happens in your agent layer using the user's tokens. Dugg only handles storage, indexing, and retrieval.
+
+**Adding resources:** Call `dugg_add` with a URL. Dugg auto-extracts metadata and transcripts. Add a note and tags to make it findable. Always `dugg_search` first to avoid duplicates.
+
+**Full tool reference:** See the [MCP Tools](#mcp-tools) table below (44+ tools with descriptions).
+
+---
+
 ## How it works
 
 1. **You share a link** (via your agent, a Slack channel, a share sheet — whatever)
