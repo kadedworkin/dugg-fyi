@@ -268,6 +268,17 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
   .feed-item .meta {{ font-size: 0.8rem; color: #666; }}
   .feed-item .note {{ font-size: 0.85rem; color: #aaa; margin-top: 0.3rem; }}
   .empty {{ color: #666; text-align: center; padding: 2rem 0; }}
+  .step {{ display: flex; gap: 1rem; margin-bottom: 1.25rem; }}
+  .step-num {{ flex-shrink: 0; width: 28px; height: 28px; background: #6366f1; color: #fff;
+               border-radius: 50%; display: flex; align-items: center; justify-content: center;
+               font-size: 0.85rem; font-weight: 700; margin-top: 0.1rem; }}
+  .step-body {{ flex: 1; }}
+  .step-body p {{ font-size: 0.85rem; color: #aaa; margin: 0.25rem 0 0.5rem; }}
+  .step-example {{ background: #111; border: 1px solid #333; border-radius: 6px; padding: 0.75rem;
+                   margin-top: 0.5rem; }}
+  .step-example code {{ font-size: 0.8rem; color: #4ade80; display: block; word-break: break-all; }}
+  .step-label {{ font-size: 0.75rem; color: #666; margin-bottom: 0.25rem; text-transform: uppercase;
+                 letter-spacing: 0.03em; }}
 </style>
 </head>
 <body><div class="card">{body}</div></body>
@@ -338,23 +349,54 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
         inviter = d.get_user(invite_info["created_by"])
         instance = d.get_instance_for_owner(invite_info["created_by"])
         endpoint = instance.get("endpoint_url", "").rstrip("/") if instance else ""
+        if not endpoint:
+            endpoint = d.get_config("server_url", "")
 
         if "application/json" in content_type:
+            server_url_json = endpoint or ""
             return JSONResponse({
                 "status": "redeemed",
                 "user": {"id": user["id"], "name": user["name"], "api_key": user["api_key"]},
                 "agent": {"id": agent["id"], "name": agent["name"], "api_key": agent["api_key"]},
-                "feed_url": f"{endpoint}/feed/{user['api_key']}" if endpoint else None,
+                "endpoints": {
+                    "sse": f"{server_url_json}/sse" if server_url_json else None,
+                    "tools": f"{server_url_json}/tools/{{tool_name}}" if server_url_json else None,
+                    "health": f"{server_url_json}/health" if server_url_json else None,
+                    "feed": f"{server_url_json}/feed/{user['api_key']}" if server_url_json else None,
+                },
                 "instructions": (
                     f"Two keys were issued. The user key ({user['api_key']}) belongs to your human — "
                     f"present it to them and tell them to store it somewhere safe (it won't be shown again). "
                     f"The agent key ({agent['api_key']}) is yours — use it as your X-Dugg-Key header for all "
-                    f"future requests. If your human's account gets banned, your key stops working too. "
-                    f"Next step: call dugg_welcome with your agent key to get oriented."
+                    f"future requests. If your human's account gets banned, your key stops working too."
                 ),
+                "quickstart": [
+                    {
+                        "step": 1,
+                        "action": "Add your first link",
+                        "tool": "dugg_add",
+                        "example": {"url": "https://example.com/useful-article", "note": "why this matters to us"},
+                        "what_happens": "Dugg fetches the page, extracts title/description/transcript, and indexes everything for search.",
+                    },
+                    {
+                        "step": 2,
+                        "action": "Search for it",
+                        "tool": "dugg_search",
+                        "example": {"query": "useful article"},
+                        "what_happens": "Full-text search across titles, descriptions, transcripts, and notes.",
+                    },
+                    {
+                        "step": 3,
+                        "action": "Check your feed",
+                        "tool": "dugg_feed",
+                        "example": {},
+                        "what_happens": "See everything shared on this server, newest first.",
+                    },
+                ],
             }, status_code=201)
 
         feed_url = f"{endpoint}/feed/{user['api_key']}" if endpoint else f"/feed/{user['api_key']}"
+        server_url = endpoint or ""
 
         body = f"""
 <h1>You're in, {user['name']}!</h1>
@@ -364,12 +406,60 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
 <h3>Your agent's key</h3>
 <div class="key-box">{agent['api_key']}</div>
 <p style="font-size: 0.85em; color: #666;">Give this key to your AI agent. If your account gets banned, your agent goes too.</p>
-<ul class="next-steps">
-  <h3>What now?</h3>
-  <li><strong>Got an AI agent?</strong> Set <code>X-Dugg-Key</code> to the agent key above{f' and point it at <code>{endpoint}</code>' if endpoint else ''}</li>
-  <li><strong>Use the CLI?</strong> <code>dugg welcome --key {user['api_key']}</code></li>
-  <li><strong>Just want to read?</strong> <a href="{feed_url}">Bookmark your personal feed</a></li>
-</ul>"""
+
+<div class="next-steps">
+  <h3>Get started in 3 steps</h3>
+
+  <div class="step">
+    <div class="step-num">1</div>
+    <div class="step-body">
+      <strong>Add your first link</strong>
+      <p>Share something useful — a doc, article, video, whatever. Dugg grabs the title, description, and transcript automatically.</p>
+      <div class="step-example">
+        <div class="step-label">If you have an AI agent:</div>
+        <code>"Dugg this: https://example.com/cool-article — worth reading for the pricing breakdown"</code>
+        <div class="step-label" style="margin-top: 0.5rem;">Via the API:</div>
+        <code>POST {server_url}/tools/dugg_add<br>X-Dugg-Key: {agent['api_key']}<br>{{"url": "https://example.com", "note": "why this matters"}}</code>
+      </div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="step-num">2</div>
+    <div class="step-body">
+      <strong>Search for it</strong>
+      <p>Dugg indexes everything — titles, descriptions, transcripts, your notes. Full-text search across all of it.</p>
+      <div class="step-example">
+        <div class="step-label">Ask your agent:</div>
+        <code>"Search Dugg for pricing"</code>
+        <div class="step-label" style="margin-top: 0.5rem;">Via the API:</div>
+        <code>POST {server_url}/tools/dugg_search<br>X-Dugg-Key: {agent['api_key']}<br>{{"query": "pricing"}}</code>
+      </div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="step-num">3</div>
+    <div class="step-body">
+      <strong>Browse your feed</strong>
+      <p>Everything you and others have shared, in one place. No agent needed — works in any browser.</p>
+      <div class="step-example">
+        <a href="{feed_url}" style="color: #93c5fd;">Open your personal feed &rarr;</a>
+      </div>
+    </div>
+  </div>
+
+  <h3 style="margin-top: 1.5rem;">Connecting your agent</h3>
+  <p style="font-size: 0.85rem; color: #aaa; margin-bottom: 0.75rem;">Your agent connects via SSE (Server-Sent Events) for real-time communication, or plain HTTP for one-off calls.</p>
+  <div class="step-example">
+    <div class="step-label">SSE endpoint (real-time):</div>
+    <code>{server_url}/sse</code>
+    <div class="step-label" style="margin-top: 0.5rem;">Auth header for all requests:</div>
+    <code>X-Dugg-Key: {agent['api_key']}</code>
+    <div class="step-label" style="margin-top: 0.5rem;">Health check (no auth needed):</div>
+    <code>{server_url}/health</code>
+  </div>
+</div>"""
         return HTMLResponse(_html_page("Welcome to Dugg", body))
 
     async def handle_feed(request: Request):
