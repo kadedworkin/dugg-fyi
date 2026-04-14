@@ -10,27 +10,38 @@ from typing import Optional
 
 
 def _read_dugg_env() -> dict:
-    """Read .dugg-env from working dir or ancestors. Returns dict of key=value pairs."""
+    """Read .dugg-env from working dir ancestors or the install directory."""
     result = {}
     try:
         check = Path.cwd()
     except (OSError, PermissionError):
-        return result
-    for _ in range(10):
-        env_file = check / ".dugg-env"
-        try:
-            if env_file.exists():
-                for line in env_file.read_text().splitlines():
-                    if "=" in line and not line.startswith("#"):
-                        k, v = line.split("=", 1)
-                        result[k.strip()] = v.strip()
-                return result
-        except (OSError, PermissionError):
-            pass
-        parent = check.parent
-        if parent == check:
-            break
-        check = parent
+        check = None
+    if check:
+        for _ in range(10):
+            env_file = check / ".dugg-env"
+            try:
+                if env_file.exists():
+                    for line in env_file.read_text().splitlines():
+                        if "=" in line and not line.startswith("#"):
+                            k, v = line.split("=", 1)
+                            result[k.strip()] = v.strip()
+                    return result
+            except (OSError, PermissionError):
+                pass
+            parent = check.parent
+            if parent == check:
+                break
+            check = parent
+    # Fall back to the dugg-fyi install directory
+    install_env = Path(__file__).resolve().parent.parent.parent / ".dugg-env"
+    try:
+        if install_env.exists():
+            for line in install_env.read_text().splitlines():
+                if "=" in line and not line.startswith("#"):
+                    k, v = line.split("=", 1)
+                    result[k.strip()] = v.strip()
+    except (OSError, PermissionError):
+        pass
     return result
 
 _DUGG_ENV = _read_dugg_env()
