@@ -11,13 +11,19 @@ from typing import Optional
 
 def _resolve_db_path() -> Path:
     """Find the DB path: .dugg-env in working dir or ancestors > ~/.dugg/dugg.db."""
-    check = Path.cwd()
+    try:
+        check = Path.cwd()
+    except (OSError, PermissionError):
+        return Path.home() / ".dugg" / "dugg.db"
     for _ in range(10):
         env_file = check / ".dugg-env"
-        if env_file.exists():
-            for line in env_file.read_text().splitlines():
-                if line.startswith("DUGG_DB_PATH="):
-                    return Path(line.split("=", 1)[1].strip())
+        try:
+            if env_file.exists():
+                for line in env_file.read_text().splitlines():
+                    if line.startswith("DUGG_DB_PATH="):
+                        return Path(line.split("=", 1)[1].strip())
+        except (OSError, PermissionError):
+            pass
         parent = check.parent
         if parent == check:
             break
