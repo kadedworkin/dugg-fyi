@@ -123,6 +123,7 @@ class DuggDB:
                 local_storage_cap_mb INTEGER DEFAULT 512,
                 onboarding_mode TEXT DEFAULT 'graduated' CHECK(onboarding_mode IN ('graduated', 'full_access')),
                 pruning_mode TEXT DEFAULT 'interaction' CHECK(pruning_mode IN ('none', 'interaction')),
+                pruning_grace_days INTEGER DEFAULT 14,
                 owner_id TEXT NOT NULL REFERENCES users(id),
                 successor_id TEXT REFERENCES users(id) DEFAULT NULL,
                 created_at TEXT NOT NULL,
@@ -319,6 +320,8 @@ class DuggDB:
             self.conn.execute("ALTER TABLE dugg_instances ADD COLUMN auto_invite_endpoint TEXT DEFAULT NULL")
         if "pruning_mode" not in inst_cols:
             self.conn.execute("ALTER TABLE dugg_instances ADD COLUMN pruning_mode TEXT DEFAULT 'interaction'")
+        if "pruning_grace_days" not in inst_cols:
+            self.conn.execute("ALTER TABLE dugg_instances ADD COLUMN pruning_grace_days INTEGER DEFAULT 14")
 
         res_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(resources)").fetchall()}
         if "summary" not in res_cols:
@@ -997,7 +1000,7 @@ class DuggDB:
             return None
         allowed = {"name", "topic", "endpoint_url", "rate_limit_initial", "rate_limit_growth",
                    "read_horizon_base_days", "read_horizon_growth", "index_mode", "local_storage_cap_mb",
-                   "onboarding_mode", "auto_invite_endpoint", "pruning_mode"}
+                   "onboarding_mode", "auto_invite_endpoint", "pruning_mode", "pruning_grace_days"}
         updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
         if not updates:
             return inst
@@ -1025,6 +1028,7 @@ class DuggDB:
             "rate_limit_growth": inst.get("rate_limit_growth", 2),
             "access_mode": inst.get("access_mode", "invite"),
             "pruning_mode": inst.get("pruning_mode", "interaction"),
+            "pruning_grace_days": inst.get("pruning_grace_days", 14),
         }
 
     def apply_onboarding_preset(self, instance_id: str, owner_id: str, mode: str) -> Optional[dict]:
@@ -2026,9 +2030,10 @@ class DuggDB:
         inst = self._get_instance_for_collection_owner(collection_id)
         if inst and inst.get("pruning_mode", "interaction") == "none":
             return []
+        grace_days = inst.get("pruning_grace_days", GRACE_PERIOD_DAYS) if inst else GRACE_PERIOD_DAYS
         now = datetime.now(timezone.utc).isoformat()
         grace_cutoff = now
-        seen_cutoff = (datetime.now(timezone.utc) - timedelta(days=GRACE_PERIOD_DAYS)).isoformat()
+        seen_cutoff = (datetime.now(timezone.utc) - timedelta(days=grace_days)).isoformat()
         rows = self.conn.execute(
             """SELECT cm.user_id, cm.joined_at, cm.grace_expires_at, cm.last_seen_at, u.name
                FROM collection_members cm

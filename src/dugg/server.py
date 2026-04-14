@@ -87,7 +87,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="dugg_search",
-            description="Search across all resources you have access to. Uses full-text search across titles, descriptions, transcripts, and notes.",
+            description="Search across all resources you have access to. Full-text search indexes: title, description, author, transcript, note, and summary.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -325,6 +325,7 @@ async def list_tools() -> list[Tool]:
                     "index_mode": {"type": "string", "enum": ["summary", "full", "metadata_only"], "description": "How ingested content is stored"},
                     "local_storage_cap_mb": {"type": "integer", "description": "Max local content storage in MB (-1 for unlimited)"},
                     "onboarding_mode": {"type": "string", "enum": ["graduated", "full_access"], "description": "Onboarding preset: 'graduated' (default) or 'full_access' (sets horizon=-1, storage=-1, index=full)"},
+                    "pruning_grace_days": {"type": "integer", "description": "Days of inactivity before a member can be pruned (default 14). Only applies when pruning_mode is 'interaction'."},
                     "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
                 },
                 "required": ["instance_id"],
@@ -605,7 +606,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="dugg_prune_inactive",
-            description="List or remove members past their 14-day grace period with zero activity (no submissions, no reactions). No lurking policy.",
+            description="List or remove members past their grace period with zero activity (no submissions, no reactions). Grace period is configurable per-instance (default 14 days).",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -782,7 +783,15 @@ async def _handle_add(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
     # Check rate limit before doing any work
     rate_status = d.check_rate_limit(coll_id, user_id)
     if not rate_status["allowed"] and rate_status["cap"] != -1:
-        return [TextContent(type="text", text=f"Rate limit exceeded. You've used {rate_status['current']}/{rate_status['cap']} posts today (member for {rate_status['days_member']} day(s)). Try again tomorrow.")]
+        return [TextContent(type="text", text=(
+            f"Rate limit exceeded.\n\n"
+            f"  used: {rate_status['current']}/{rate_status['cap']} posts today\n"
+            f"  member_for_days: {rate_status['days_member']}\n"
+            f"  cap_formula: {rate_status['cap']} = initial + ({rate_status['days_member']} days × growth)\n\n"
+            f"Your cap increases each day you're a member. "
+            f"Check dugg_rate_limit_status() to see your current allowance. "
+            f"Do not retry — wait until tomorrow (UTC midnight reset)."
+        ))]
 
     # Enrich the URL
     enriched = await enrich_url(url)
@@ -1200,6 +1209,8 @@ def _handle_instance_update(d: DuggDB, user_id: str, args: dict) -> list[TextCon
         updates["index_mode"] = args["index_mode"]
     if "local_storage_cap_mb" in args and args["local_storage_cap_mb"] is not None:
         updates["local_storage_cap_mb"] = args["local_storage_cap_mb"]
+    if "pruning_grace_days" in args and args["pruning_grace_days"] is not None:
+        updates["pruning_grace_days"] = args["pruning_grace_days"]
     # Handle onboarding_mode preset — overrides individual settings
     onboarding_mode = args.get("onboarding_mode", "")
     if onboarding_mode == "full_access":
@@ -1238,6 +1249,9 @@ def _handle_instance_policy(d: DuggDB, user_id: str, args: dict) -> list[TextCon
     cap = policy['local_storage_cap_mb']
     lines.append(f"Storage cap: {'unlimited' if cap == -1 else f'{cap} MB'}")
     lines.append(f"Rate limit: {policy['rate_limit_initial']} initial, +{policy['rate_limit_growth']}/day")
+    lines.append(f"Pruning mode: {policy['pruning_mode']}")
+    if policy['pruning_mode'] == 'interaction':
+        lines.append(f"Pruning grace period: {policy.get('pruning_grace_days', 14)} days")
     lines.append(f"Access mode: {policy['access_mode']}")
     return [TextContent(type="text", text="\n".join(lines))]
 
