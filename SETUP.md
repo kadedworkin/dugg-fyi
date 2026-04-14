@@ -159,3 +159,27 @@ dugg redeem abc-def-1234
 ### For non-technical users
 
 Every user gets a bookmarkable feed at `/feed/{key}` — a browser-readable view of everything they have access to. No setup needed, just a URL.
+
+## 6. Enable the `/dugg` slash command
+
+The repo includes a ready-made `/dugg` command at `commands/dugg.md`. To enable it in your agent:
+
+**Claude Code / Claude Desktop:**
+
+```bash
+# From the dugg-fyi directory
+mkdir -p ~/.claude/commands
+cp commands/dugg.md ~/.claude/commands/dugg.md
+```
+
+**Or have your agent do it:**
+
+> "Copy the file `commands/dugg.md` from the dugg-fyi repo into `~/.claude/commands/dugg.md`"
+
+Once installed, you can use:
+
+- `/dugg` — show your latest resources
+- `/dugg https://example.com this is why it matters` — add a URL with a note
+- `/dugg search terms` — search your knowledge base
+
+The command works with any MCP-compatible agent that supports slash commands. The file is self-contained — just drop it into your agent's command directory.
