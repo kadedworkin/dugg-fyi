@@ -4,6 +4,8 @@ Get Dugg running and connected to your AI agent in under 2 minutes.
 
 ## 1. Install
 
+**Prerequisites:** Python 3.11+ and [uv](https://docs.astral.sh/uv/) (`curl -LsSf https://astral.sh/uv/install.sh | sh`). If you don't have `uv`, you can use `pip install -e .` instead of `uv sync`.
+
 ```bash
 git clone https://github.com/kadedworkin/dugg-fyi.git
 cd dugg-fyi && uv sync
@@ -66,6 +68,40 @@ dugg serve --transport http --port 8411
 ```
 
 Remote agents connect via SSE at `http://your-host:8411/sse` and authenticate with the `X-Dugg-Key` header.
+
+**Claude Code / Claude Desktop** — remote SSE config:
+
+```json
+{
+  "mcpServers": {
+    "dugg": {
+      "transport": "sse",
+      "url": "https://your-host:8411/sse",
+      "headers": {
+        "X-Dugg-Key": "dugg_your_api_key"
+      }
+    }
+  }
+}
+```
+
+**OpenClaw** — remote SSE config:
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "dugg": {
+        "transport": "sse",
+        "url": "https://your-host:8411/sse",
+        "headers": {
+          "X-Dugg-Key": "dugg_your_api_key"
+        }
+      }
+    }
+  }
+}
+```
 
 ### Option C: CLI wrapper (calling from outside the venv)
 
@@ -150,11 +186,13 @@ https://your-server.dugg.fyi/invite/abc-def-1234
 
 The recipient clicks the link, enters their name, and gets their API key. No CLI or agent needed on their end.
 
-They can also redeem via CLI if they prefer:
+If you're running a local-only instance (no HTTP server), recipients can also redeem via CLI:
 
 ```bash
 dugg redeem abc-def-1234
 ```
+
+> **Note:** CLI redemption only works against the local database. For remote instances, always use the browser invite link.
 
 ### For non-technical users
 

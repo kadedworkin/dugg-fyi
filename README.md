@@ -76,6 +76,8 @@ Dugg is an MCP server that acts as a shared, searchable filing cabinet for links
 
 ### Install
 
+**Prerequisites:** Python 3.11+ and [uv](https://docs.astral.sh/uv/) (`curl -LsSf https://astral.sh/uv/install.sh | sh`).
+
 ```bash
 # Clone the repo
 git clone https://github.com/kadedworkin/dugg-fyi.git
@@ -115,6 +117,22 @@ dugg serve --transport http --host 127.0.0.1 --port 9000
 
 # With a custom database
 dugg --db /path/to/dugg.db serve --transport http
+```
+
+**Connecting a remote agent:** Configure your MCP client with the SSE transport and your API key:
+
+```json
+{
+  "mcpServers": {
+    "dugg": {
+      "transport": "sse",
+      "url": "https://your-host:8411/sse",
+      "headers": {
+        "X-Dugg-Key": "dugg_your_api_key"
+      }
+    }
+  }
+}
 ```
 
 **Endpoints:**
