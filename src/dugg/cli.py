@@ -344,13 +344,56 @@ def cmd_search(args):
         print()
 
 
+def _check_server_health(url):
+    """Ping a server's /health endpoint. Returns (ok, detail) tuple."""
+    import urllib.request
+    import urllib.error
+    try:
+        req = urllib.request.urlopen(f"{url.rstrip('/')}/health", timeout=5)
+        import json as _json
+        data = _json.loads(req.read())
+        return True, data
+    except Exception as e:
+        return False, str(e)
+
+
+def cmd_health(args):
+    """Check server health."""
+    from pathlib import Path
+    from datetime import datetime, timezone
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+    server_url = db.get_config("server_url", "")
+    db.close()
+
+    if not server_url:
+        print("No server URL configured. Set one with: dugg set-url <url>")
+        sys.exit(1)
+
+    ok, detail = _check_server_health(server_url)
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    if ok:
+        transport = detail.get("transport", "unknown")
+        db_status = detail.get("db", "unknown")
+        print(f"  {server_url}")
+        print(f"  Status: ok · DB: {db_status} · Transport: {transport}")
+        print(f"  Checked: {now}")
+    else:
+        print(f"  {server_url}")
+        print(f"  Status: unreachable — {detail}")
+        print(f"  Checked: {now}")
+        sys.exit(1)
+
+
 def cmd_feed(args):
     """Show recent resources."""
     from pathlib import Path
+    from datetime import datetime, timezone
     db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
     db = DuggDB(db_path)
     user = _resolve_user(db, args)
     names = _user_name_cache(db)
+    server_url = db.get_config("server_url", "")
 
     limit = getattr(args, "limit", 20)
     results = db.get_feed(user["id"], limit=limit)
@@ -377,6 +420,14 @@ def cmd_feed(args):
         if r.get("note"):
             print(f"    Note: {r['note']}")
         print()
+
+    if server_url:
+        ok, detail = _check_server_health(server_url)
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        if ok:
+            print(f"Server: {server_url} · ok · {now}")
+        else:
+            print(f"Server: {server_url} · unreachable · {now}")
 
 
 def cmd_welcome(args):
@@ -612,7 +663,9 @@ def main():
     p_feed.add_argument("--limit", type=int, default=20, help="Max results (default: 20)")
     p_feed.add_argument("--key", default=None, help="Your API key (uses local user if omitted)")
 
-    p_doctor = sub.add_parser("doctor", help="Check Dugg installation health")
+    sub.add_parser("health", help="Check server health")
+
+    p_doctor = sub.add_parser("doctor", help="Full installation diagnostics (schema, FTS, users)")
     p_doctor.add_argument("--host", default="127.0.0.1", help="HTTP host to check (default: 127.0.0.1)")
     p_doctor.add_argument("--port", type=int, default=None, help="If set, also check HTTP server reachability")
 
@@ -653,6 +706,8 @@ def main():
         cmd_search(args)
     elif args.command == "feed":
         cmd_feed(args)
+    elif args.command == "health":
+        cmd_health(args)
     elif args.command == "admin":
         cmd_admin(args)
     elif args.command == "doctor":
