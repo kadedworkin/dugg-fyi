@@ -2126,9 +2126,31 @@ class DuggDB:
             req.add_header("X-Dugg-Signature", sig)
         try:
             urllib.request.urlopen(req, timeout=10)
-            self.mark_webhook_success(hook["id"])
+            self._update_webhook_status(hook["id"], success=True)
         except Exception:
-            self.mark_webhook_failure(hook["id"])
+            self._update_webhook_status(hook["id"], success=False)
+
+    def _update_webhook_status(self, webhook_id: str, success: bool):
+        """Thread-safe webhook status update using its own connection."""
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            if success:
+                conn.execute(
+                    "UPDATE webhook_subscriptions SET failure_count = 0, updated_at = ? WHERE id = ?",
+                    (_now(), webhook_id),
+                )
+            else:
+                row = conn.execute("SELECT failure_count FROM webhook_subscriptions WHERE id = ?", (webhook_id,)).fetchone()
+                if row:
+                    new_count = row[0] + 1
+                    new_status = "failed" if new_count >= 5 else "active"
+                    conn.execute(
+                        "UPDATE webhook_subscriptions SET failure_count = ?, status = ?, updated_at = ? WHERE id = ?",
+                        (new_count, new_status, _now(), webhook_id),
+                    )
+            conn.commit()
+        finally:
+            conn.close()
 
     def get_events(self, user_id: str, event_types: Optional[list[str]] = None,
                    since: Optional[str] = None, limit: int = 50) -> list[dict]:
