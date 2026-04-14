@@ -9,28 +9,33 @@ from pathlib import Path
 from typing import Optional
 
 
-def _resolve_db_path() -> Path:
-    """Find the DB path: .dugg-env in working dir or ancestors > ~/.dugg/dugg.db."""
+def _read_dugg_env() -> dict:
+    """Read .dugg-env from working dir or ancestors. Returns dict of key=value pairs."""
+    result = {}
     try:
         check = Path.cwd()
     except (OSError, PermissionError):
-        return Path.home() / ".dugg" / "dugg.db"
+        return result
     for _ in range(10):
         env_file = check / ".dugg-env"
         try:
             if env_file.exists():
                 for line in env_file.read_text().splitlines():
-                    if line.startswith("DUGG_DB_PATH="):
-                        return Path(line.split("=", 1)[1].strip())
+                    if "=" in line and not line.startswith("#"):
+                        k, v = line.split("=", 1)
+                        result[k.strip()] = v.strip()
+                return result
         except (OSError, PermissionError):
             pass
         parent = check.parent
         if parent == check:
             break
         check = parent
-    return Path.home() / ".dugg" / "dugg.db"
+    return result
 
-DEFAULT_DB_PATH = _resolve_db_path()
+_DUGG_ENV = _read_dugg_env()
+DEFAULT_DB_PATH = Path(_DUGG_ENV["DUGG_DB_PATH"]) if "DUGG_DB_PATH" in _DUGG_ENV else Path.home() / ".dugg" / "dugg.db"
+DEFAULT_API_KEY = _DUGG_ENV.get("DUGG_API_KEY", "")
 
 # --- Configuration Constants ---
 MAX_INVITE_DEPTH = 15

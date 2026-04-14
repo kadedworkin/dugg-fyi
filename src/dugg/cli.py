@@ -3,7 +3,7 @@
 import argparse
 import sys
 
-from dugg.db import DuggDB, DEFAULT_DB_PATH
+from dugg.db import DuggDB, DEFAULT_DB_PATH, DEFAULT_API_KEY
 
 
 def cmd_serve(args):
@@ -183,8 +183,8 @@ def cmd_list_users(args):
 
 
 def _resolve_user(db, args):
-    """Get user from --key flag or fall back to local user."""
-    api_key = getattr(args, "key", None)
+    """Get user from --key flag > .dugg-env > local user."""
+    api_key = getattr(args, "key", None) or DEFAULT_API_KEY
     if api_key:
         user = db.get_user_by_api_key(api_key)
         if not user:
@@ -211,6 +211,30 @@ def _ensure_default_collection(db, user_id):
             return c["id"]
     result = db.create_collection("Default", user_id, description="Default collection", visibility="private")
     return result["id"]
+
+
+def cmd_login(args):
+    """Save your API key to .dugg-env so you don't need --key every time."""
+    from pathlib import Path
+    env_file = Path.cwd() / ".dugg-env"
+    existing = {}
+    if env_file.exists():
+        for line in env_file.read_text().splitlines():
+            if "=" in line and not line.startswith("#"):
+                k, v = line.split("=", 1)
+                existing[k.strip()] = v.strip()
+    existing["DUGG_API_KEY"] = args.key
+    env_file.write_text("\n".join(f"{k}={v}" for k, v in existing.items()) + "\n")
+
+    # Verify the key
+    db_path = Path(existing.get("DUGG_DB_PATH", args.db)) if (existing.get("DUGG_DB_PATH") or args.db) else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+    user = db.get_user_by_api_key(args.key)
+    db.close()
+    if user:
+        print(f"Logged in as {user['name']}. Key saved to {env_file}")
+    else:
+        print(f"Key saved to {env_file} (warning: key not found in local DB — may be valid on a remote server)")
 
 
 def cmd_add(args):
@@ -527,6 +551,9 @@ def main():
 
     sub.add_parser("list-users", help="List all users")
 
+    p_login = sub.add_parser("login", help="Save your API key so you don't need --key every time")
+    p_login.add_argument("key", help="Your API key")
+
     p_add = sub.add_parser("add", help="Add a URL to Dugg")
     p_add.add_argument("url", help="URL to add")
     p_add.add_argument("--note", default="", help="Why this resource matters")
@@ -571,6 +598,8 @@ def main():
         cmd_redeem(args)
     elif args.command == "list-users":
         cmd_list_users(args)
+    elif args.command == "login":
+        cmd_login(args)
     elif args.command == "add":
         cmd_add(args)
     elif args.command == "search":
