@@ -54,7 +54,7 @@ Dugg is an MCP server that acts as a shared, searchable filing cabinet for links
 - **Ban cascades** — Ban a user and prune their invite tree. Depth 1 = hard ban (no exceptions). Depth 2+ = 14-day grace period, then credit score decides survival. Owner cannot be banned. Pending publishes auto-cancelled on ban
 - **Succession** — Designate a successor for instance ownership. If the owner is incapacitated, ownership transfers to the successor with all collections re-rooted
 - **URL validation** — Scheme whitelist (`http`, `https`), domain blocklist (`blocklist.txt`), and automatic tracking parameter stripping (UTM, fbclid, gclid, etc.)
-- **No-lurking policy** — 60-day stale member timeout. Members past their grace period with zero submissions and zero reactions get flagged for pruning
+- **Pruning policy** — Instance-level `pruning_mode` controls member lifecycle. `interaction` (default): members must show activity (submissions, reactions, feed visits, or agent touches) or get flagged after grace period. `none`: no automated pruning — once you're in, you're in. Feed visits and agent tool calls reset the activity clock, and agent activity cascades to their human
 - **Appeals** — Banned users appeal with their contribution history. Owner (or owner's agent) decides
 - **Rate limiting** — Tenure-based submission caps. New members start at N posts/day (owner-configured, default 5), growing by X per day of membership. Longer in the mix = higher cap. Prevents fresh-account spam without punishing established contributors
 - **Read horizon** — Graduated content visibility based on membership tenure. New members see the last 30 days of content, unlocking 7 more days per week of membership. Instance owners control the base window and growth rate, or set `-1` for full history
@@ -259,10 +259,10 @@ Add to your OpenClaw config:
 | `dugg_share` | Share a collection with another user, with optional tag filters. |
 | `dugg_create_user` | Create a new user with a linked agent account. Returns both a user key and an agent key. Banning the user revokes the agent key too. |
 | `dugg_invite_user` | Create an invite token with a browser redemption link — send via any channel. |
-| `dugg_instance_policy` | Get the current policy configuration for an instance — read horizon, index mode, storage cap, and rate limits. |
+| `dugg_instance_policy` | Get the current policy configuration for an instance — read horizon, index mode, storage cap, pruning mode, and rate limits. |
 | `dugg_publish_clear` | Delete failed publish queue entries. Optionally scoped to a target instance. Owner only. |
 | `dugg_publish_retry_selective` | Retry specific failed publishes — by ID or by target instance. More surgical than dugg_publish_retry. |
-| `dugg_prune_inactive` | List or remove members past their grace period with zero activity (no submissions, no reactions). No-lurking policy. |
+| `dugg_prune_inactive` | List or remove members past their grace period with zero activity. Respects instance `pruning_mode` — disabled when set to `none`. |
 | `dugg_set_successor` | Designate a successor for a Dugg instance. If the owner is incapacitated, ownership transfers to this user. Owner only. |
 | `dugg_welcome` | Orientation for new connections. Returns instance topics, recent activity, and rate limit status. |
 
@@ -683,9 +683,18 @@ All URLs are sanitized on ingest:
 - **Domain blocklist** — checked against `blocklist.txt` (with and without `www.` prefix)
 - **Tracking param stripping** — UTM parameters, `fbclid`, `gclid`, `dclid`, `msclkid`, `twclid`, `mc_cid`, `mc_eid`, `oly_enc_id`, `oly_anon_id`, `_ga`, `_gl`, `ref`, `ref_src` are stripped automatically
 
-## No-lurking policy
+## Member pruning
 
-Members who contribute nothing get pruned. After the 14-day grace period, anyone with zero submissions and zero reactions is flagged as inactive.
+Instance owners control how aggressively members get pruned via `pruning_mode`:
+
+### `interaction` (default)
+
+After the 14-day grace period, members with zero submissions, zero reactions, and no recent activity (feed visits, agent touches) are flagged as inactive. The 60-day stale member timeout surfaces members who've gone completely dark.
+
+Activity that resets the clock:
+- Visiting `/feed/{key}` in a browser
+- Any MCP tool call from the member's agent
+- Agent activity cascades to the parent human — if the agent is alive, the human stays active
 
 ```
 # List inactive members (dry run)
@@ -695,7 +704,17 @@ dugg_prune_inactive(collection_id="abc")
 dugg_prune_inactive(collection_id="abc", execute=true)
 ```
 
-The 60-day stale member timeout surfaces members who've gone dark. Pruning is manual (owner-initiated) — the tool shows who's inactive so the owner can decide.
+Pruning is manual (owner-initiated) — the tool shows who's inactive so the owner can decide.
+
+### `none`
+
+No automated pruning. Once a member is in, they stay in until the owner manually bans them. Both the inactive member check and the stale member timeout are disabled. Good for small trusted groups where read-only consumers are welcome.
+
+```
+# Set pruning mode on an instance
+dugg_instance_policy  # to view current policy
+update_instance(instance_id="...", owner_id="...", pruning_mode="none")
+```
 
 ## Auto-routing
 
@@ -912,9 +931,9 @@ uv run pytest tests/test_db.py -v
 
 **Publishing** — Named publish targets, FIFO publish queue, publish sync daemon with exponential backoff retry, selective retry + queue clearing, 30-day TTL purge, remote ingest with URL deduplication
 
-**Social layer** — Silent reactions with private aggregates, invite trees (cycle detection, depth cap, IP tracking), ban cascades with grace periods + multiplicative credit scoring, appeals, no-lurking policy with member pruning
+**Social layer** — Silent reactions with private aggregates, invite trees (cycle detection, depth cap, IP tracking), ban cascades with grace periods + multiplicative credit scoring, appeals, configurable member pruning (interaction/none)
 
-**Trust & governance** — Invite-only access, owner succession planning, owner ban immunity, pending publish cancellation on ban, 60-day stale member timeout
+**Trust & governance** — Invite-only access, owner succession planning, owner ban immunity, pending publish cancellation on ban, instance-level pruning policy with activity tracking (feed visits, agent touches cascade to humans)
 
 **Content governance** — Read horizon (graduated content visibility by tenure), content indexing policy (summary/full/metadata_only), article extraction via readability-lxml, IMAP-style storage cap + eviction, unified instance policy with onboarding presets
 
