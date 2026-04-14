@@ -224,7 +224,7 @@ Add to your OpenClaw config:
                    │ MCP protocol (stdio or HTTP/SSE)
                    │
 ┌──────────────────▼──────────────────────────┐
-│  Dugg MCP Server — tool handlers (43)       │
+│  Dugg MCP Server — tool handlers (44)       │
 │                                             │
 │  - Auth (API key per user)                  │
 │  - Rate limiting (tenure-based)             │
