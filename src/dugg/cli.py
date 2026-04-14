@@ -213,16 +213,42 @@ def _ensure_default_collection(db, user_id):
     return result["id"]
 
 
+def _find_env_file():
+    """Find the nearest writable .dugg-env, or create one next to this script."""
+    from pathlib import Path
+    try:
+        check = Path.cwd()
+    except (OSError, PermissionError):
+        check = None
+    if check:
+        for _ in range(10):
+            candidate = check / ".dugg-env"
+            try:
+                if candidate.exists():
+                    return candidate
+            except (OSError, PermissionError):
+                pass
+            parent = check.parent
+            if parent == check:
+                break
+            check = parent
+    # Fall back to the dugg-fyi install directory
+    return Path(__file__).resolve().parent.parent.parent / ".dugg-env"
+
+
 def cmd_login(args):
     """Save your API key to .dugg-env so you don't need --key every time."""
     from pathlib import Path
-    env_file = Path.cwd() / ".dugg-env"
+    env_file = _find_env_file()
     existing = {}
-    if env_file.exists():
-        for line in env_file.read_text().splitlines():
-            if "=" in line and not line.startswith("#"):
-                k, v = line.split("=", 1)
-                existing[k.strip()] = v.strip()
+    try:
+        if env_file.exists():
+            for line in env_file.read_text().splitlines():
+                if "=" in line and not line.startswith("#"):
+                    k, v = line.split("=", 1)
+                    existing[k.strip()] = v.strip()
+    except (OSError, PermissionError):
+        pass
     existing["DUGG_API_KEY"] = args.key
     env_file.write_text("\n".join(f"{k}={v}" for k, v in existing.items()) + "\n")
 
