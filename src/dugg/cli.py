@@ -450,6 +450,197 @@ def cmd_feed(args):
             print(f"Server: {server_url} · unreachable · {now}")
 
 
+def cmd_status(args):
+    """Show your Dugg identity, connections, and resource count."""
+    from pathlib import Path
+    from datetime import datetime, timezone
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    if not db_path.exists():
+        print("No Dugg database found. Run: dugg init")
+        sys.exit(1)
+    db = DuggDB(db_path)
+    user = _resolve_user(db, args)
+    server_url = db.get_config("server_url", "")
+
+    print(f"  User: {user['name']} ({user['id'][:12]})")
+    print(f"  DB:   {db_path}")
+    if server_url:
+        print(f"  Server: {server_url}")
+
+    collections = db.list_collections(user["id"])
+    total_resources = 0
+    for c in collections:
+        count = db.conn.execute(
+            "SELECT COUNT(*) FROM resources WHERE collection_id = ?", (c["id"],)
+        ).fetchone()[0]
+        total_resources += count
+    print(f"  Collections: {len(collections)}")
+    print(f"  Resources: {total_resources}")
+
+    instances = db.list_instances(user["id"])
+    if instances:
+        print(f"  Instances: {len(instances)}")
+        for inst in instances:
+            print(f"    - {inst['name']} ({inst.get('endpoint_url', 'local')})")
+
+    hooks = db.list_webhooks(user["id"])
+    if hooks:
+        active = sum(1 for h in hooks if h["status"] == "active")
+        print(f"  Webhooks: {active} active")
+
+    if server_url:
+        from dugg.cli import _check_server_health
+        ok, detail = _check_server_health(server_url)
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        status = "ok" if ok else "unreachable"
+        print(f"  Health: {status} · {now}")
+
+    db.close()
+
+
+def cmd_servers(args):
+    """List publish targets and connected servers."""
+    from pathlib import Path
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+    user = _resolve_user(db, args)
+    server_url = db.get_config("server_url", "")
+
+    print("Servers:\n")
+
+    if server_url:
+        print(f"  This server: {server_url}")
+        ok, _ = _check_server_health(server_url)
+        print(f"    Status: {'ok' if ok else 'unreachable'}")
+        print()
+
+    instances = db.list_instances(user["id"])
+    if instances:
+        for inst in instances:
+            endpoint = inst.get("endpoint_url", "")
+            print(f"  {inst['name']}")
+            if endpoint:
+                print(f"    Endpoint: {endpoint}")
+            print(f"    Access: {inst.get('access_mode', 'invite')}")
+            print()
+
+    # Show publish targets from recent resources
+    targets = db.conn.execute(
+        "SELECT DISTINCT target FROM publish_targets ORDER BY published_at DESC LIMIT 20"
+    ).fetchall()
+    if targets:
+        print("Publish targets:")
+        for t in targets:
+            print(f"    - {t['target']}")
+        print()
+
+    if not server_url and not instances and not targets:
+        print("  No servers configured. Running in local-only mode.")
+        print("  Set a server URL with: dugg set-url <url>")
+
+    db.close()
+
+
+def cmd_remove(args):
+    """Remove a resource by ID or URL."""
+    from pathlib import Path
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+    user = _resolve_user(db, args)
+
+    target = args.target
+    # Find by URL or ID
+    if target.startswith("http://") or target.startswith("https://"):
+        row = db.conn.execute(
+            "SELECT id, url, title, collection_id, submitted_by FROM resources WHERE url = ?", (target,)
+        ).fetchone()
+    else:
+        row = db.conn.execute(
+            "SELECT id, url, title, collection_id, submitted_by FROM resources WHERE id = ? OR id LIKE ?",
+            (target, target + "%"),
+        ).fetchone()
+
+    if not row:
+        print(f"Resource not found: {target}")
+        db.close()
+        sys.exit(1)
+
+    resource = dict(row)
+    title = resource.get("title") or resource["url"]
+
+    # Allow deletion if user is the submitter or collection owner
+    member = db.get_member_status(resource["collection_id"], user["id"])
+    if resource["submitted_by"] != user["id"] and (not member or member["role"] != "owner"):
+        print(f"Permission denied — you didn't submit this and aren't the collection owner.")
+        db.close()
+        sys.exit(1)
+
+    # Direct delete (bypass owner check since we verified permissions above)
+    db.conn.execute("DELETE FROM publish_queue WHERE resource_id = ?", (resource["id"],))
+    db.conn.execute("DELETE FROM resources WHERE id = ?", (resource["id"],))
+    db.conn.commit()
+    db.emit_event("resource_deleted", actor_id=user["id"],
+                   collection_id=resource["collection_id"],
+                   payload={"resource_id": resource["id"], "url": resource["url"], "title": title})
+
+    print(f"Removed: {title}")
+    print(f"  {resource['url']}")
+    db.close()
+
+
+def cmd_edit(args):
+    """Edit a resource's title or note."""
+    from pathlib import Path
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+    user = _resolve_user(db, args)
+
+    target = args.target
+    if target.startswith("http://") or target.startswith("https://"):
+        row = db.conn.execute("SELECT id, submitted_by FROM resources WHERE url = ?", (target,)).fetchone()
+    else:
+        row = db.conn.execute(
+            "SELECT id, submitted_by FROM resources WHERE id = ? OR id LIKE ?",
+            (target, target + "%"),
+        ).fetchone()
+
+    if not row:
+        print(f"Resource not found: {target}")
+        db.close()
+        sys.exit(1)
+
+    resource_id = row["id"]
+
+    # Only the submitter can edit
+    if row["submitted_by"] != user["id"]:
+        print("Permission denied — you didn't submit this resource.")
+        db.close()
+        sys.exit(1)
+
+    updates = {}
+    if getattr(args, "title", None):
+        updates["title"] = args.title
+    if getattr(args, "note", None):
+        updates["note"] = args.note
+
+    if not updates:
+        print("Nothing to change. Use --title or --note.")
+        db.close()
+        sys.exit(1)
+
+    result = db.update_resource(resource_id, **updates)
+    db.close()
+
+    if result:
+        print(f"Updated: {result.get('title') or result['url']}")
+        if "title" in updates:
+            print(f"  Title: {updates['title']}")
+        if "note" in updates:
+            print(f"  Note: {updates['note']}")
+    else:
+        print("Update failed.")
+
+
 def cmd_webhook(args):
     """Manage webhook subscriptions."""
     from pathlib import Path
@@ -495,8 +686,9 @@ def cmd_webhook(args):
             db.close()
             print("No webhooks to test. Add one with: dugg webhook add <url>")
             return
+        server_name = db.get_config("server_url", "Dugg")
         db.emit_event("resource_added", actor_id=user["id"],
-                       payload={"url": "https://dugg.fyi", "title": "Webhook Test", "note": "This is a test notification from Dugg"})
+                       payload={"url": "https://dugg.fyi", "title": f"{server_name} Webhook Test", "note": "This is a test notification from Dugg"})
         db.wait_for_webhooks()
         db.close()
         print(f"Test event fired to {len(hooks)} webhook(s). Check your channel.")
@@ -743,6 +935,22 @@ def main():
     p_feed.add_argument("--limit", type=int, default=20, help="Max results (default: 20)")
     p_feed.add_argument("--key", default=None, help="Your API key (uses local user if omitted)")
 
+    p_status = sub.add_parser("status", help="Show your identity, connections, and resource count")
+    p_status.add_argument("--key", default=None, help="Your API key")
+
+    p_servers = sub.add_parser("servers", help="List connected servers and publish targets")
+    p_servers.add_argument("--key", default=None, help="Your API key")
+
+    p_remove = sub.add_parser("remove", help="Remove a resource by ID or URL")
+    p_remove.add_argument("target", help="Resource ID (or prefix) or URL")
+    p_remove.add_argument("--key", default=None, help="Your API key")
+
+    p_edit = sub.add_parser("edit", help="Edit a resource's title or note")
+    p_edit.add_argument("target", help="Resource ID (or prefix) or URL")
+    p_edit.add_argument("--title", default=None, help="New title")
+    p_edit.add_argument("--note", default=None, help="New note")
+    p_edit.add_argument("--key", default=None, help="Your API key")
+
     sub.add_parser("health", help="Check server health")
 
     p_webhook = sub.add_parser("webhook", help="Manage webhook notifications (e.g. Slack)")
@@ -803,6 +1011,14 @@ def main():
         cmd_search(args)
     elif args.command == "feed":
         cmd_feed(args)
+    elif args.command == "status":
+        cmd_status(args)
+    elif args.command == "servers":
+        cmd_servers(args)
+    elif args.command == "remove":
+        cmd_remove(args)
+    elif args.command == "edit":
+        cmd_edit(args)
     elif args.command == "health":
         cmd_health(args)
     elif args.command == "webhook":
