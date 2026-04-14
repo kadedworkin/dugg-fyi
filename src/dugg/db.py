@@ -2108,8 +2108,6 @@ class DuggDB:
                 lines.append(f"Added by {actor_name}")
             if note:
                 lines.append(f"_{note}_")
-            if server_url:
-                lines.append(f"<{server_url}/feed/{hook.get('user_id', '')}|View feed>")
             body = json.dumps({"text": "\n".join(lines)}).encode()
         else:
             body = json.dumps({"event": event, "actor_name": actor_name, "server_url": server_url}).encode()

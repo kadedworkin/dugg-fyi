@@ -477,7 +477,7 @@ def cmd_webhook(args):
             print("No webhooks to test. Add one with: dugg webhook add <url>")
             return
         db.emit_event("resource_added", actor_id=user["id"],
-                       payload={"url": "https://example.com/test", "title": "Webhook Test", "note": "This is a test notification from Dugg"})
+                       payload={"url": "https://dugg.fyi", "title": "Webhook Test", "note": "This is a test notification from Dugg"})
         db.wait_for_webhooks()
         db.close()
         print(f"Test event fired to {len(hooks)} webhook(s). Check your channel.")
