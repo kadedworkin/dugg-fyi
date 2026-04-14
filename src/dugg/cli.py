@@ -25,6 +25,7 @@ def cmd_init(args):
     """Initialize the database."""
     from pathlib import Path
     db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db_path.parent.mkdir(parents=True, exist_ok=True)
     db = DuggDB(db_path)
 
     server_url = getattr(args, "server", None)
@@ -36,6 +37,11 @@ def cmd_init(args):
         print(f"  A Record:  your-subdomain → <server IP>")
         print(f"  Or CNAME:  your-subdomain → your-root-domain")
         print()
+
+    # Write .dugg-env so the CLI finds this DB from any user
+    env_file = Path.cwd() / ".dugg-env"
+    env_file.write_text(f"DUGG_DB_PATH={db_path.resolve()}\n")
+    print(f"Config written to {env_file}")
 
     db.close()
     print(f"Database initialized at {db_path}")

@@ -9,7 +9,22 @@ from pathlib import Path
 from typing import Optional
 
 
-DEFAULT_DB_PATH = Path.home() / ".dugg" / "dugg.db"
+def _resolve_db_path() -> Path:
+    """Find the DB path: .dugg-env in working dir or ancestors > ~/.dugg/dugg.db."""
+    check = Path.cwd()
+    for _ in range(10):
+        env_file = check / ".dugg-env"
+        if env_file.exists():
+            for line in env_file.read_text().splitlines():
+                if line.startswith("DUGG_DB_PATH="):
+                    return Path(line.split("=", 1)[1].strip())
+        parent = check.parent
+        if parent == check:
+            break
+        check = parent
+    return Path.home() / ".dugg" / "dugg.db"
+
+DEFAULT_DB_PATH = _resolve_db_path()
 
 # --- Configuration Constants ---
 MAX_INVITE_DEPTH = 15
