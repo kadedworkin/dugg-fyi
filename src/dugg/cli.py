@@ -123,23 +123,7 @@ def cmd_invite_user(args):
     db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
     db = DuggDB(db_path)
 
-    # Resolve the inviter — use api_key if given, else local user
-    api_key = getattr(args, "key", None)
-    if api_key:
-        user = db.get_user_by_api_key(api_key)
-        if not user:
-            print("Invalid API key.")
-            db.close()
-            sys.exit(1)
-    else:
-        user = db.get_user_by_api_key("dugg_local_default")
-        if not user:
-            db.conn.execute(
-                "INSERT OR IGNORE INTO users (id, name, api_key, created_at) VALUES (?, ?, ?, ?)",
-                ("local", "Local User", "dugg_local_default", "2024-01-01T00:00:00Z"),
-            )
-            db.conn.commit()
-            user = db.get_user_by_api_key("dugg_local_default")
+    user = _resolve_user(db, args)
 
     expires = getattr(args, "expires", 72)
     result = db.create_invite_token(user["id"], name_hint=args.name, expires_hours=expires)
