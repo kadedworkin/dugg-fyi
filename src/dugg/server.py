@@ -1093,7 +1093,7 @@ def _handle_invites(d: DuggDB, user_id: str) -> list[TextContent]:
         if t.get("redeemed_by"):
             redeemer = d.get_user(t["redeemed_by"])
             redeemer_name = redeemer["name"] if redeemer else t["redeemed_by"]
-            onboard_status = " (onboarded)" if t.get("onboarded_at") else " (awaiting first feed visit)"
+            onboard_status = " (onboarded)" if t.get("onboarded_at") else " (awaiting first connect)"
             lines.append(f"  {name} — redeemed by {redeemer_name} at {t['redeemed_at']}{onboard_status}")
             redeemed += 1
         elif datetime.fromisoformat(t["expires_at"]) < now:

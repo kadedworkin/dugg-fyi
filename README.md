@@ -122,6 +122,18 @@ dugg serve --transport http --host 127.0.0.1 --port 9000
 dugg --db /path/to/dugg.db serve --transport http
 ```
 
+`server_url` is auto-detected from `--host`/`--port` on first HTTP serve (override with `dugg set-config server_url https://your-domain`).
+
+For HTTP-only deployments where CLI isn't available, bootstrap the first user via API:
+
+```bash
+curl -X POST http://localhost:8411/bootstrap \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Admin"}'
+```
+
+This returns the admin API key. The endpoint disables itself once any user exists.
+
 **Connecting a remote agent:** Configure your MCP client with the SSE transport and your API key:
 
 ```json
@@ -151,6 +163,7 @@ dugg --db /path/to/dugg.db serve --transport http
 | `/invite/{token}/redeem` | POST | None | Process invite (form or JSON) |
 | `/feed/{key}` | GET | None | Browser-friendly feed (HTML or Atom XML) |
 | `/health` | GET | None | Liveness check |
+| `/bootstrap` | POST | None | Create first admin user (disabled once any user exists) |
 | `/slack/command` | POST | Slack | Slack slash command endpoint — `/dugg` in any Slack workspace |
 | `/admin/{key}` | GET | Key-in-URL | Browser admin panel — collections, members, resources |
 | `/admin/{key}/ban` | POST | Key-in-URL | Ban a user (owner only) |
@@ -947,7 +960,7 @@ uv run pytest tests/test_db.py -v
 
 **Observability** — Event emission (9 event types), read cursors with catchup, webhook subscriptions (instance-scoped or server-wide) with HMAC signing and auto-pause, Slack webhook notifications with rich formatting, `dugg health` and `dugg status` commands
 
-**Onboarding** — Invite tokens with browser or agent-driven redemption (content-negotiated JSON), read-only browser feed (HTML + Atom), welcome orientation tool, portable `/dugg` slash command for any MCP agent
+**Onboarding** — Invite tokens with browser or agent-driven redemption (content-negotiated JSON), read-only browser feed (HTML + Atom), welcome orientation tool, portable `/dugg` slash command for any MCP agent, `/bootstrap` first-user creation, `server_url` auto-detection on HTTP serve
 
 **Integrations** — Slack incoming webhooks (auto-detected, rich blocks), Slack slash command endpoint (`/slack/command`), browser admin panel with ban/unban/remove
 
