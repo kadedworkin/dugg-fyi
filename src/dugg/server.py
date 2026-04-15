@@ -1022,7 +1022,7 @@ def _handle_invite_user(d: DuggDB, user_id: str, args: dict) -> list[TextContent
             f"\nStep 2: POST {url}/redeem\n"
             f"  Header: Content-Type: application/json\n"
             f'  Body: {{"name": "{name}"}}\n'
-            f"  → Returns your key + agent key + connection details\n"
+            f"  → Returns human key + agent key + connection details\n"
             f"\nStep 3: Connect via MCP\n"
             f"  SSE endpoint: {endpoint.rstrip('/')}/sse\n"
             f"  Auth header: X-Dugg-Key: <agent_api_key from step 2>\n"
@@ -1039,7 +1039,7 @@ def _handle_invite_user(d: DuggDB, user_id: str, args: dict) -> list[TextContent
             f"\nPOST /invite/{token}/redeem\n"
             f"  Header: Content-Type: application/json\n"
             f'  Body: {{"name": "{name}"}}\n'
-            f"  → Returns your key + agent key\n"
+            f"  → Returns human key + agent key\n"
             f"\nPartner guide (read before first submission):\n"
             f"  https://github.com/kadedworkin/dugg-fyi/blob/main/PARTNER_AGENT.md"
         )
