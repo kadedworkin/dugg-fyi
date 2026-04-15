@@ -654,6 +654,24 @@ async def list_tools() -> list[Tool]:
                 "required": ["resource_id", "collection_id"],
             },
         ),
+        Tool(
+            name="dugg_paste",
+            description="Add raw content (text or HTML) directly — no URL required. Use for forwarded emails, newsletter excerpts, PDFs, notes, or any content that doesn't live at a public URL. Stored and indexed like any other resource.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Title for this content"},
+                    "body": {"type": "string", "description": "The content — plain text or HTML"},
+                    "source_type": {"type": "string", "enum": ["paste", "email", "document"], "description": "What kind of content this is", "default": "paste"},
+                    "source_label": {"type": "string", "description": "Origin label (e.g. 'Substack', 'forwarded email', 'meeting notes')", "default": ""},
+                    "note": {"type": "string", "description": "Why this content matters — context for future retrieval", "default": ""},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Tags for categorization", "default": []},
+                    "collection": {"type": "string", "description": "Collection name (uses Default if omitted)", "default": ""},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+                "required": ["title", "body"],
+            },
+        ),
     ]
 
 
@@ -759,6 +777,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = _handle_set_successor(d, user_id, arguments)
         elif name == "dugg_delete_resource":
             result = _handle_delete_resource(d, user_id, arguments)
+        elif name == "dugg_paste":
+            result = _handle_paste(d, user_id, arguments)
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
@@ -854,6 +874,69 @@ async def _handle_add(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
     if enriched.get("transcript"):
         word_count = len(enriched["transcript"].split())
         summary += f"Transcript: {word_count} words captured\n"
+    return [TextContent(type="text", text=summary)]
+
+
+def _handle_paste(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    title = args["title"]
+    body = args["body"]
+    source_type = args.get("source_type", "paste")
+    source_label = args.get("source_label", "")
+    note = args.get("note", "")
+    tags = args.get("tags", [])
+    collection_name = args.get("collection", "")
+
+    if collection_name:
+        collections = d.list_collections(user_id)
+        coll_id = None
+        for c in collections:
+            if c["name"].lower() == collection_name.lower():
+                coll_id = c["id"]
+                break
+        if not coll_id:
+            result = d.create_collection(collection_name, user_id, visibility="private")
+            coll_id = result["id"]
+    else:
+        coll_id = ensure_default_collection(user_id)
+
+    rate_status = d.check_rate_limit(coll_id, user_id)
+    if not rate_status["allowed"] and rate_status["cap"] != -1:
+        return [TextContent(type="text", text=(
+            f"Rate limit exceeded.\n\n"
+            f"  used: {rate_status['current']}/{rate_status['cap']} posts today\n"
+            f"  member_for_days: {rate_status['days_member']}\n\n"
+            f"Do not retry — wait until tomorrow (UTC midnight reset)."
+        ))]
+
+    from dugg.db import _uuid
+    res_id = _uuid()
+    synthetic_url = f"dugg://paste/{res_id}"
+
+    metadata = {"source_label": source_label} if source_label else {}
+
+    resource = d.add_resource(
+        url=synthetic_url,
+        collection_id=coll_id,
+        submitted_by=user_id,
+        note=note,
+        title=title,
+        description=source_label,
+        source_type=source_type,
+        transcript=body,
+        raw_metadata=metadata,
+        tags=tags,
+        tag_source="human" if tags else "agent",
+    )
+
+    word_count = len(body.split())
+    summary = f"Pasted: {title}\n"
+    summary += f"ID: {resource['id']}\n"
+    summary += f"Type: {source_type}\n"
+    if source_label:
+        summary += f"Source: {source_label}\n"
+    summary += f"Content: {word_count} words\n"
+    if resource.get("tags"):
+        summary += f"Tags: {', '.join(resource['tags'])}\n"
     return [TextContent(type="text", text=summary)]
 
 

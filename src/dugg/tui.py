@@ -11,8 +11,10 @@ from textual.widgets import (
     DataTable,
     Footer,
     Header,
+    Input,
     Label,
     Static,
+    TextArea,
 )
 
 from dugg.db import DuggDB, DEFAULT_DB_PATH
@@ -41,6 +43,81 @@ class ConfirmScreen(ModalScreen[bool]):
 
     def action_cancel(self) -> None:
         self.dismiss(False)
+
+
+class PasteScreen(ModalScreen[dict]):
+    """Modal screen for pasting raw content."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("ctrl+s", "submit", "Save"),
+    ]
+
+    CSS = """
+    #paste-dialog {
+        align: center middle;
+        width: 80;
+        height: auto;
+        max-height: 32;
+        border: thick $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+    #paste-title-label {
+        margin-bottom: 0;
+        color: $text-muted;
+    }
+    #paste-body-label {
+        margin-top: 1;
+        margin-bottom: 0;
+        color: $text-muted;
+    }
+    #paste-source-label {
+        margin-top: 1;
+        margin-bottom: 0;
+        color: $text-muted;
+    }
+    #paste-tags-label {
+        margin-top: 1;
+        margin-bottom: 0;
+        color: $text-muted;
+    }
+    #paste-body {
+        height: 12;
+    }
+    #paste-hint {
+        margin-top: 1;
+        text-align: center;
+        color: $text-muted;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="paste-dialog"):
+            yield Label("Title", id="paste-title-label")
+            yield Input(placeholder="e.g. Substack newsletter from Rocco", id="paste-title")
+            yield Label("Content", id="paste-body-label")
+            yield TextArea(id="paste-body")
+            yield Label("Source (optional)", id="paste-source-label")
+            yield Input(placeholder="e.g. Substack, meeting notes", id="paste-source")
+            yield Label("Tags (comma-separated, optional)", id="paste-tags-label")
+            yield Input(placeholder="e.g. newsletter, ai", id="paste-tags")
+            yield Label("[ctrl+s] Save  [escape] Cancel", id="paste-hint")
+
+    def action_submit(self) -> None:
+        title = self.query_one("#paste-title", Input).value.strip()
+        body = self.query_one("#paste-body", TextArea).text.strip()
+        source = self.query_one("#paste-source", Input).value.strip()
+        tags = self.query_one("#paste-tags", Input).value.strip()
+        if title and body:
+            self.dismiss({"title": title, "body": body, "source_label": source, "tags": tags})
+        elif not title:
+            self.query_one("#paste-hint", Label).update("[red]Title is required[/red]")
+        else:
+            self.query_one("#paste-hint", Label).update("[red]Content is required[/red]")
+
+    def action_cancel(self) -> None:
+        self.dismiss({})
 
 
 class DuggAdmin(App):
@@ -108,6 +185,7 @@ class DuggAdmin(App):
         Binding("x", "delete_resource", "Delete Resource"),
         Binding("u", "unban_member", "Unban/Approve"),
         Binding("d", "deny_appeal", "Deny"),
+        Binding("n", "paste", "Paste"),
         Binding("r", "refresh", "Refresh"),
         Binding("q", "quit", "Quit"),
     ]
@@ -474,6 +552,48 @@ class DuggAdmin(App):
                 self._set_status("Deny cancelled.")
 
         self.push_screen(ConfirmScreen(f"Deny appeal for {name}?"), do_deny)
+
+    def action_paste(self) -> None:
+        if not self._user:
+            self._set_status("No user found.")
+            return
+        if not self._selected_collection:
+            self._set_status("No collection selected.")
+            return
+
+        def do_paste(result: dict) -> None:
+            if not result:
+                self._set_status("Paste cancelled.")
+                return
+            title = result["title"]
+            body = result["body"]
+            source_label = result.get("source_label", "")
+            tags_raw = result.get("tags", "")
+            tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
+
+            from dugg.db import _uuid
+            res_id = _uuid()
+            synthetic_url = f"dugg://paste/{res_id}"
+            metadata = {"source_label": source_label} if source_label else {}
+
+            resource = self.db.add_resource(
+                url=synthetic_url,
+                collection_id=self._selected_collection["id"],
+                submitted_by=self._user["id"],
+                title=title,
+                description=source_label,
+                source_type="paste",
+                transcript=body,
+                raw_metadata=metadata,
+                tags=tags,
+                tag_source="human" if tags else "agent",
+            )
+            word_count = len(body.split())
+            self._set_status(f"Pasted: {title} ({word_count} words, ID: {resource['id']})")
+            if self._view == "resources":
+                self._refresh_detail()
+
+        self.push_screen(PasteScreen(), do_paste)
 
     def on_unmount(self) -> None:
         self.db.close()

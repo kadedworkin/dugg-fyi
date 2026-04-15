@@ -480,6 +480,72 @@ def cmd_add(args):
     db.close()
 
 
+def cmd_paste(args):
+    """Add raw content (no URL) to Dugg."""
+    import os
+    import tempfile
+    from pathlib import Path
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+    user = _resolve_user(db, args)
+
+    coll_id = _ensure_default_collection(db, user["id"])
+
+    body = getattr(args, "body", None)
+    file_path = getattr(args, "file", None)
+
+    if file_path:
+        body = Path(file_path).read_text()
+    elif body is None:
+        editor = os.environ.get("EDITOR", os.environ.get("VISUAL", "vi"))
+        with tempfile.NamedTemporaryFile(suffix=".txt", mode="w+", delete=False) as f:
+            tmp_path = f.name
+        try:
+            os.system(f'{editor} "{tmp_path}"')
+            body = Path(tmp_path).read_text()
+        finally:
+            os.unlink(tmp_path)
+
+    if not body or not body.strip():
+        print("No content provided. Aborting.")
+        db.close()
+        sys.exit(1)
+
+    note = getattr(args, "note", "") or ""
+    tags = [t.strip() for t in (getattr(args, "tags", "") or "").split(",") if t.strip()]
+    source_type = getattr(args, "source_type", "paste")
+    source_label = getattr(args, "source_label", "")
+
+    from dugg.db import _uuid
+    res_id = _uuid()
+    synthetic_url = f"dugg://paste/{res_id}"
+    metadata = {"source_label": source_label} if source_label else {}
+
+    resource = db.add_resource(
+        url=synthetic_url,
+        collection_id=coll_id,
+        submitted_by=user["id"],
+        note=note,
+        title=args.title,
+        description=source_label,
+        source_type=source_type,
+        transcript=body,
+        raw_metadata=metadata,
+        tags=tags,
+        tag_source="human" if tags else "agent",
+    )
+
+    word_count = len(body.split())
+    print(f"  Pasted: {args.title}")
+    print(f"  ID: {resource['id']}")
+    print(f"  Type: {source_type}")
+    if source_label:
+        print(f"  Source: {source_label}")
+    print(f"  Content: {word_count} words")
+    db.wait_for_webhooks()
+    db.close()
+
+
 def _user_name_cache(db):
     """Build a user ID → name lookup."""
     rows = db.conn.execute("SELECT id, name FROM users").fetchall()
@@ -1090,6 +1156,16 @@ def main():
     p_add.add_argument("--tags", default="", help="Comma-separated tags")
     p_add.add_argument("--key", default=None, help="Your API key (uses local user if omitted)")
 
+    p_paste = sub.add_parser("paste", help="Add raw content (no URL) — for emails, newsletters, notes")
+    p_paste.add_argument("title", help="Title for this content")
+    p_paste.add_argument("--body", default=None, help="Content body (opens $EDITOR if omitted)")
+    p_paste.add_argument("--file", default=None, help="Read body from a file")
+    p_paste.add_argument("--source-type", default="paste", choices=["paste", "email", "document"], help="Content type (default: paste)")
+    p_paste.add_argument("--source-label", default="", help="Origin label (e.g. 'Substack', 'meeting notes')")
+    p_paste.add_argument("--note", default="", help="Why this content matters")
+    p_paste.add_argument("--tags", default="", help="Comma-separated tags")
+    p_paste.add_argument("--key", default=None, help="Your API key (uses local user if omitted)")
+
     p_search = sub.add_parser("search", help="Search Dugg for resources")
     p_search.add_argument("query", help="Search query")
     p_search.add_argument("--limit", type=int, default=20, help="Max results (default: 20)")
@@ -1173,6 +1249,8 @@ def main():
         cmd_login(args)
     elif args.command == "add":
         cmd_add(args)
+    elif args.command == "paste":
+        cmd_paste(args)
     elif args.command == "search":
         cmd_search(args)
     elif args.command == "feed":

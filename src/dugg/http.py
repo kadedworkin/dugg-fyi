@@ -962,6 +962,108 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
         user = d.get_user_by_api_key(key)
         return d, user
 
+    # --- Paste Pages ---
+
+    async def handle_paste_page(request: Request):
+        """GET /paste/{key} — browser form to paste raw content."""
+        api_key = request.path_params["key"]
+        d = get_db()
+        user = d.get_user_by_api_key(api_key)
+
+        if not user:
+            return HTMLResponse(_html_page("Not Found", "<h1>Invalid key</h1><p>This paste URL is not valid.</p>"), status_code=404)
+
+        instances = d.list_instances(user["id"])
+        page_title = instances[0]["name"] if instances else "Dugg"
+
+        body = f"""<h1>Paste Content</h1>
+<p class="topic">Add raw content to {_xml_escape(page_title)} — no URL needed.</p>
+<form method="POST" action="/paste/{_xml_escape(api_key)}/submit" enctype="multipart/form-data">
+  <label for="title">Title</label>
+  <input type="text" id="title" name="title" placeholder="e.g. Substack newsletter from Rocco" required>
+  <label for="body">Content</label>
+  <textarea id="body" name="body" rows="12" placeholder="Paste the content here..." style="width:100%;padding:0.6rem;background:#111;border:1px solid #444;border-radius:6px;color:#fff;font-size:0.9rem;margin-bottom:1rem;resize:vertical;font-family:inherit;"></textarea>
+  <label for="file">Or upload a file (.txt, .html, .md)</label>
+  <input type="file" id="file" name="file" accept=".txt,.html,.htm,.md,.eml" style="margin-bottom:1rem;color:#aaa;font-size:0.85rem;">
+  <label for="source_type">Content type</label>
+  <select id="source_type" name="source_type" style="width:100%;padding:0.6rem;background:#111;border:1px solid #444;border-radius:6px;color:#fff;font-size:1rem;margin-bottom:1rem;">
+    <option value="paste">Paste</option>
+    <option value="email">Email / Newsletter</option>
+    <option value="document">Document</option>
+  </select>
+  <label for="source_label">Source (optional)</label>
+  <input type="text" id="source_label" name="source_label" placeholder="e.g. Substack, meeting notes">
+  <label for="tags">Tags (comma-separated, optional)</label>
+  <input type="text" id="tags" name="tags" placeholder="e.g. newsletter, ai, weekly">
+  <label for="note">Note (optional)</label>
+  <input type="text" id="note" name="note" placeholder="Why this matters...">
+  <button type="submit">Save to Dugg</button>
+</form>"""
+        return HTMLResponse(_html_page(f"Paste — {page_title}", body))
+
+    async def handle_paste_submit(request: Request):
+        """POST /paste/{key}/submit — process paste form submission."""
+        api_key = request.path_params["key"]
+        d = get_db()
+        user = d.get_user_by_api_key(api_key)
+
+        if not user:
+            return HTMLResponse(_html_page("Error", "<h1>Invalid key</h1>"), status_code=404)
+
+        d.touch_user(user["id"])
+
+        form = await request.form()
+        title = (form.get("title") or "").strip()
+        body = (form.get("body") or "").strip()
+        source_type = form.get("source_type", "paste")
+        source_label = (form.get("source_label") or "").strip()
+        tags_raw = (form.get("tags") or "").strip()
+        note = (form.get("note") or "").strip()
+
+        uploaded = form.get("file")
+        if uploaded and hasattr(uploaded, "read"):
+            file_content = (await uploaded.read()).decode("utf-8", errors="replace").strip()
+            if file_content and not body:
+                body = file_content
+
+        if not title:
+            return HTMLResponse(_html_page("Error", '<h1>Missing title</h1><p><a href="javascript:history.back()">Go back</a></p>'), status_code=400)
+        if not body:
+            return HTMLResponse(_html_page("Error", '<h1>Missing content</h1><p>Paste some text or upload a file.</p><p><a href="javascript:history.back()">Go back</a></p>'), status_code=400)
+
+        coll_id = _ensure_default_collection(d, user["id"])
+        tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
+
+        from dugg.db import _uuid
+        res_id = _uuid()
+        synthetic_url = f"dugg://paste/{res_id}"
+        metadata = {"source_label": source_label} if source_label else {}
+
+        resource = d.add_resource(
+            url=synthetic_url,
+            collection_id=coll_id,
+            submitted_by=user["id"],
+            note=note,
+            title=title,
+            description=source_label,
+            source_type=source_type,
+            transcript=body,
+            raw_metadata=metadata,
+            tags=tags,
+            tag_source="human" if tags else "agent",
+        )
+
+        word_count = len(body.split())
+        success_body = f"""<h1>Saved</h1>
+<div class="key-box">
+  <strong>{_xml_escape(title)}</strong><br>
+  ID: {resource['id']}<br>
+  Type: {source_type}<br>
+  Content: {word_count} words
+</div>
+<p style="margin-top:1rem;"><a href="/paste/{_xml_escape(api_key)}" style="color:#93c5fd;">Paste another</a></p>"""
+        return HTMLResponse(_html_page("Saved", success_body))
+
     async def handle_admin_page(request: Request):
         """GET /admin/{key} — browser-based admin dashboard."""
         d, user = _admin_resolve_user(request)
@@ -1120,6 +1222,8 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
         Route("/invite/{token}", endpoint=handle_invite_page),
         Route("/invite/{token}/redeem", endpoint=handle_invite_redeem, methods=["POST"]),
         Route("/feed/{key}", endpoint=handle_feed),
+        Route("/paste/{key}", endpoint=handle_paste_page),
+        Route("/paste/{key}/submit", endpoint=handle_paste_submit, methods=["POST"]),
         Route("/appeal/{key}", endpoint=handle_appeal_page),
         Route("/appeal/{key}/submit", endpoint=handle_appeal_submit, methods=["POST"]),
         Route("/appeal/{key}/status", endpoint=handle_appeal_status),
