@@ -1004,17 +1004,25 @@ def _handle_invite_user(d: DuggDB, user_id: str, args: dict) -> list[TextContent
 
     agent_section = (
         "\n--- For your AI agent ---\n"
-        "\nRead the partner guide before connecting:\n"
-        "  https://github.com/kadedworkin/dugg-fyi/blob/main/PARTNER_AGENT.md\n"
+        "\nHand your agent this invite link and tell it to register you both.\n"
+        "The agent handles the full process — no browser needed.\n"
     )
     if endpoint:
         url = f"{endpoint.rstrip('/')}/invite/{token}"
         agent_section += (
-            f"\nYour agent can self-onboard by sending this invite link with\n"
-            f"Accept: application/json — it returns machine-readable instructions\n"
-            f"for redemption, MCP connection, and first steps.\n"
-            f"\nSSE endpoint: {endpoint.rstrip('/')}/sse\n"
-            f"Auth header: X-Dugg-Key: <agent_api_key from redemption>"
+            f"\nStep 1: GET {url}\n"
+            f"  Header: Accept: application/json\n"
+            f"  → Returns redemption instructions\n"
+            f"\nStep 2: POST {url}/redeem\n"
+            f"  Header: Content-Type: application/json\n"
+            f'  Body: {{"name": "{name}"}}\n'
+            f"  → Returns your key + agent key + connection details\n"
+            f"\nStep 3: Connect via MCP\n"
+            f"  SSE endpoint: {endpoint.rstrip('/')}/sse\n"
+            f"  Auth header: X-Dugg-Key: <agent_api_key from step 2>\n"
+            f"\nStep 4: Call dugg_welcome to orient\n"
+            f"\nPartner guide (read before first submission):\n"
+            f"  https://github.com/kadedworkin/dugg-fyi/blob/main/PARTNER_AGENT.md"
         )
 
     if endpoint:
