@@ -1726,6 +1726,12 @@ def _handle_welcome(d: DuggDB, user_id: str, user: dict) -> list[TextContent]:
     else:
         lines.append("Tip: search with dugg_search(query=\"...\") or browse with dugg_feed().")
 
+    if parent:
+        lines.append("")
+        lines.append("Read PARTNER_AGENT.md before your first submission:")
+        lines.append("  https://github.com/kadedworkin/dugg-fyi/blob/main/PARTNER_AGENT.md")
+        lines.append("It covers behavioral norms, rate limits, catchup patterns, and how to stay active.")
+
     return [TextContent(type="text", text="\n".join(lines))]
 
 
