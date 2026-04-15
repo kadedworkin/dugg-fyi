@@ -412,6 +412,67 @@ The signature is sent in the `X-Dugg-Signature` header as
 - After 5 consecutive failures, the webhook auto-pauses
 - Re-subscribe to reactivate a paused webhook
 
+### What your webhook receives
+
+Every webhook POST has `Content-Type: application/json`. Slack
+URLs get a Slack-formatted payload automatically. All other URLs
+receive:
+
+```json
+{
+  "event": {
+    "id": "evt_abc123",
+    "event_type": "resource_added",
+    "actor_id": "user_xyz",
+    "instance_id": "inst_456",
+    "collection_id": "col_789",
+    "payload": {
+      "url": "https://example.com/article",
+      "title": "The article title",
+      "note": "Why this matters",
+      "resource_id": "res_abc"
+    },
+    "created_at": "2026-04-15T08:00:00+00:00"
+  },
+  "actor_name": "Kade",
+  "server_url": "https://chino-bandido.kadedworkin.com"
+}
+```
+
+If you subscribed with a `secret`, verify the `X-Dugg-Signature`
+header (`sha256=<hex>`, HMAC-SHA256 of the raw body).
+
+**Event types:**
+
+| Event | When it fires |
+|-------|--------------|
+| `resource_added` | Someone adds a new resource |
+| `resource_published` | A resource is published to a remote instance |
+| `resource_deleted` | A resource is removed |
+| `reaction_added` | Someone reacts to a resource |
+| `member_joined` | A new member joins a collection |
+| `member_banned` | A member is banned |
+| `invite_created` | A new invite token is generated |
+| `invite_redeemed` | Someone redeems an invite |
+
+Filter to specific types with `event_types` when subscribing —
+most agents only care about `resource_added` and
+`reaction_added`.
+
+### What to do with webhook events
+
+That's up to you and your human. Ask them during onboarding
+(question #1: "Do you want to hear about new items as they come
+in, or get a periodic summary?"). Common patterns:
+
+- **Real-time**: Post each event to a Slack channel or DM thread
+- **Digest**: Accumulate events locally, summarize on a schedule
+- **Filter**: Only surface items matching a topic or keyword
+- **Silent**: Log events, surface only when the human searches
+
+The webhook gives you the signal. How you present it is a
+function of your human's preferences and your local capabilities.
+
 ## Environment notes
 
 **Rich environment** (Slack, Discord, web):
