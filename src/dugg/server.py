@@ -1917,17 +1917,32 @@ def _handle_welcome(d: DuggDB, user_id: str, user: dict) -> list[TextContent]:
 # --- Main ---
 
 def main():
-    """Run the Dugg MCP server over stdio with background sync daemon."""
+    """Run the Dugg MCP server over stdio with background sync daemon and local web UI."""
+    local_port = int(os.environ.get("DUGG_LOCAL_PORT", "8411"))
+
     async def _run():
-        # Start the sync daemon as a background task
         d = get_db()
         sync_task = start_sync_daemon(d, interval=30)
+
+        # Start a localhost-only HTTP server for the web UI (paste form, feed, admin)
+        http_task = None
+        try:
+            import uvicorn
+            from dugg.http import create_app
+            app = create_app()
+            config = uvicorn.Config(app, host="127.0.0.1", port=local_port, log_level="warning")
+            http_server = uvicorn.Server(config)
+            http_task = asyncio.create_task(http_server.serve())
+        except Exception:
+            pass
 
         try:
             async with stdio_server() as (read_stream, write_stream):
                 await server.run(read_stream, write_stream, server.create_initialization_options())
         finally:
             sync_task.cancel()
+            if http_task:
+                http_task.cancel()
 
     asyncio.run(_run())
 
