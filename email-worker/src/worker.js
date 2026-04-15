@@ -1,12 +1,12 @@
 export default {
   async email(message, env, ctx) {
     const to = message.to;
-    const localPart = to.split("@")[0];
-    const plusIndex = localPart.indexOf("+");
-    if (plusIndex === -1) return;
+    const [localPart, domain] = to.split("@");
+    if (!domain || !domain.endsWith(".dugg.fyi")) return;
 
-    const host = localPart.substring(0, plusIndex).replace(/_/g, ".");
-    const userKey = localPart.substring(plusIndex + 1);
+    const hostSlug = domain.slice(0, -".dugg.fyi".length);
+    const host = hostSlug.replace(/_/g, ".");
+    const userKey = localPart;
     if (!host || !userKey) return;
 
     const rawBody = await new Response(message.raw).text();
