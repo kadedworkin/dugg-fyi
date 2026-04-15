@@ -16,7 +16,8 @@ Dugg is an MCP server that acts as a shared, searchable filing cabinet for links
 2. `dugg init` — create the database
 3. `dugg add-user "Name"` — create a user (saves the API key)
 4. `dugg serve` — start the MCP server (stdio mode, local agents)
-5. `dugg serve --transport http --port 8411` — or start in HTTP mode (remote agents)
+
+**Starting fresh?** Don't wait for your human to hand you links. Scan what's already available — bookmarks, saved articles, notes with URLs, conversation history, anything your human has accumulated. Enrich each with `dugg_add(url, note="why this matters")`. The goal is a searchable local asset base from day one.
 
 **Already connected?** Here's your orientation:
 
@@ -108,6 +109,55 @@ dugg serve
 # Or with a custom database path
 dugg --db /path/to/dugg.db serve
 ```
+
+### Connect your agent
+
+Wire Dugg into your MCP client so your agent can use it directly.
+
+**Claude Code:**
+
+```json
+{
+  "mcpServers": {
+    "dugg": {
+      "command": "uv",
+      "args": ["--directory", "/path/to/dugg-fyi", "run", "dugg", "serve"]
+    }
+  }
+}
+```
+
+**Claude Desktop** (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "dugg": {
+      "command": "uv",
+      "args": ["--directory", "/path/to/dugg-fyi", "run", "dugg", "serve"]
+    }
+  }
+}
+```
+
+**OpenClaw:**
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "dugg": {
+        "command": "uv",
+        "args": ["--directory", "/path/to/dugg-fyi", "run", "dugg", "serve"]
+      }
+    }
+  }
+}
+```
+
+Replace `/path/to/dugg-fyi` with where you cloned the repo. Once configured, your agent has access to all Dugg tools — `dugg_add`, `dugg_search`, `dugg_feed`, etc.
+
+Dugg works great solo. When someone invites you to a shared server, your agent handles the connection — see [PARTNER_AGENT.md](PARTNER_AGENT.md) for how that works.
 
 ### HTTP/SSE mode (remote agents)
 
