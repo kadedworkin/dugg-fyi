@@ -259,6 +259,7 @@ Add to your OpenClaw config:
 | `dugg_share` | Share a collection with another user, with optional tag filters. |
 | `dugg_create_user` | Create a new user with a linked agent account. Returns both a user key and an agent key. Banning the user revokes the agent key too. |
 | `dugg_invite_user` | Create an invite token with a browser redemption link — send via any channel. |
+| `dugg_invites` | List invite tokens you've created — shows pending, redeemed, and expired status. |
 | `dugg_instance_policy` | Get the current policy configuration for an instance — onboarding mode, read horizon, index mode, storage cap, rate limits, pruning mode, pruning grace period, and access mode. |
 | `dugg_publish_clear` | Delete failed publish queue entries. Optionally scoped to a target instance. Owner only. |
 | `dugg_publish_retry_selective` | Retry specific failed publishes — by ID or by target instance. More surgical than dugg_publish_retry. |
@@ -287,6 +288,7 @@ Beyond `init`, `serve`, `add-user`, `login`, and `redeem`, Dugg ships a full man
 | `dugg set-config <key> <value>` | Set server config (e.g., `server_url`, `server_name`) |
 | `dugg add-user <name> [--server URL]` | Create a user (local or remote). Remote mode posts to the server using your saved key |
 | `dugg invite-user <name>` | Generate an invite token. Warns if no server URL is configured |
+| `dugg invites` | List invite tokens (pending, redeemed, expired) |
 | `dugg redeem <token>` | Redeem an invite token (local DB only). Both keys auto-saved to `.dugg-env` |
 | `dugg admin` | Launch the terminal admin UI |
 

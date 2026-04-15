@@ -1456,6 +1456,18 @@ class DuggDB:
         row = self.conn.execute("SELECT * FROM invite_tokens WHERE token = ?", (token,)).fetchone()
         return dict(row) if row else None
 
+    def list_invite_tokens(self, created_by: Optional[str] = None) -> list[dict]:
+        """List invite tokens. Optionally filter by creator."""
+        if created_by:
+            rows = self.conn.execute(
+                "SELECT * FROM invite_tokens WHERE created_by = ? ORDER BY created_at DESC", (created_by,)
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM invite_tokens ORDER BY created_at DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def redeem_invite_token(self, token: str, name: str) -> Optional[dict]:
         """Redeem an invite token: create a new user and mark the token as used.
 

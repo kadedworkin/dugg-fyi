@@ -184,6 +184,48 @@ def cmd_invite_user(args):
     db.close()
 
 
+def cmd_invites(args):
+    """List invite tokens with their status."""
+    from datetime import datetime, timezone
+    from pathlib import Path
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+
+    api_key = getattr(args, "key", None)
+    if api_key:
+        user = db.get_user_by_api_key(api_key)
+        if not user:
+            print("Invalid API key")
+            sys.exit(1)
+        tokens = db.list_invite_tokens(created_by=user["id"])
+    else:
+        tokens = db.list_invite_tokens()
+
+    if not tokens:
+        print("No invite tokens found.")
+        db.close()
+        return
+
+    now = datetime.now(timezone.utc)
+    pending, redeemed, expired = 0, 0, 0
+    for t in tokens:
+        name = t.get("name_hint") or "(no name)"
+        if t.get("redeemed_by"):
+            redeemer = db.get_user(t["redeemed_by"])
+            redeemer_name = redeemer["name"] if redeemer else t["redeemed_by"]
+            print(f"  {name} — redeemed by {redeemer_name} at {t['redeemed_at']}")
+            redeemed += 1
+        elif datetime.fromisoformat(t["expires_at"]) < now:
+            print(f"  {name} — expired ({t['expires_at']})")
+            expired += 1
+        else:
+            print(f"  {name} — pending (token: {t['token']}, expires: {t['expires_at']})")
+            pending += 1
+
+    print(f"\n{pending} pending, {redeemed} redeemed, {expired} expired")
+    db.close()
+
+
 def cmd_redeem(args):
     """Redeem an invite token to create a user account."""
     from pathlib import Path
@@ -967,6 +1009,9 @@ def main():
     p_invite.add_argument("--server", default=None, help="Server URL (e.g. https://chino-bandido.kadedworkin.com) — included in invite message")
     p_invite.add_argument("--expires", type=int, default=72, help="Hours until invite expires (default: 72)")
 
+    p_invites = sub.add_parser("invites", help="List invite tokens (pending, redeemed, expired)")
+    p_invites.add_argument("--key", default=None, help="Your API key (shows only your invites)")
+
     p_redeem = sub.add_parser("redeem", help="Redeem an invite token to join a Dugg server")
     p_redeem.add_argument("token", help="The invite token to redeem")
     p_redeem.add_argument("--name", default=None, help="Your display name (uses invite hint if omitted)")
@@ -1055,6 +1100,8 @@ def main():
         cmd_add_user(args)
     elif args.command == "invite-user":
         cmd_invite_user(args)
+    elif args.command == "invites":
+        cmd_invites(args)
     elif args.command == "redeem":
         cmd_redeem(args)
     elif args.command == "list-users":

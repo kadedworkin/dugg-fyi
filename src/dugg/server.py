@@ -190,6 +190,16 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="dugg_invites",
+            description="List invite tokens you've created — shows pending, redeemed, and expired status.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+            },
+        ),
+        Tool(
             name="dugg_enrich",
             description="Manually trigger enrichment for a resource (re-fetch metadata, transcript, etc).",
             inputSchema={
@@ -675,6 +685,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = _handle_create_user(d, arguments)
         elif name == "dugg_invite_user":
             result = _handle_invite_user(d, user_id, arguments)
+        elif name == "dugg_invites":
+            result = _handle_invites(d, user_id)
         elif name == "dugg_enrich":
             result = await _handle_enrich(d, arguments)
         elif name == "dugg_link":
@@ -1023,6 +1035,31 @@ def _handle_invite_user(d: DuggDB, user_id: str, args: dict) -> list[TextContent
         f"{invite_text}\n\n"
         f"--- End of invite message ---"
     ))]
+
+
+def _handle_invites(d: DuggDB, user_id: str) -> list[TextContent]:
+    from datetime import datetime, timezone
+    tokens = d.list_invite_tokens(created_by=user_id)
+    if not tokens:
+        return [TextContent(type="text", text="No invite tokens found.")]
+    now = datetime.now(timezone.utc)
+    lines = []
+    pending, redeemed, expired = 0, 0, 0
+    for t in tokens:
+        name = t.get("name_hint") or "(no name)"
+        if t.get("redeemed_by"):
+            redeemer = d.get_user(t["redeemed_by"])
+            redeemer_name = redeemer["name"] if redeemer else t["redeemed_by"]
+            lines.append(f"  {name} — redeemed by {redeemer_name} at {t['redeemed_at']}")
+            redeemed += 1
+        elif datetime.fromisoformat(t["expires_at"]) < now:
+            lines.append(f"  {name} — expired ({t['expires_at']})")
+            expired += 1
+        else:
+            lines.append(f"  {name} — pending (token: {t['token']}, expires: {t['expires_at']})")
+            pending += 1
+    header = f"Invites: {pending} pending, {redeemed} redeemed, {expired} expired\n"
+    return [TextContent(type="text", text=header + "\n".join(lines))]
 
 
 async def _handle_enrich(d: DuggDB, args: dict) -> list[TextContent]:
