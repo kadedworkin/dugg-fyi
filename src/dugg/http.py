@@ -980,7 +980,7 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
 <p class="topic">Add raw content to {_xml_escape(page_title)} — no URL needed.</p>
 <form method="POST" action="/paste/{_xml_escape(api_key)}/submit" enctype="multipart/form-data">
   <label for="title">Title</label>
-  <input type="text" id="title" name="title" placeholder="e.g. Substack newsletter from Rocco" required>
+  <input type="text" id="title" name="title" placeholder="e.g. Weekly AI newsletter, Apr 15" required>
   <label for="body">Content</label>
   <textarea id="body" name="body" rows="12" placeholder="Paste the content here..." style="width:100%;padding:0.6rem;background:#111;border:1px solid #444;border-radius:6px;color:#fff;font-size:0.9rem;margin-bottom:1rem;resize:vertical;font-family:inherit;"></textarea>
   <label for="file">Or upload a file (.txt, .html, .md)</label>
