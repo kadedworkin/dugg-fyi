@@ -683,6 +683,10 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
         resource_id = request.path_params["resource_id"]
         d = get_db()
         resource = d.get_resource(resource_id)
+        if not resource:
+            row = d.conn.execute("SELECT id FROM resources WHERE url = ?", (f"dugg://content/{resource_id}",)).fetchone()
+            if row:
+                resource = d.get_resource(row["id"])
 
         if not resource:
             return HTMLResponse(_html_page("Not Found", "<h1>Not found</h1><p>This content does not exist.</p>"), status_code=404)
