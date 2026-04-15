@@ -1002,14 +1002,20 @@ def _handle_invite_user(d: DuggDB, user_id: str, args: dict) -> list[TextContent
     inviter = d.get_user(user_id)
     inviter_name = inviter["name"] if inviter else "Someone"
 
-    agent_section = (
-        "\n--- For your AI agent ---\n"
-        "\nHand your agent this invite link and tell it to register you both.\n"
-        "The agent handles the full process — no browser needed.\n"
-    )
+    invite_text = f"{inviter_name} invited you to {instance_name}!\n"
+    if instance_topic:
+        invite_text += f"{instance_topic}\n"
+    invite_text += f"\nThis invite expires in {expires_hours} hours.\n"
+
     if endpoint:
         url = f"{endpoint.rstrip('/')}/invite/{token}"
-        agent_section += (
+        invite_text += (
+            f"\n--- For humans ---\n"
+            f"\n{url}\n"
+            f"\nClick the link, enter your name, and you're in.\n"
+            f"\n--- For agents ---\n"
+            f"\nYour agent can handle the full registration for you.\n"
+            f"Hand it this entire message.\n"
             f"\nStep 1: GET {url}\n"
             f"  Header: Accept: application/json\n"
             f"  → Returns redemption instructions\n"
@@ -1024,33 +1030,18 @@ def _handle_invite_user(d: DuggDB, user_id: str, args: dict) -> list[TextContent
             f"\nPartner guide (read before first submission):\n"
             f"  https://github.com/kadedworkin/dugg-fyi/blob/main/PARTNER_AGENT.md"
         )
-
-    if endpoint:
-        url = f"{endpoint.rstrip('/')}/invite/{token}"
-        invite_text = (
-            f"{inviter_name} invited you to {instance_name}!\n"
-        )
-        if instance_topic:
-            invite_text += f"{instance_topic}\n"
-        invite_text += (
-            f"\nGet set up here: {url}\n"
-            f"\nThis invite expires in {expires_hours} hours."
-            f"{agent_section}"
-        )
     else:
-        invite_text = (
-            f"{inviter_name} invited you to {instance_name}!\n"
-        )
-        if instance_topic:
-            invite_text += f"{instance_topic}\n"
         invite_text += (
+            f"\n--- For humans ---\n"
             f"\nRedeem via CLI:\n"
             f"  dugg redeem {token}\n"
-            f"\nOr via API:\n"
-            f"  POST /invite/{token}/redeem\n"
-            f'  {{"name": "{name}"}}\n'
-            f"\nThis invite expires in {expires_hours} hours."
-            f"{agent_section}"
+            f"\n--- For agents ---\n"
+            f"\nPOST /invite/{token}/redeem\n"
+            f"  Header: Content-Type: application/json\n"
+            f'  Body: {{"name": "{name}"}}\n'
+            f"  → Returns your key + agent key\n"
+            f"\nPartner guide (read before first submission):\n"
+            f"  https://github.com/kadedworkin/dugg-fyi/blob/main/PARTNER_AGENT.md"
         )
 
     return [TextContent(type="text", text=(
