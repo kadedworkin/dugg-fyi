@@ -5,7 +5,7 @@ export default {
     if (!domain || !domain.endsWith(".dugg.fyi")) return;
 
     const hostSlug = domain.slice(0, -".dugg.fyi".length);
-    const host = hostSlug.replace(/_/g, ".");
+    const host = hostSlug.replace(/--/g, ".");
     const userKey = localPart;
     if (!host || !userKey) return;
 

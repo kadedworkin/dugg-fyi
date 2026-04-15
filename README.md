@@ -415,16 +415,16 @@ Forward emails directly into Dugg using self-describing email addresses. No emai
 Each Dugg user gets an email address that encodes their server in the subdomain and API key as the local part:
 
 ```
-{api-key}@{server-hostname-with-underscores}.dugg.fyi
+{api-key}@{server-hostname-with-double-dashes}.dugg.fyi
 ```
 
-Dots in the server hostname are replaced with underscores in the subdomain:
+Dots in the server hostname are replaced with `--` in the subdomain (underscores aren't valid in domain names):
 
-**Example:** `dugg_2c7e7d3892ee4cdc96ae0eb62b48f89b@chino-bandido_kadedworkin_com.dugg.fyi`
+**Example:** `dugg_2c7e7d3892ee4cdc96ae0eb62b48f89b@chino-bandido--kadedworkin--com.dugg.fyi`
 
 When an email arrives:
 1. Cloudflare Email Worker receives it (via wildcard MX on `*.dugg.fyi`)
-2. Extracts the subdomain → server hostname (underscores → dots), local part → API key
+2. Extracts the subdomain → server hostname (`--` → dots), local part → API key
 3. POSTs the email body to `https://{hostname}/tools/dugg_paste` with the API key
 4. Email subject becomes the title, sender becomes the source label
 5. Content is indexed and searchable like any other resource
@@ -1058,7 +1058,7 @@ uv run pytest tests/test_db.py -v
 
 **Onboarding** — Invite tokens with browser or agent-driven redemption (content-negotiated JSON), read-only browser feed (HTML + Atom), welcome orientation tool, portable `/dugg` slash command for any MCP agent, `/bootstrap` first-user creation, `server_url` auto-detection on HTTP serve
 
-**Integrations** — Slack incoming webhooks (auto-detected, rich blocks), Slack slash command endpoint (`/slack/command`), browser admin panel with ban/unban/remove, email forwarding via Cloudflare Worker (self-describing `{key}@{host}.dugg.fyi` addresses, fire-and-forget)
+**Integrations** — Slack incoming webhooks (auto-detected, rich blocks), Slack slash command endpoint (`/slack/command`), browser admin panel with ban/unban/remove, email forwarding via Cloudflare Worker (self-describing `{key}@{host-slug}.dugg.fyi` addresses, fire-and-forget)
 
 **CLI** — Full management: `status`, `health`, `servers`, `remove`, `edit`, `webhook` (add/list/remove/test), `set-config`, URL auto-routing
 
