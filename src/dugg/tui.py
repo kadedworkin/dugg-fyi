@@ -573,7 +573,7 @@ class DuggAdmin(App):
 
             from dugg.db import _uuid
             res_id = _uuid()
-            synthetic_url = f"dugg://paste/{res_id}"
+            synthetic_url = f"dugg://content/{res_id}"
             metadata = {"source_label": source_label} if source_label else {}
 
             resource = self.db.add_resource(
@@ -582,7 +582,7 @@ class DuggAdmin(App):
                 submitted_by=self._user["id"],
                 title=title,
                 description=source_label,
-                source_type="paste",
+                source_type="email",
                 transcript=body,
                 raw_metadata=metadata,
                 tags=tags,

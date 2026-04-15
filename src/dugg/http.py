@@ -987,8 +987,8 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
   <input type="file" id="file" name="file" accept=".txt,.html,.htm,.md,.eml" style="margin-bottom:1rem;color:#aaa;font-size:0.85rem;">
   <label for="source_type">Content type</label>
   <select id="source_type" name="source_type" style="width:100%;padding:0.6rem;background:#111;border:1px solid #444;border-radius:6px;color:#fff;font-size:1rem;margin-bottom:1rem;">
-    <option value="paste">Paste</option>
-    <option value="email">Email / Newsletter</option>
+    <option value="email" selected>Email / Newsletter</option>
+    <option value="note">Note</option>
     <option value="document">Document</option>
   </select>
   <label for="source_label">Source (optional)</label>
@@ -1036,7 +1036,7 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
 
         from dugg.db import _uuid
         res_id = _uuid()
-        synthetic_url = f"dugg://paste/{res_id}"
+        synthetic_url = f"dugg://content/{res_id}"
         metadata = {"source_label": source_label} if source_label else {}
 
         resource = d.add_resource(

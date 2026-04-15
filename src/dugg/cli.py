@@ -513,12 +513,12 @@ def cmd_paste(args):
 
     note = getattr(args, "note", "") or ""
     tags = [t.strip() for t in (getattr(args, "tags", "") or "").split(",") if t.strip()]
-    source_type = getattr(args, "source_type", "paste")
+    source_type = getattr(args, "source_type", "email")
     source_label = getattr(args, "source_label", "")
 
     from dugg.db import _uuid
     res_id = _uuid()
-    synthetic_url = f"dugg://paste/{res_id}"
+    synthetic_url = f"dugg://content/{res_id}"
     metadata = {"source_label": source_label} if source_label else {}
 
     resource = db.add_resource(
@@ -1160,7 +1160,7 @@ def main():
     p_paste.add_argument("title", help="Title for this content")
     p_paste.add_argument("--body", default=None, help="Content body (opens $EDITOR if omitted)")
     p_paste.add_argument("--file", default=None, help="Read body from a file")
-    p_paste.add_argument("--source-type", default="paste", choices=["paste", "email", "document"], help="Content type (default: paste)")
+    p_paste.add_argument("--source-type", default="email", choices=["note", "email", "document"], help="Content type (default: email)")
     p_paste.add_argument("--source-label", default="", help="Origin label (e.g. 'Substack', 'meeting notes')")
     p_paste.add_argument("--note", default="", help="Why this content matters")
     p_paste.add_argument("--tags", default="", help="Comma-separated tags")

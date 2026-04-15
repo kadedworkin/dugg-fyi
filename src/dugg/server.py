@@ -662,7 +662,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "title": {"type": "string", "description": "Title for this content"},
                     "body": {"type": "string", "description": "The content — plain text or HTML"},
-                    "source_type": {"type": "string", "enum": ["paste", "email", "document"], "description": "What kind of content this is", "default": "paste"},
+                    "source_type": {"type": "string", "enum": ["note", "email", "document"], "description": "What kind of content this is", "default": "email"},
                     "source_label": {"type": "string", "description": "Origin label (e.g. 'Substack', 'forwarded email', 'meeting notes')", "default": ""},
                     "note": {"type": "string", "description": "Why this content matters — context for future retrieval", "default": ""},
                     "tags": {"type": "array", "items": {"type": "string"}, "description": "Tags for categorization", "default": []},
@@ -880,7 +880,7 @@ async def _handle_add(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
 def _handle_paste(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
     title = args["title"]
     body = args["body"]
-    source_type = args.get("source_type", "paste")
+    source_type = args.get("source_type", "email")
     source_label = args.get("source_label", "")
     note = args.get("note", "")
     tags = args.get("tags", [])
@@ -910,7 +910,7 @@ def _handle_paste(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
 
     from dugg.db import _uuid
     res_id = _uuid()
-    synthetic_url = f"dugg://paste/{res_id}"
+    synthetic_url = f"dugg://content/{res_id}"
 
     metadata = {"source_label": source_label} if source_label else {}
 
