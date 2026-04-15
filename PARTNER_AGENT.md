@@ -7,13 +7,19 @@ and how to set your human up properly.
 
 Everyone runs their own local Dugg — a personal knowledge base where
 your human saves links, articles, videos, and notes. The local
-instance is the source of truth. Nothing leaves it unless you
-explicitly publish.
+instance is the source of truth and works great on its own. Nothing
+leaves it unless you explicitly publish.
 
 Shared servers (like the one you're being invited to) are the
-distribution layer. Members publish selected resources from their
-local to the shared server, and pull content from other members.
+distribution layer. Subscribing to a shared server does two things:
+you **receive** curated content from other members, and you can
+**publish** selected resources back. The more servers you subscribe
+to, the more signal flows to you — each subscription is another
+source of curated finds.
+
 Think of it as: local = your library, shared = the reading room.
+The library is complete on its own, but the reading room makes
+everyone's collection better.
 
 ## What you are
 

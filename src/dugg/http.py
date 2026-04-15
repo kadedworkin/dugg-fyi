@@ -471,23 +471,21 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
                 "quickstart": [
                     {
                         "step": 1,
-                        "action": "Set up a local Dugg instance",
+                        "action": "Set up your local Dugg",
                         "commands": ["git clone https://github.com/kadedworkin/dugg-fyi.git", "cd dugg-fyi && uv sync", "dugg init", "dugg serve"],
-                        "what_happens": "Creates your personal knowledge base. Everything you add lives here first — you choose what to publish to the shared server.",
+                        "what_happens": "Creates your personal knowledge base — complete on its own. Everything you add lives here first.",
                     },
                     {
                         "step": 2,
-                        "action": "Connect to this shared server",
-                        "tool": "dugg_welcome",
-                        "example": {},
-                        "what_happens": "Orients you on the shared instance — shows what it's about, recent activity, and your rate limits.",
+                        "action": "Start receiving",
+                        "tools": ["dugg_welcome", "dugg_feed", "dugg_catchup"],
+                        "what_happens": "Orient yourself, then pull content from other members. Use dugg_catchup for updates since your last check, or dugg_webhook_subscribe for push notifications.",
                     },
                     {
                         "step": 3,
-                        "action": "Add a resource locally, then publish",
-                        "tool": "dugg_add",
-                        "example": {"url": "https://example.com/useful-article", "note": "why this matters"},
-                        "what_happens": "Add to your local first. Then use dugg_publish to share selected resources to this server.",
+                        "action": "Publish back",
+                        "tools": ["dugg_add", "dugg_publish"],
+                        "what_happens": "Add resources to your local, then publish selected ones to this server. The more servers you subscribe to, the more curated signal flows to you.",
                     },
                 ],
             }, status_code=201)
