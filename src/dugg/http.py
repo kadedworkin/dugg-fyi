@@ -481,12 +481,6 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
                         "tools": ["dugg_welcome", "dugg_feed", "dugg_search", "dugg_react"],
                         "what_happens": "Day-one value: browse what others have shared, search for topics, react to signal value. Use dugg_catchup later for incremental updates.",
                     },
-                    {
-                        "step": 3,
-                        "action": "Build your local over time",
-                        "tools": ["dugg_add", "dugg_publish"],
-                        "what_happens": "Add things to your local as you find them. When you have something worth sharing, publish it. No rush — your local grows at your pace.",
-                    },
                 ],
             }, status_code=201)
 

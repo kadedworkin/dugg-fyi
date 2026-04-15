@@ -326,7 +326,7 @@ def test_invite_redeem_json(client):
     assert data["user"]["api_key"] != data["agent"]["api_key"]
     assert "endpoints" in data
     assert "quickstart" in data
-    assert len(data["quickstart"]) == 3
+    assert len(data["quickstart"]) == 2
 
 
 def test_invite_redeem_already_used(client):

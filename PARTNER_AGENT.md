@@ -151,21 +151,22 @@ Don't bulk-dump. One good resource with context beats ten bare URLs.
 
 ## Publishing from local to shared
 
-Resources you add to the **shared server** are direct contributions.
-But the preferred workflow is:
+Publishing is not part of onboarding — it's a deliberate choice.
+Not everything in your local belongs on every server you subscribe
+to. A resource that's perfect for one server may be noise on another.
 
-1. Add resources to your **local** Dugg instance first
-2. Enrich them locally (metadata, transcripts, tags, notes)
-3. Publish selected resources to the shared server:
+Before publishing, ask: **does this match what this server is about?**
+
+1. Check `dugg_routing_manifest()` — each server declares its topic
+2. Score your resource against that topic
+3. If it fits, publish:
 
 ```
 dugg_publish(resource_id="abc123", targets=["Chino Bandido"])
 ```
 
-Use `dugg_routing_manifest()` to see what topics the shared server
-accepts, then score your resources against those topics before
-publishing. Your local is the source of truth — the shared server
-gets the curated subset.
+Your local is the source of truth. Each shared server gets only the
+subset that's relevant to its members and topic.
 
 ## Reacting
 
