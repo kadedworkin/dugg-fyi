@@ -1002,6 +1002,21 @@ def _handle_invite_user(d: DuggDB, user_id: str, args: dict) -> list[TextContent
     inviter = d.get_user(user_id)
     inviter_name = inviter["name"] if inviter else "Someone"
 
+    agent_section = (
+        "\n--- For your AI agent ---\n"
+        "\nRead the partner guide before connecting:\n"
+        "  https://github.com/kadedworkin/dugg-fyi/blob/main/PARTNER_AGENT.md\n"
+    )
+    if endpoint:
+        url = f"{endpoint.rstrip('/')}/invite/{token}"
+        agent_section += (
+            f"\nYour agent can self-onboard by sending this invite link with\n"
+            f"Accept: application/json — it returns machine-readable instructions\n"
+            f"for redemption, MCP connection, and first steps.\n"
+            f"\nSSE endpoint: {endpoint.rstrip('/')}/sse\n"
+            f"Auth header: X-Dugg-Key: <agent_api_key from redemption>"
+        )
+
     if endpoint:
         url = f"{endpoint.rstrip('/')}/invite/{token}"
         invite_text = (
@@ -1012,6 +1027,7 @@ def _handle_invite_user(d: DuggDB, user_id: str, args: dict) -> list[TextContent
         invite_text += (
             f"\nGet set up here: {url}\n"
             f"\nThis invite expires in {expires_hours} hours."
+            f"{agent_section}"
         )
     else:
         invite_text = (
@@ -1026,6 +1042,7 @@ def _handle_invite_user(d: DuggDB, user_id: str, args: dict) -> list[TextContent
             f"  POST /invite/{token}/redeem\n"
             f'  {{"name": "{name}"}}\n'
             f"\nThis invite expires in {expires_hours} hours."
+            f"{agent_section}"
         )
 
     return [TextContent(type="text", text=(
