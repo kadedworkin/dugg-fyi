@@ -661,8 +661,11 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
                 title = r.get("title") or r["url"]
                 note_html = f'<p class="note">{r["note"]}</p>' if r.get("note") else ""
                 author_html = f' · {r["author"]}' if r.get("author") else ""
+                url = r["url"]
+                if url.startswith("dugg://content/"):
+                    url = "/content/" + url.removeprefix("dugg://content/")
                 items_html += f"""<div class="feed-item">
-  <h3><a href="{r['url']}" target="_blank" rel="noopener">{title}</a></h3>
+  <h3><a href="{url}" target="_blank" rel="noopener">{title}</a></h3>
   <p class="meta">{r['created_at'][:10]}{author_html}</p>
   {note_html}
 </div>\n"""
@@ -672,6 +675,41 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
 {topic_html}
 {items_html}"""
         return HTMLResponse(_html_page(page_title, body))
+
+    # --- Content View Page ---
+
+    async def handle_content_page(request: Request):
+        """GET /content/{resource_id} — render pasted content in the browser."""
+        resource_id = request.path_params["resource_id"]
+        d = get_db()
+        resource = d.get_resource(resource_id)
+
+        if not resource:
+            return HTMLResponse(_html_page("Not Found", "<h1>Not found</h1><p>This content does not exist.</p>"), status_code=404)
+
+        title = resource.get("title") or "Untitled"
+        transcript = resource.get("transcript") or ""
+        author = resource.get("author") or ""
+        created = (resource.get("created_at") or "")[:10]
+        note = resource.get("note") or ""
+        tags = resource.get("tags") or []
+
+        meta_parts = [created]
+        if author:
+            meta_parts.append(author)
+        meta_html = " · ".join(meta_parts)
+
+        note_html = f'<p class="note" style="margin-top:1rem;font-style:italic;">{_xml_escape(note)}</p>' if note else ""
+        tags_html = f'<p style="margin-top:0.5rem;font-size:0.8rem;color:#666;">{", ".join(_xml_escape(t) for t in tags)}</p>' if tags else ""
+
+        content_html = _xml_escape(transcript).replace("\n", "<br>")
+
+        body = f"""<h1>{_xml_escape(title)}</h1>
+<p class="meta" style="margin-bottom:1rem;">{meta_html}</p>
+{note_html}
+{tags_html}
+<div style="margin-top:1.5rem;line-height:1.6;font-size:0.9rem;color:#ccc;white-space:pre-wrap;word-break:break-word;">{content_html}</div>"""
+        return HTMLResponse(_html_page(_xml_escape(title), body))
 
     # --- Ban Appeal Pages ---
 
@@ -1241,6 +1279,7 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
         Route("/appeal/{key}", endpoint=handle_appeal_page),
         Route("/appeal/{key}/submit", endpoint=handle_appeal_submit, methods=["POST"]),
         Route("/appeal/{key}/status", endpoint=handle_appeal_status),
+        Route("/content/{resource_id}", endpoint=handle_content_page),
         Route("/events/stream", endpoint=handle_events_stream),
         Route("/tools/{tool_name}", endpoint=handle_tools, methods=["POST"]),
         Route("/slack/command", endpoint=handle_slack_command, methods=["POST"]),
