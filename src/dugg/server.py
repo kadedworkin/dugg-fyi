@@ -311,7 +311,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="dugg_instance_update",
-            description="Update a Dugg instance's topic or access mode. Owner only.",
+            description="Update instance configuration: name, topic, access mode, endpoint, read horizon, index mode, storage cap, onboarding preset, pruning mode, and pruning grace period. Owner only.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -325,6 +325,7 @@ async def list_tools() -> list[Tool]:
                     "index_mode": {"type": "string", "enum": ["summary", "full", "metadata_only"], "description": "How ingested content is stored"},
                     "local_storage_cap_mb": {"type": "integer", "description": "Max local content storage in MB (-1 for unlimited)"},
                     "onboarding_mode": {"type": "string", "enum": ["graduated", "full_access"], "description": "Onboarding preset: 'graduated' (default) or 'full_access' (sets horizon=-1, storage=-1, index=full)"},
+                    "pruning_mode": {"type": "string", "enum": ["interaction", "none"], "description": "Member pruning policy: 'interaction' (prune inactive after grace period) or 'none' (never prune)"},
                     "pruning_grace_days": {"type": "integer", "description": "Days of inactivity before a member can be pruned (default 14). Only applies when pruning_mode is 'interaction'."},
                     "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
                 },
@@ -444,7 +445,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="dugg_events",
-            description="Get recent events across your subscribed instances and collections. Events include resource_added, resource_published, member_joined, member_banned, publish_delivered, reaction_added.",
+            description="Get recent events across your subscribed instances and collections. Events include resource_added, resource_published, resource_deleted, member_joined, member_banned, invite_created, invite_redeemed, publish_delivered, reaction_added.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -561,7 +562,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="dugg_instance_policy",
-            description="Get the current policy configuration for a Dugg instance — read horizon, index mode, storage cap, onboarding mode, pruning mode, and rate limits.",
+            description="Get the current policy configuration for a Dugg instance — onboarding mode, read horizon, index mode, storage cap, rate limits, pruning mode, pruning grace period, and access mode.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1209,6 +1210,8 @@ def _handle_instance_update(d: DuggDB, user_id: str, args: dict) -> list[TextCon
         updates["index_mode"] = args["index_mode"]
     if "local_storage_cap_mb" in args and args["local_storage_cap_mb"] is not None:
         updates["local_storage_cap_mb"] = args["local_storage_cap_mb"]
+    if args.get("pruning_mode"):
+        updates["pruning_mode"] = args["pruning_mode"]
     if "pruning_grace_days" in args and args["pruning_grace_days"] is not None:
         updates["pruning_grace_days"] = args["pruning_grace_days"]
     # Handle onboarding_mode preset — overrides individual settings

@@ -54,7 +54,7 @@ Dugg is an MCP server that acts as a shared, searchable filing cabinet for links
 - **Ban cascades** — Ban a user and prune their invite tree. Depth 1 = hard ban (no exceptions). Depth 2+ = 14-day grace period, then credit score decides survival. Owner cannot be banned. Pending publishes auto-cancelled on ban
 - **Succession** — Designate a successor for instance ownership. If the owner is incapacitated, ownership transfers to the successor with all collections re-rooted
 - **URL validation** — Scheme whitelist (`http`, `https`), domain blocklist (`blocklist.txt`), and automatic tracking parameter stripping (UTM, fbclid, gclid, etc.)
-- **Pruning policy** — Instance-level `pruning_mode` controls member lifecycle. `interaction` (default): members must show activity (submissions, reactions, feed visits, or agent touches) or get flagged after grace period. `none`: no automated pruning — once you're in, you're in. Feed visits and agent tool calls reset the activity clock, and agent activity cascades to their human
+- **Pruning policy** — Instance-level `pruning_mode` controls member lifecycle. `interaction` (default): members must show activity (submissions, reactions, feed visits, or agent touches) or get flagged after a configurable grace period (default 14 days). `none`: no automated pruning — once you're in, you're in. Feed visits and agent tool calls reset the activity clock, and agent activity cascades to their human
 - **Appeals** — Banned users appeal with their contribution history. Owner (or owner's agent) decides
 - **Rate limiting** — Tenure-based submission caps. New members start at N posts/day (owner-configured, default 5), growing by X per day of membership. Longer in the mix = higher cap. Prevents fresh-account spam without punishing established contributors
 - **Read horizon** — Graduated content visibility based on membership tenure. New members see the last 30 days of content, unlocking 7 more days per week of membership. Instance owners control the base window and growth rate, or set `-1` for full history
@@ -237,7 +237,7 @@ Add to your OpenClaw config:
 | `dugg_reactions` | View reaction counts on your resources. Only visible to the resource submitter. |
 | `dugg_instance_create` | Create a hosted Dugg instance with topic and access mode. |
 | `dugg_instance_list` | List instances you're subscribed to with their topics. |
-| `dugg_instance_update` | Update an instance's topic or access mode (owner only). |
+| `dugg_instance_update` | Update instance configuration: name, topic, access mode, endpoint, read horizon, index mode, storage cap, pruning mode/grace period, onboarding preset (owner only). |
 | `dugg_invite` | Invite a user to a collection with invite tree tracking. |
 | `dugg_ban` | Ban a user with smart cascade through their invite tree. Optional `purge` deletes all their resources (owner only). |
 | `dugg_delete_resource` | Permanently delete a single resource from a collection — for malware links, spam, or policy violations (owner only). |
@@ -249,7 +249,7 @@ Add to your OpenClaw config:
 | `dugg_rate_limit_status` | Check your current daily post usage vs. cap for a collection. |
 | `dugg_publish_status` | Check publish sync queue status — pending, delivered, failed counts. |
 | `dugg_publish_retry` | Retry all failed publishes — resets them back to pending. |
-| `dugg_events` | Get recent events across subscribed instances (add, publish, join, ban, reaction). |
+| `dugg_events` | Get recent events across subscribed instances (add, publish, delete, join, ban, invite created/redeemed, publish delivered, reaction). |
 | `dugg_catchup` | Get unseen events since your last check. Oldest-first by default for timeline reading. |
 | `dugg_mark_seen` | Advance your read cursor after reviewing catchup results. |
 | `dugg_webhook_subscribe` | Subscribe a callback URL to receive real-time event notifications. |
@@ -259,7 +259,7 @@ Add to your OpenClaw config:
 | `dugg_share` | Share a collection with another user, with optional tag filters. |
 | `dugg_create_user` | Create a new user with a linked agent account. Returns both a user key and an agent key. Banning the user revokes the agent key too. |
 | `dugg_invite_user` | Create an invite token with a browser redemption link — send via any channel. |
-| `dugg_instance_policy` | Get the current policy configuration for an instance — read horizon, index mode, storage cap, pruning mode, and rate limits. |
+| `dugg_instance_policy` | Get the current policy configuration for an instance — onboarding mode, read horizon, index mode, storage cap, rate limits, pruning mode, pruning grace period, and access mode. |
 | `dugg_publish_clear` | Delete failed publish queue entries. Optionally scoped to a target instance. Owner only. |
 | `dugg_publish_retry_selective` | Retry specific failed publishes — by ID or by target instance. More surgical than dugg_publish_retry. |
 | `dugg_prune_inactive` | List or remove members past their grace period with zero activity. Respects instance `pruning_mode` — disabled when set to `none`. |
@@ -379,7 +379,7 @@ The API key in the URL acts as authentication. Matches the existing dark theme f
         │                     │
 ┌───────▼───────┐    ┌────────▼────────┐
 │  Storage      │    │  Endpoints      │
-│  17 tables    │    │  /ingest        │
+│  19 tables    │    │  /ingest        │
 │  FTS5 index   │    │  /tools/{name}  │
 │  Event log    │    │  /events/stream │
 │  Publish queue│    │  /feed/{key}    │
@@ -670,9 +670,8 @@ Designate a successor for instance ownership. If the owner is incapacitated, own
 # Owner designates a successor (must be an existing subscriber)
 dugg_set_successor(instance_id="abc123", successor_id="trusted_user")
 
-# Transfer ownership when needed
-# Re-roots all collections under the successor, transfers instance ownership, clears successor designation
-trigger_succession(instance_id="abc123")
+# Succession is automatic — if the owner's account is incapacitated,
+# the successor inherits ownership of the instance and all collections.
 ```
 
 ## URL validation
@@ -689,7 +688,7 @@ Instance owners control how aggressively members get pruned via `pruning_mode`:
 
 ### `interaction` (default)
 
-After the 14-day grace period, members with zero submissions, zero reactions, and no recent activity (feed visits, agent touches) are flagged as inactive. The 60-day stale member timeout surfaces members who've gone completely dark.
+After the grace period (configurable per-instance, default 14 days), members with zero submissions, zero reactions, and no recent activity (feed visits, agent touches) are flagged as inactive. The 60-day stale member timeout surfaces members who've gone completely dark.
 
 Activity that resets the clock:
 - Visiting `/feed/{key}` in a browser
@@ -701,7 +700,7 @@ Activity that resets the clock:
 dugg_prune_inactive(collection_id="abc")
 
 # Remove them
-dugg_prune_inactive(collection_id="abc", execute=true)
+dugg_prune_inactive(collection_id="abc", execute=True)
 ```
 
 Pruning is manual (owner-initiated) — the tool shows who's inactive so the owner can decide.
@@ -711,9 +710,14 @@ Pruning is manual (owner-initiated) — the tool shows who's inactive so the own
 No automated pruning. Once a member is in, they stay in until the owner manually bans them. Both the inactive member check and the stale member timeout are disabled. Good for small trusted groups where read-only consumers are welcome.
 
 ```
-# Set pruning mode on an instance
-dugg_instance_policy  # to view current policy
-update_instance(instance_id="...", owner_id="...", pruning_mode="none")
+# View current policy
+dugg_instance_policy(instance_id="...")
+
+# Switch pruning mode
+dugg_instance_update(instance_id="...", pruning_mode="none")
+
+# Or configure grace period (only applies in 'interaction' mode)
+dugg_instance_update(instance_id="...", pruning_grace_days=30)
 ```
 
 ## Auto-routing
@@ -939,7 +943,7 @@ uv run pytest tests/test_db.py -v
 
 **Infrastructure** — Dual transport (stdio + HTTP/SSE), hosted instances with topic descriptors, agent auto-routing via routing manifest, tenure-based rate limiting, `.dugg-env` config discovery
 
-**Observability** — Event emission (8 event types), read cursors with catchup, webhook subscriptions (instance-scoped or server-wide) with HMAC signing and auto-pause, Slack webhook notifications with rich formatting, `dugg health` and `dugg status` commands
+**Observability** — Event emission (9 event types), read cursors with catchup, webhook subscriptions (instance-scoped or server-wide) with HMAC signing and auto-pause, Slack webhook notifications with rich formatting, `dugg health` and `dugg status` commands
 
 **Onboarding** — Invite tokens with browser or agent-driven redemption (content-negotiated JSON), read-only browser feed (HTML + Atom), welcome orientation tool, portable `/dugg` slash command for any MCP agent
 
