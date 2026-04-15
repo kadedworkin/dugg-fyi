@@ -63,18 +63,18 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (res.ok) {
         toast.textContent = "\u2713 Sent to agent";
         toast.className = "toast success";
-        digBtn.textContent = "Dug!";
+        digBtn.textContent = "Dugg!";
       } else {
         const data = await res.json().catch(() => ({}));
         toast.textContent = "\u2717 " + (data.error || `Error ${res.status}`);
         toast.className = "toast error";
-        digBtn.textContent = "Dig it";
+        digBtn.textContent = "Dugg it";
         digBtn.disabled = false;
       }
     } catch (err) {
       toast.textContent = "\u2717 Failed \u2014 check connection";
       toast.className = "toast error";
-      digBtn.textContent = "Dig it";
+      digBtn.textContent = "Dugg it";
       digBtn.disabled = false;
     }
   });
