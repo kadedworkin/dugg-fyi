@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "Dig This",
+  "version": "1.0.0",
+  "description": "Send the current page to your Dugg agent for enrichment and publication.",
+  "permissions": ["activeTab", "storage"],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/dig-16.png",
+      "48": "icons/dig-48.png",
+      "128": "icons/dig-128.png"
+    }
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": false
+  },
+  "icons": {
+    "16": "icons/dig-16.png",
+    "48": "icons/dig-48.png",
+    "128": "icons/dig-128.png"
+  }
+}

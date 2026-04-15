@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    width: 280px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    background: #0a0a0a;
+    color: #e0e0e0;
+    padding: 16px;
+  }
+  .title-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+  .title-row h1 {
+    font-size: 14px;
+    font-weight: 600;
+    color: #fff;
+  }
+  .page-title {
+    font-size: 12px;
+    color: #888;
+    margin-bottom: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .note-input {
+    width: 100%;
+    padding: 8px;
+    background: #111;
+    border: 1px solid #333;
+    border-radius: 6px;
+    color: #fff;
+    font-size: 12px;
+    margin-bottom: 12px;
+    resize: vertical;
+    min-height: 36px;
+    max-height: 80px;
+    font-family: inherit;
+  }
+  .note-input::placeholder { color: #555; }
+  .note-input:focus { outline: none; border-color: #6366f1; }
+  button {
+    width: 100%;
+    padding: 10px;
+    background: #6366f1;
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button:hover { background: #5558e6; }
+  button:disabled { background: #333; cursor: default; }
+  .toast {
+    margin-top: 10px;
+    padding: 8px;
+    border-radius: 6px;
+    font-size: 12px;
+    text-align: center;
+    display: none;
+  }
+  .toast.success { display: block; background: #052e16; color: #4ade80; border: 1px solid #166534; }
+  .toast.error { display: block; background: #2a0a0a; color: #f87171; border: 1px solid #7f1d1d; }
+  .setup-link {
+    display: block;
+    text-align: center;
+    margin-top: 10px;
+    font-size: 11px;
+    color: #666;
+    text-decoration: none;
+  }
+  .setup-link:hover { color: #888; }
+  .not-configured {
+    text-align: center;
+    padding: 12px 0;
+  }
+  .not-configured p {
+    font-size: 12px;
+    color: #888;
+    margin-bottom: 10px;
+  }
+  .not-configured a {
+    color: #6366f1;
+    text-decoration: none;
+    font-size: 12px;
+  }
+  .selection-note {
+    font-size: 11px;
+    color: #555;
+    margin-bottom: 8px;
+    font-style: italic;
+  }
+</style>
+</head>
+<body>
+  <div id="main" style="display:none;">
+    <div class="title-row">
+      <h1>Dig This</h1>
+    </div>
+    <div class="page-title" id="pageTitle"></div>
+    <div class="selection-note" id="selectionNote" style="display:none;">Selected text will be included as a note.</div>
+    <textarea class="note-input" id="note" placeholder="Why this matters... (optional)" rows="2"></textarea>
+    <button id="digBtn">Dig it</button>
+    <div class="toast" id="toast"></div>
+    <a href="#" class="setup-link" id="settingsLink">Settings</a>
+  </div>
+  <div id="setup" style="display:none;">
+    <div class="not-configured">
+      <p>Set up your agent connection first.</p>
+      <a href="#" id="openSettings">Open Settings</a>
+    </div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>
