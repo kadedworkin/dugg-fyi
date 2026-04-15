@@ -334,7 +334,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="dugg_invite",
-            description="Invite a user to a collection. Tracks who invited whom for the invite tree.",
+            description="Invite a user to a collection. Tracks who invited whom for the invite tree. Depth cap: 15 levels.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1523,7 +1523,12 @@ def _handle_rate_limit_status(d: DuggDB, user_id: str, args: dict) -> list[TextC
         return [TextContent(type="text", text="You're not a member of this collection")]
     if status["cap"] == -1:
         return [TextContent(type="text", text="No rate limit configured for this collection.")]
-    return [TextContent(type="text", text=f"Rate limit status:\n  Today: {status['current']}/{status['cap']} posts used\n  Member for: {status['days_member']} day(s)\n  {'Can post' if status['allowed'] else 'Rate limit reached — try again tomorrow'}")]
+    remaining = status['cap'] - status['current']
+    if status['allowed']:
+        status_line = f"Can post {remaining} more today"
+    else:
+        status_line = "Rate limit reached — resets at UTC midnight"
+    return [TextContent(type="text", text=f"Rate limit status:\n  Today: {status['current']}/{status['cap']} posts used\n  Member for: {status['days_member']} day(s)\n  {status_line}")]
 
 
 def _handle_publish_clear(d: DuggDB, args: dict) -> list[TextContent]:

@@ -242,3 +242,159 @@ def test_tool_dispatch_rich_format_default(client):
     assert resp.status_code == 200
     data = resp.json()
     assert data["format"] == "rich"
+
+
+# --- Invite Flow (HTTP) ---
+
+def test_invite_page_invalid_token(client):
+    c, user = client
+    resp = c.get("/invite/nonexistent-token")
+    assert resp.status_code == 404
+    assert "Invalid invite" in resp.text
+
+
+def test_invite_page_invalid_token_json(client):
+    c, user = client
+    resp = c.get("/invite/nonexistent-token", headers={"Accept": "application/json"})
+    assert resp.status_code == 404
+    data = resp.json()
+    assert data["error"] == "Invalid invite token"
+
+
+def test_invite_page_html(client):
+    c, user = client
+    db = DuggDB(Path(c.app.state._db_path) if hasattr(c.app.state, '_db_path') else None)
+    # Reopen the DB to create an invite
+    import os
+    db_path = os.environ.get("DUGG_DB_PATH")
+    db = DuggDB(Path(db_path))
+    invite = db.create_invite_token(user["id"], name_hint="Rocco")
+    db.close()
+    resp = c.get(f"/invite/{invite['token']}")
+    assert resp.status_code == 200
+    assert "Rocco" in resp.text
+    assert "Join" in resp.text
+
+
+def test_invite_page_json(client):
+    c, user = client
+    import os
+    db = DuggDB(Path(os.environ["DUGG_DB_PATH"]))
+    invite = db.create_invite_token(user["id"], name_hint="Rocco")
+    db.close()
+    resp = c.get(f"/invite/{invite['token']}", headers={"Accept": "application/json"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "pending"
+    assert data["invite"]["invited_by"] == "TestUser"
+    assert data["invite"]["name_hint"] == "Rocco"
+    assert "redeem" in data
+    assert data["redeem"]["method"] == "POST"
+    assert "after_redeem" in data
+    assert data["after_redeem"]["first_call"].startswith("dugg_welcome")
+    assert "partner_guide" in data["after_redeem"]
+
+
+def test_invite_redeem_html(client):
+    c, user = client
+    import os
+    db = DuggDB(Path(os.environ["DUGG_DB_PATH"]))
+    invite = db.create_invite_token(user["id"], name_hint="Rocco")
+    db.close()
+    resp = c.post(f"/invite/{invite['token']}/redeem", data={"name": "Rocco"})
+    assert resp.status_code == 200
+    assert "You're in" in resp.text
+    assert "Rocco" in resp.text
+    assert "dugg_" in resp.text  # API keys should be visible
+
+
+def test_invite_redeem_json(client):
+    c, user = client
+    import os
+    db = DuggDB(Path(os.environ["DUGG_DB_PATH"]))
+    invite = db.create_invite_token(user["id"], name_hint="Rocco")
+    db.close()
+    resp = c.post(f"/invite/{invite['token']}/redeem",
+                  json={"name": "Rocco"},
+                  headers={"Content-Type": "application/json"})
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["status"] == "redeemed"
+    assert data["user"]["name"] == "Rocco"
+    assert "api_key" in data["user"]
+    assert "api_key" in data["agent"]
+    assert data["user"]["api_key"] != data["agent"]["api_key"]
+    assert "endpoints" in data
+    assert "quickstart" in data
+    assert len(data["quickstart"]) == 3
+
+
+def test_invite_redeem_already_used(client):
+    c, user = client
+    import os
+    db = DuggDB(Path(os.environ["DUGG_DB_PATH"]))
+    invite = db.create_invite_token(user["id"], name_hint="Rocco")
+    db.close()
+    # First redemption
+    c.post(f"/invite/{invite['token']}/redeem", data={"name": "Rocco"})
+    # Second attempt
+    resp = c.post(f"/invite/{invite['token']}/redeem", data={"name": "Someone Else"})
+    assert resp.status_code == 400
+    assert "invalid" in resp.text.lower() or "expired" in resp.text.lower() or "already" in resp.text.lower()
+
+
+def test_invite_redeem_already_used_json(client):
+    c, user = client
+    import os
+    db = DuggDB(Path(os.environ["DUGG_DB_PATH"]))
+    invite = db.create_invite_token(user["id"], name_hint="Rocco")
+    db.close()
+    c.post(f"/invite/{invite['token']}/redeem",
+           json={"name": "Rocco"},
+           headers={"Content-Type": "application/json"})
+    resp = c.post(f"/invite/{invite['token']}/redeem",
+                  json={"name": "Someone"},
+                  headers={"Content-Type": "application/json"})
+    assert resp.status_code == 400
+    data = resp.json()
+    assert "error" in data
+
+
+def test_invite_expired_token(client):
+    c, user = client
+    import os
+    db = DuggDB(Path(os.environ["DUGG_DB_PATH"]))
+    invite = db.create_invite_token(user["id"], name_hint="Rocco", expires_hours=0)
+    db.close()
+    import time
+    time.sleep(0.1)
+    resp = c.get(f"/invite/{invite['token']}")
+    assert resp.status_code == 410
+    assert "expired" in resp.text.lower()
+
+
+def test_invite_full_agent_flow(client):
+    """End-to-end: agent discovers invite via JSON, redeems it, then uses the agent key."""
+    c, user = client
+    import os
+    db = DuggDB(Path(os.environ["DUGG_DB_PATH"]))
+    invite = db.create_invite_token(user["id"], name_hint="Miles")
+    db.close()
+    # Step 1: Discover
+    resp = c.get(f"/invite/{invite['token']}", headers={"Accept": "application/json"})
+    assert resp.status_code == 200
+    discover = resp.json()
+    assert discover["invite"]["name_hint"] == "Miles"
+    # Step 2: Redeem
+    resp = c.post(f"/invite/{invite['token']}/redeem",
+                  json={"name": "Miles (Agent)"},
+                  headers={"Content-Type": "application/json"})
+    assert resp.status_code == 201
+    redeem = resp.json()
+    agent_key = redeem["agent"]["api_key"]
+    # Step 3: Use the agent key to call a tool
+    resp = c.post("/tools/dugg_welcome", json={},
+                  headers={"X-Dugg-Key": agent_key})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "Miles" in data["result"]
