@@ -305,10 +305,52 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
             return HTMLResponse(_html_page("Invalid Invite", "<h1>Invalid invite</h1><p>This invite link is not valid.</p>"), status_code=404)
 
         if invite.get("redeemed_by"):
+            if invite.get("onboarded_at"):
+                accept = request.headers.get("accept", "")
+                if "application/json" in accept:
+                    return JSONResponse({"error": "This invite has already been redeemed"}, status_code=410)
+                return HTMLResponse(_html_page("Already Redeemed", "<h1>Already redeemed</h1><p>This invite has already been used.</p>"), status_code=410)
+            # Not yet onboarded — show welcome page with keys so they can retrieve them
+            user = d.get_user(invite["redeemed_by"])
+            agents = d.get_agents_for_user(invite["redeemed_by"])
+            agent = agents[0] if agents else None
+            if not user or not agent:
+                accept = request.headers.get("accept", "")
+                if "application/json" in accept:
+                    return JSONResponse({"error": "This invite has already been redeemed"}, status_code=410)
+                return HTMLResponse(_html_page("Already Redeemed", "<h1>Already redeemed</h1><p>This invite has already been used.</p>"), status_code=410)
+            inviter = d.get_user(invite["created_by"])
+            instance = d.get_instance_for_owner(invite["created_by"])
+            endpoint = instance.get("endpoint_url", "").rstrip("/") if instance else ""
+            if not endpoint:
+                endpoint = d.get_config("server_url", "")
             accept = request.headers.get("accept", "")
             if "application/json" in accept:
-                return JSONResponse({"error": "This invite has already been redeemed"}, status_code=410)
-            return HTMLResponse(_html_page("Already Redeemed", "<h1>Already redeemed</h1><p>This invite has already been used.</p>"), status_code=410)
+                server_url_json = endpoint or ""
+                return JSONResponse({
+                    "status": "redeemed_pending_onboarding",
+                    "user": {"id": user["id"], "name": user["name"], "api_key": user["api_key"]},
+                    "agent": {"id": agent["id"], "name": agent["name"], "api_key": agent["api_key"]},
+                    "endpoints": {
+                        "sse": f"{server_url_json}/sse" if server_url_json else None,
+                        "feed": f"{server_url_json}/feed/{user['api_key']}" if server_url_json else None,
+                        "health": f"{server_url_json}/health" if server_url_json else None,
+                    },
+                    "message": "Invite already redeemed. Keys shown again because onboarding is not yet complete. Visit your feed to finalize.",
+                })
+            feed_url = f"{endpoint}/feed/{user['api_key']}" if endpoint else f"/feed/{user['api_key']}"
+            body = f"""
+<h1>Welcome back, {_xml_escape(user['name'])}!</h1>
+<p>You've already redeemed this invite. Here are your keys again — once you <a href="{feed_url}" style="color: #93c5fd;">visit your feed</a>, this page will lock.</p>
+<h3>Your key</h3>
+<div class="key-box">{user['api_key']}</div>
+<h3>Your agent's key</h3>
+<div class="key-box">{agent['api_key']}</div>
+<p style="font-size: 0.85em; color: #666;">Give the agent key to your AI agent. If your account gets banned, your agent goes too.</p>
+<div class="next-steps">
+  <a href="{feed_url}" style="color: #93c5fd; font-size: 1.1em;">Open your feed to complete onboarding &rarr;</a>
+</div>"""
+            return HTMLResponse(_html_page("Welcome Back", body))
 
         from datetime import datetime, timezone
         if datetime.fromisoformat(invite["expires_at"]) < datetime.now(timezone.utc):
@@ -537,6 +579,7 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
             return HTMLResponse(_html_page("Not Found", "<h1>Invalid key</h1><p>This feed URL is not valid.</p>"), status_code=404)
 
         d.touch_user(user["id"])
+        d.mark_invite_onboarded(user["id"])
 
         # Check Accept header for Atom/RSS preference
         accept = request.headers.get("accept", "")

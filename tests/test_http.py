@@ -373,6 +373,61 @@ def test_invite_expired_token(client):
     assert "expired" in resp.text.lower()
 
 
+def test_invite_page_shows_keys_before_onboarding(client):
+    """After redemption, invite URL shows keys until user visits their feed."""
+    c, user = client
+    import os
+    db = DuggDB(Path(os.environ["DUGG_DB_PATH"]))
+    invite = db.create_invite_token(user["id"], name_hint="Rocco")
+    db.close()
+    # Redeem
+    resp = c.post(f"/invite/{invite['token']}/redeem", data={"name": "Rocco"})
+    assert resp.status_code == 200
+    # Visit invite page again — should show keys (not "already redeemed")
+    resp = c.get(f"/invite/{invite['token']}")
+    assert resp.status_code == 200
+    assert "Welcome back" in resp.text
+    assert "dugg_" in resp.text  # keys visible
+
+
+def test_invite_page_shows_keys_json_before_onboarding(client):
+    """JSON: after redemption, invite URL returns keys until feed is visited."""
+    c, user = client
+    import os
+    db = DuggDB(Path(os.environ["DUGG_DB_PATH"]))
+    invite = db.create_invite_token(user["id"], name_hint="Rocco")
+    db.close()
+    c.post(f"/invite/{invite['token']}/redeem",
+           json={"name": "Rocco"},
+           headers={"Content-Type": "application/json"})
+    resp = c.get(f"/invite/{invite['token']}", headers={"Accept": "application/json"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "redeemed_pending_onboarding"
+    assert "api_key" in data["user"]
+    assert "api_key" in data["agent"]
+
+
+def test_invite_page_locks_after_feed_visit(client):
+    """After visiting feed, invite URL shows 'already redeemed'."""
+    c, user = client
+    import os
+    db = DuggDB(Path(os.environ["DUGG_DB_PATH"]))
+    invite = db.create_invite_token(user["id"], name_hint="Rocco")
+    db.close()
+    # Redeem
+    resp = c.post(f"/invite/{invite['token']}/redeem",
+                  json={"name": "Rocco"},
+                  headers={"Content-Type": "application/json"})
+    new_user_key = resp.json()["user"]["api_key"]
+    # Visit feed — completes onboarding
+    c.get(f"/feed/{new_user_key}")
+    # Now invite page should be locked
+    resp = c.get(f"/invite/{invite['token']}")
+    assert resp.status_code == 410
+    assert "Already redeemed" in resp.text
+
+
 def test_invite_full_agent_flow(client):
     """End-to-end: agent discovers invite via JSON, redeems it, then uses the agent key."""
     c, user = client

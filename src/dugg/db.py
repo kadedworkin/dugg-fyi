@@ -333,6 +333,10 @@ class DuggDB:
         if "source_server" not in res_cols:
             self.conn.execute("ALTER TABLE resources ADD COLUMN source_server TEXT DEFAULT ''")
 
+        inv_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(invite_tokens)").fetchall()}
+        if "onboarded_at" not in inv_cols:
+            self.conn.execute("ALTER TABLE invite_tokens ADD COLUMN onboarded_at TEXT DEFAULT NULL")
+
         cm_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(collection_members)").fetchall()}
         if "ip_address" not in cm_cols:
             self.conn.execute("ALTER TABLE collection_members ADD COLUMN ip_address TEXT DEFAULT NULL")
@@ -1455,6 +1459,15 @@ class DuggDB:
         """Look up an invite token by its slug."""
         row = self.conn.execute("SELECT * FROM invite_tokens WHERE token = ?", (token,)).fetchone()
         return dict(row) if row else None
+
+    def mark_invite_onboarded(self, user_id: str):
+        """Mark the invite token used by this user as onboarded (feed accessed)."""
+        now = _now()
+        self.conn.execute(
+            "UPDATE invite_tokens SET onboarded_at = ? WHERE redeemed_by = ? AND onboarded_at IS NULL",
+            (now, user_id),
+        )
+        self.conn.commit()
 
     def list_invite_tokens(self, created_by: Optional[str] = None) -> list[dict]:
         """List invite tokens. Optionally filter by creator."""

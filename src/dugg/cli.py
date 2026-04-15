@@ -213,7 +213,8 @@ def cmd_invites(args):
         if t.get("redeemed_by"):
             redeemer = db.get_user(t["redeemed_by"])
             redeemer_name = redeemer["name"] if redeemer else t["redeemed_by"]
-            print(f"  {name} — redeemed by {redeemer_name} at {t['redeemed_at']}")
+            onboard_status = " (onboarded)" if t.get("onboarded_at") else " (awaiting first feed visit)"
+            print(f"  {name} — redeemed by {redeemer_name} at {t['redeemed_at']}{onboard_status}")
             redeemed += 1
         elif datetime.fromisoformat(t["expires_at"]) < now:
             print(f"  {name} — expired ({t['expires_at']})")

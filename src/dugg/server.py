@@ -890,6 +890,7 @@ def _handle_search(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
 
 
 def _handle_feed(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    d.mark_invite_onboarded(user_id)
     limit = args.get("limit", 50)
     results = d.get_feed(user_id, limit=limit)
 
@@ -1050,7 +1051,8 @@ def _handle_invites(d: DuggDB, user_id: str) -> list[TextContent]:
         if t.get("redeemed_by"):
             redeemer = d.get_user(t["redeemed_by"])
             redeemer_name = redeemer["name"] if redeemer else t["redeemed_by"]
-            lines.append(f"  {name} — redeemed by {redeemer_name} at {t['redeemed_at']}")
+            onboard_status = " (onboarded)" if t.get("onboarded_at") else " (awaiting first feed visit)"
+            lines.append(f"  {name} — redeemed by {redeemer_name} at {t['redeemed_at']}{onboard_status}")
             redeemed += 1
         elif datetime.fromisoformat(t["expires_at"]) < now:
             lines.append(f"  {name} — expired ({t['expires_at']})")
