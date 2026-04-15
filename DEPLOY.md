@@ -251,6 +251,27 @@ The recipient clicks the link, enters their name, and gets their API key.
 
 ---
 
+## 10. Email forwarding (optional)
+
+Let users forward emails into your Dugg instance using self-describing addresses like `your-server.com+dugg_apikey@dugg.fyi`.
+
+This requires a Cloudflare account with `dugg.fyi` (or your own domain) configured for Email Routing. The worker lives in `email-worker/` in this repo.
+
+```bash
+cd email-worker
+npm install
+wrangler login
+wrangler deploy
+```
+
+Then in the Cloudflare dashboard:
+1. **Email Routing** → enable for your domain
+2. Set a **catch-all** rule → route to `dugg-email-worker`
+
+No configuration on the Dugg server side — the worker parses the address and POSTs directly to `/tools/dugg_paste`.
+
+---
+
 ## Updating Dugg
 
 When there's a new version:

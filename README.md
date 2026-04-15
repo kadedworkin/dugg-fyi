@@ -37,7 +37,7 @@ Dugg is an MCP server that acts as a shared, searchable filing cabinet for links
 
 ## How it works
 
-1. **You share a link** (via your agent, a Slack channel, a share sheet — whatever)
+1. **You share a link** (via your agent, a Slack channel, email forwarding, a share sheet — whatever)
 2. **Your agent processes it** — pulls metadata, transcripts, generates tags
 3. **Dugg stores it** — indexed for full-text search, organized into collections
 4. **Anyone with access can query it** — "that video about webhook architectures" just works
@@ -405,6 +405,50 @@ Set up a Slack app with a slash command pointing to your server:
 - `/dugg search terms` → searches and shows results
 
 The command auto-matches the Slack `user_name` to a Dugg user by name.
+
+## Email forwarding
+
+Forward emails directly into Dugg using self-describing email addresses. No email stored on the server — no PII, no registration, no lookup tables.
+
+### How it works
+
+Each Dugg user gets an email address that encodes their server and API key:
+
+```
+{server-hostname}+{api-key}@dugg.fyi
+```
+
+**Example:** `chino-bandido.kadedworkin.com+dugg_2c7e7d3892ee4cdc96ae0eb62b48f89b@dugg.fyi`
+
+When an email arrives:
+1. Cloudflare Email Worker receives it
+2. Splits the local part on `+` → server hostname + API key
+3. POSTs the email body to `https://{hostname}/tools/dugg_paste` with the API key
+4. Email subject becomes the title, sender becomes the source label
+5. Content is indexed and searchable like any other resource
+
+Fire-and-forget — no retries, no error handling, no queues. If the server is down, the email is silently dropped.
+
+### Deploy the worker
+
+The email worker lives in `email-worker/` — a Cloudflare Email Worker (~25 lines):
+
+```bash
+cd email-worker
+npm install
+wrangler login
+wrangler deploy
+```
+
+Then in Cloudflare dashboard:
+1. **Email Routing** → enable for `dugg.fyi`
+2. Set **catch-all** rule → route to `dugg-email-worker`
+
+### Use cases
+
+- **Newsletter forwarding** — set `{server}+{key}@dugg.fyi` as your subscription email
+- **Email-to-Dugg** — forward interesting emails from any client
+- **Automated ingestion** — any system that can send email can push content to Dugg
 
 ## Browser admin panel
 
@@ -1012,7 +1056,7 @@ uv run pytest tests/test_db.py -v
 
 **Onboarding** — Invite tokens with browser or agent-driven redemption (content-negotiated JSON), read-only browser feed (HTML + Atom), welcome orientation tool, portable `/dugg` slash command for any MCP agent, `/bootstrap` first-user creation, `server_url` auto-detection on HTTP serve
 
-**Integrations** — Slack incoming webhooks (auto-detected, rich blocks), Slack slash command endpoint (`/slack/command`), browser admin panel with ban/unban/remove
+**Integrations** — Slack incoming webhooks (auto-detected, rich blocks), Slack slash command endpoint (`/slack/command`), browser admin panel with ban/unban/remove, email forwarding via Cloudflare Worker (self-describing `{host}+{key}@dugg.fyi` addresses, fire-and-forget)
 
 **CLI** — Full management: `status`, `health`, `servers`, `remove`, `edit`, `webhook` (add/list/remove/test), `set-config`, URL auto-routing
 

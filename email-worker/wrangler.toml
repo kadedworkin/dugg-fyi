@@ -1,0 +1,12 @@
+name = "dugg-email-worker"
+main = "src/worker.js"
+compatibility_date = "2024-09-01"
+
+[triggers]
+routes = []
+
+[[email_routing.matchers]]
+type = "all"
+
+[[email_routing.handlers]]
+type = "worker"
