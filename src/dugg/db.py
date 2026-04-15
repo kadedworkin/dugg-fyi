@@ -1461,11 +1461,16 @@ class DuggDB:
         return dict(row) if row else None
 
     def mark_invite_onboarded(self, user_id: str):
-        """Mark the invite token used by this user as onboarded (feed accessed)."""
+        """Mark the invite token used by this user as onboarded (first authenticated connection)."""
         now = _now()
+        # Try direct match first, then resolve parent if caller is an agent
+        target_id = user_id
+        parent = self.get_parent_user(user_id)
+        if parent:
+            target_id = parent["id"]
         self.conn.execute(
             "UPDATE invite_tokens SET onboarded_at = ? WHERE redeemed_by = ? AND onboarded_at IS NULL",
-            (now, user_id),
+            (now, target_id),
         )
         self.conn.commit()
 

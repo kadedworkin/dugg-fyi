@@ -408,20 +408,41 @@ def test_invite_page_shows_keys_json_before_onboarding(client):
     assert "api_key" in data["agent"]
 
 
-def test_invite_page_locks_after_feed_visit(client):
-    """After visiting feed, invite URL shows 'already redeemed'."""
+def test_invite_page_does_not_lock_on_feed_visit(client):
+    """Feed visit alone should NOT lock the invite page — only SSE/tool call does."""
     c, user = client
     import os
     db = DuggDB(Path(os.environ["DUGG_DB_PATH"]))
     invite = db.create_invite_token(user["id"], name_hint="Rocco")
     db.close()
-    # Redeem
     resp = c.post(f"/invite/{invite['token']}/redeem",
                   json={"name": "Rocco"},
                   headers={"Content-Type": "application/json"})
     new_user_key = resp.json()["user"]["api_key"]
-    # Visit feed — completes onboarding
     c.get(f"/feed/{new_user_key}")
+    # Invite page should still show keys — feed visit no longer locks it
+    resp = c.get(f"/invite/{invite['token']}")
+    assert resp.status_code == 200
+    assert "dugg_" in resp.text
+
+
+def test_invite_page_locks_after_tool_call(client):
+    """After an authenticated tool call, invite page should lock."""
+    c, user = client
+    import os
+    db = DuggDB(Path(os.environ["DUGG_DB_PATH"]))
+    invite = db.create_invite_token(user["id"], name_hint="Rocco")
+    db.close()
+    resp = c.post(f"/invite/{invite['token']}/redeem",
+                  json={"name": "Rocco"},
+                  headers={"Content-Type": "application/json"})
+    agent_key = resp.json()["agent"]["api_key"]
+    # Invite page should still show keys before any tool call
+    resp = c.get(f"/invite/{invite['token']}")
+    assert resp.status_code == 200
+    assert "dugg_" in resp.text
+    # Make an authenticated tool call
+    c.post("/tools/dugg_welcome", json={}, headers={"X-Dugg-Key": agent_key})
     # Now invite page should be locked
     resp = c.get(f"/invite/{invite['token']}")
     assert resp.status_code == 410
@@ -453,3 +474,33 @@ def test_invite_full_agent_flow(client):
     assert resp.status_code == 200
     data = resp.json()
     assert "Miles" in data["result"]
+
+
+# --- Bootstrap ---
+
+
+def test_bootstrap_creates_first_user(db_path):
+    """POST /bootstrap creates the first user when DB is empty."""
+    db = DuggDB(db_path)
+    db.close()
+    import os
+    os.environ["DUGG_DB_PATH"] = str(db_path)
+    import dugg.server as srv
+    srv.db = None
+    app = create_app(db_path=db_path)
+    with TestClient(app) as c:
+        resp = c.post("/bootstrap", json={"name": "FirstAdmin"})
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["status"] == "bootstrapped"
+        assert data["user"]["name"] == "FirstAdmin"
+        assert "dugg_" in data["user"]["api_key"]
+    srv.db = None
+
+
+def test_bootstrap_fails_when_users_exist(client):
+    """POST /bootstrap returns 400 when users already exist."""
+    c, user = client
+    resp = c.post("/bootstrap", json={"name": "Intruder"})
+    assert resp.status_code == 400
+    assert "already has users" in resp.json()["error"]

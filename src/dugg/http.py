@@ -90,6 +90,7 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
         user = d.get_user_by_api_key(api_key)
         if not user:
             return JSONResponse({"error": "Invalid API key"}, status_code=401)
+        d.mark_invite_onboarded(user["id"])
         async with sse_transport.connect_sse(
             request.scope, request.receive, request._send
         ) as streams:
@@ -185,6 +186,25 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
             "transport": "http+sse",
         })
 
+    async def handle_bootstrap(request: Request):
+        """POST /bootstrap — create the first admin user when DB has zero users."""
+        d = get_db()
+        count = d.conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        if count > 0:
+            return JSONResponse({"error": "Database already has users — bootstrap is disabled"}, status_code=400)
+        try:
+            body = await request.body()
+            data = json.loads(body) if body else {}
+        except json.JSONDecodeError:
+            return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+        name = data.get("name", "Admin")
+        user = d.create_user(name)
+        return JSONResponse({
+            "status": "bootstrapped",
+            "user": {"id": user["id"], "name": user["name"], "api_key": user["api_key"]},
+            "message": "First user created. Save this API key — it won't be shown again.",
+        }, status_code=201)
+
     async def handle_tools(request: Request):
         """POST /tools/{tool_name} — HTTP dispatch for any MCP tool.
 
@@ -202,6 +222,8 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
             user = resolve_user_from_request(request)
         except ValueError as e:
             return JSONResponse({"error": str(e)}, status_code=401)
+
+        get_db().mark_invite_onboarded(user["id"])
 
         try:
             body = await request.body()
@@ -336,19 +358,20 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
                         "feed": f"{server_url_json}/feed/{user['api_key']}" if server_url_json else None,
                         "health": f"{server_url_json}/health" if server_url_json else None,
                     },
-                    "message": "Invite already redeemed. Keys shown again because onboarding is not yet complete. Visit your feed to finalize.",
+                    "message": "Invite already redeemed. Keys shown again because onboarding is not yet complete. Connect to the server via SSE or make an authenticated tool call to finalize.",
                 })
             feed_url = f"{endpoint}/feed/{user['api_key']}" if endpoint else f"/feed/{user['api_key']}"
             body = f"""
 <h1>Welcome back, {_xml_escape(user['name'])}!</h1>
-<p>You've already redeemed this invite. Here are your keys again — once you <a href="{feed_url}" style="color: #93c5fd;">visit your feed</a>, this page will lock.</p>
+<p>You've already redeemed this invite. Here are your keys again — once your agent connects to the server (via SSE or a tool call), this page will lock.</p>
 <h3>Your key</h3>
 <div class="key-box">{user['api_key']}</div>
 <h3>Your agent's key</h3>
 <div class="key-box">{agent['api_key']}</div>
 <p style="font-size: 0.85em; color: #666;">Give the agent key to your AI agent. If your account gets banned, your agent goes too.</p>
 <div class="next-steps">
-  <a href="{feed_url}" style="color: #93c5fd; font-size: 1.1em;">Open your feed to complete onboarding &rarr;</a>
+  <p style="color: #93c5fd; font-size: 1.1em;">Connect your agent to the server to complete onboarding.</p>
+  <p style="font-size: 0.85em; color: #666; margin-top: 0.5rem;">Once your agent makes its first SSE connection or tool call, this page will lock and keys won't be shown again.</p>
 </div>"""
             return HTMLResponse(_html_page("Welcome Back", body))
 
@@ -570,7 +593,6 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
             return HTMLResponse(_html_page("Not Found", "<h1>Invalid key</h1><p>This feed URL is not valid.</p>"), status_code=404)
 
         d.touch_user(user["id"])
-        d.mark_invite_onboarded(user["id"])
 
         # Check Accept header for Atom/RSS preference
         accept = request.headers.get("accept", "")
@@ -1083,6 +1105,7 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
         Route("/messages", endpoint=handle_messages, methods=["POST"]),
         Route("/ingest", endpoint=handle_ingest, methods=["POST"]),
         Route("/health", endpoint=handle_health),
+        Route("/bootstrap", endpoint=handle_bootstrap, methods=["POST"]),
         Route("/invite/{token}", endpoint=handle_invite_page),
         Route("/invite/{token}/redeem", endpoint=handle_invite_redeem, methods=["POST"]),
         Route("/feed/{key}", endpoint=handle_feed),
@@ -1109,6 +1132,17 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
 def run_http(host: str = "0.0.0.0", port: int = 8411, db_path: Optional[Path] = None):
     """Run the Dugg HTTP server with uvicorn."""
     import uvicorn
+
+    # Auto-detect server_url if not already configured
+    _path = db_path or (Path(os.environ["DUGG_DB_PATH"]) if os.environ.get("DUGG_DB_PATH") else None)
+    if _path:
+        _db = DuggDB(_path)
+        if not _db.get_config("server_url"):
+            display_host = "localhost" if host in ("0.0.0.0", "::") else host
+            inferred = f"http://{display_host}:{port}"
+            _db.set_config("server_url", inferred)
+            logger.info("Auto-set server_url to %s (override with 'dugg set-url')", inferred)
+        _db.close()
 
     app = create_app(db_path=db_path)
     uvicorn.run(app, host=host, port=port, log_level="info")
