@@ -6,7 +6,20 @@ import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
+
+
+def dugg_email_address(api_key: str, server_url: str) -> str:
+    """Build a Dugg email forwarding address from an API key and server URL.
+
+    Format: {api_key}@{hostname-with-double-dashes}.dugg.fyi
+    """
+    from urllib.parse import urlparse
+    hostname = urlparse(server_url).hostname or ""
+    if not hostname:
+        return ""
+    slug = hostname.replace(".", "--")
+    return f"{api_key}@{slug}.dugg.fyi"
 
 
 def _read_dugg_env() -> dict:
@@ -483,6 +496,20 @@ class DuggDB:
             return None
         return self.get_user(row["user_id"])
 
+    def get_user_pair_ids(self, user_id: str) -> list[str]:
+        """Return the human+agent ID set for a user. Works whether called by human or agent."""
+        ids = [user_id]
+        parent = self.get_parent_user(user_id)
+        if parent:
+            ids.append(parent["id"])
+            for agent in self.get_agents_for_user(parent["id"]):
+                if agent["id"] != user_id:
+                    ids.append(agent["id"])
+        else:
+            for agent in self.get_agents_for_user(user_id):
+                ids.append(agent["id"])
+        return ids
+
     # --- Collections ---
 
     def create_collection(self, name: str, user_id: str, description: str = "", visibility: str = "private") -> dict:
@@ -569,7 +596,7 @@ class DuggDB:
             "collection_id": collection_id, "tags": tags or [], "created_at": now,
         }
         self.emit_event("resource_added", actor_id=submitted_by, collection_id=collection_id,
-                        payload={"resource_id": res_id, "url": url, "title": title, "note": note, "source_type": source_type})
+                        payload={"resource_id": res_id, "url": url, "title": title, "note": note, "source_type": source_type, "submitted_by": submitted_by})
         return result
 
     def update_resource(self, resource_id: str, **fields) -> Optional[dict]:
@@ -614,7 +641,7 @@ class DuggDB:
             results.append(d)
         return results
 
-    def search(self, query: str, user_id: str, collection_id: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 20) -> list[dict]:
+    def search(self, query: str, user_id: str, collection_id: Optional[str] = None, tags: Optional[list[str]] = None, submitted_by: Optional[Union[str, list[str]]] = None, limit: int = 20) -> list[dict]:
         """Full-text search across resources the user has access to."""
         accessible = self._accessible_collection_ids(user_id)
         if not accessible:
@@ -630,6 +657,17 @@ class DuggDB:
         # Build horizon WHERE clause
         horizon_sql, horizon_params = self._horizon_where_clause(user_id, accessible, horizon_filters)
 
+        submitter_sql = ""
+        submitter_params: list = []
+        if submitted_by:
+            if isinstance(submitted_by, list):
+                ph = ",".join("?" for _ in submitted_by)
+                submitter_sql = f" AND r.submitted_by IN ({ph})"
+                submitter_params = submitted_by
+            else:
+                submitter_sql = " AND r.submitted_by = ?"
+                submitter_params = [submitted_by]
+
         if query.strip():
             # FTS5 search
             fts_query = query.replace('"', '""')
@@ -640,20 +678,22 @@ class DuggDB:
                 WHERE resources_fts MATCH ?
                   AND r.collection_id IN ({placeholders})
                   {horizon_sql}
+                  {submitter_sql}
                 ORDER BY resources_fts.rank
                 LIMIT ?
             """
-            params = [fts_query] + accessible + horizon_params + [limit]
+            params = [fts_query] + accessible + horizon_params + submitter_params + [limit]
         else:
             sql = f"""
                 SELECT r.*, 0 as rank
                 FROM resources r
                 WHERE r.collection_id IN ({placeholders})
                   {horizon_sql}
+                  {submitter_sql}
                 ORDER BY r.created_at DESC
                 LIMIT ?
             """
-            params = accessible + horizon_params + [limit]
+            params = accessible + horizon_params + submitter_params + [limit]
 
         rows = self.conn.execute(sql, params).fetchall()
         results = []
@@ -1040,6 +1080,61 @@ class DuggDB:
             "pruning_grace_days": inst.get("pruning_grace_days", 14),
         }
 
+    def get_instance_scope(self, instance_id: str) -> dict:
+        """Derive the living scope of an instance from its actual content."""
+        # Get collections owned by instance owner
+        inst = self.get_instance(instance_id)
+        if not inst:
+            return {"top_tags": [], "recent_types": [], "resource_count": 0, "recent_count": 0}
+
+        owner_id = inst["owner_id"]
+        coll_rows = self.conn.execute(
+            "SELECT id FROM collections WHERE owner_id = ?", (owner_id,)
+        ).fetchall()
+        coll_ids = [r["id"] for r in coll_rows]
+        if not coll_ids:
+            return {"top_tags": [], "recent_types": [], "resource_count": 0, "recent_count": 0}
+
+        placeholders = ",".join("?" for _ in coll_ids)
+
+        # Total resource count
+        total = self.conn.execute(
+            f"SELECT COUNT(*) as cnt FROM resources WHERE collection_id IN ({placeholders})", coll_ids
+        ).fetchone()["cnt"]
+
+        # Recent count (last 7 days)
+        seven_days_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        recent = self.conn.execute(
+            f"SELECT COUNT(*) as cnt FROM resources WHERE collection_id IN ({placeholders}) AND created_at > ?",
+            coll_ids + [seven_days_ago]
+        ).fetchone()["cnt"]
+
+        # Top tags by frequency
+        tag_rows = self.conn.execute(
+            f"""SELECT t.label, COUNT(*) as cnt FROM tags t
+                JOIN resources r ON t.resource_id = r.id
+                WHERE r.collection_id IN ({placeholders})
+                GROUP BY t.label ORDER BY cnt DESC LIMIT 10""",
+            coll_ids
+        ).fetchall()
+        top_tags = [r["label"] for r in tag_rows]
+
+        # Recent source types
+        type_rows = self.conn.execute(
+            f"""SELECT source_type, COUNT(*) as cnt FROM resources
+                WHERE collection_id IN ({placeholders}) AND created_at > ?
+                GROUP BY source_type ORDER BY cnt DESC""",
+            coll_ids + [seven_days_ago]
+        ).fetchall()
+        recent_types = [r["source_type"] for r in type_rows]
+
+        return {
+            "top_tags": top_tags,
+            "recent_types": recent_types,
+            "resource_count": total,
+            "recent_count": recent,
+        }
+
     def apply_onboarding_preset(self, instance_id: str, owner_id: str, mode: str) -> Optional[dict]:
         """Apply an onboarding mode preset. 'full_access' sets read_horizon=-1, storage=-1, index_mode='full'."""
         if mode == "full_access":
@@ -1150,6 +1245,13 @@ class DuggDB:
                VALUES (?, ?, 'member', ?, 'active', ?, ?, ?)""",
             (collection_id, invitee_id, inviter_id, now, ip_address, grace),
         )
+        # Auto-add the invitee's agents to the same collection
+        for agent in self.get_agents_for_user(invitee_id):
+            self.conn.execute(
+                """INSERT OR IGNORE INTO collection_members (collection_id, user_id, role, invited_by, status, joined_at, ip_address, grace_expires_at)
+                   VALUES (?, ?, 'member', ?, 'active', ?, ?, ?)""",
+                (collection_id, agent["id"], inviter_id, now, ip_address, grace),
+            )
         self.conn.commit()
         self.emit_event("member_joined", actor_id=inviter_id, collection_id=collection_id,
                         payload={"user_id": invitee_id, "invited_by": inviter_id})
@@ -2230,7 +2332,7 @@ class DuggDB:
             conn.close()
 
     def get_events(self, user_id: str, event_types: Optional[list[str]] = None,
-                   since: Optional[str] = None, limit: int = 50) -> list[dict]:
+                   since: Optional[str] = None, actor_id: Optional[Union[str, list[str]]] = None, limit: int = 50) -> list[dict]:
         """Get events for instances the user is subscribed to."""
         # Get user's subscribed instance IDs
         inst_rows = self.conn.execute(
@@ -2267,6 +2369,15 @@ class DuggDB:
         if since:
             where += " AND e.created_at > ?"
             params.append(since)
+
+        if actor_id:
+            if isinstance(actor_id, list):
+                ph = ",".join("?" for _ in actor_id)
+                where += f" AND e.actor_id IN ({ph})"
+                params.extend(actor_id)
+            else:
+                where += " AND e.actor_id = ?"
+                params.append(actor_id)
 
         params.append(limit)
         rows = self.conn.execute(

@@ -11,7 +11,7 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
-from dugg.db import DuggDB
+from dugg.db import DuggDB, _now
 from dugg.enrichment import enrich_url
 from dugg.sync import start_sync_daemon
 
@@ -94,6 +94,7 @@ async def list_tools() -> list[Tool]:
                     "query": {"type": "string", "description": "Search query — natural language works fine"},
                     "tags": {"type": "array", "items": {"type": "string"}, "description": "Filter results to resources with these tags", "default": []},
                     "collection": {"type": "string", "description": "Limit search to a specific collection", "default": ""},
+                    "submitted_by": {"type": "string", "description": "Filter to resources submitted by this user ID (use 'me' for your own)", "default": ""},
                     "limit": {"type": "integer", "description": "Max results to return", "default": 20},
                     "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
                 },
@@ -461,6 +462,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "event_types": {"type": "array", "items": {"type": "string"}, "description": "Filter by event type(s)", "default": []},
                     "since": {"type": "string", "description": "Only show events after this ISO timestamp", "default": ""},
+                    "actor_id": {"type": "string", "description": "Filter to events by this user ID (use 'me' for your own)", "default": ""},
                     "limit": {"type": "integer", "description": "Max events to return", "default": 50},
                     "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
                 },
@@ -672,6 +674,36 @@ async def list_tools() -> list[Tool]:
                 "required": ["title", "body"],
             },
         ),
+        Tool(
+            name="dugg_edit",
+            description="Update a resource's metadata or content. Use after enrichment to push summary, tags, or corrected fields back to the server.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "resource_id": {"type": "string", "description": "ID of the resource to update"},
+                    "title": {"type": "string", "description": "Updated title"},
+                    "description": {"type": "string", "description": "Updated description"},
+                    "summary": {"type": "string", "description": "Agent-generated summary"},
+                    "note": {"type": "string", "description": "Updated context note"},
+                    "source_type": {"type": "string", "description": "Corrected source type"},
+                    "author": {"type": "string", "description": "Corrected author"},
+                    "transcript": {"type": "string", "description": "Updated full content"},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Tags to add (appended, not replaced)"},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+                "required": ["resource_id"],
+            },
+        ),
+        Tool(
+            name="dugg_my_servers",
+            description="Get all servers you're subscribed to with their current scope — topic, top tags, recent activity. Use to decide where cross-posted content should route.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+            },
+        ),
     ]
 
 
@@ -779,6 +811,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = _handle_delete_resource(d, user_id, arguments)
         elif name == "dugg_paste":
             result = _handle_paste(d, user_id, arguments)
+        elif name == "dugg_edit":
+            result = _handle_edit(d, user_id, arguments)
+        elif name == "dugg_my_servers":
+            result = _handle_my_servers(d, user_id)
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
@@ -940,11 +976,77 @@ def _handle_paste(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
     return [TextContent(type="text", text=summary)]
 
 
+def _handle_edit(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    resource_id = args["resource_id"]
+    resource = d.get_resource(resource_id)
+    if not resource:
+        return [TextContent(type="text", text=f"Resource {resource_id} not found")]
+
+    accessible = d._accessible_collection_ids(user_id)
+    if resource["collection_id"] not in accessible:
+        return [TextContent(type="text", text=f"Access denied to resource {resource_id}")]
+
+    tags = args.pop("tags", None)
+    args.pop("resource_id", None)
+    update_fields = {k: v for k, v in args.items() if v is not None and v != ""}
+
+    if update_fields:
+        updated = d.update_resource(resource_id, **update_fields)
+    else:
+        updated = resource
+
+    if tags:
+        for tag in tags:
+            d._add_tag(resource_id, tag, "agent", _now())
+        d.conn.commit()
+
+    if update_fields.get("summary") or update_fields.get("description"):
+        d.update_resource(resource_id, enriched_at=_now())
+
+    result = d.get_resource(resource_id)
+    tags_str = ", ".join(t["label"] for t in result.get("tags", []))
+    lines = [f"Updated: {result.get('title') or result['url']}", f"ID: {result['id']}"]
+    if tags_str:
+        lines.append(f"Tags: {tags_str}")
+    if result.get("summary"):
+        lines.append(f"Summary: {result['summary'][:200]}")
+    if result.get("enriched_at"):
+        lines.append(f"Enriched: {result['enriched_at']}")
+    return [TextContent(type="text", text="\n".join(lines))]
+
+
+def _handle_my_servers(d: DuggDB, user_id: str) -> list[TextContent]:
+    instances = d.list_instances(user_id)
+    if not instances:
+        return [TextContent(type="text", text="Not subscribed to any servers.")]
+
+    lines = [f"{len(instances)} server(s):\n"]
+    for inst in instances:
+        lines.append(f"=== {inst['name']} [{inst['id']}] ===")
+        if inst.get("topic"):
+            lines.append(f"  Topic: {inst['topic']}")
+        if inst.get("endpoint_url"):
+            lines.append(f"  Endpoint: {inst['endpoint_url']}")
+
+        scope = d.get_instance_scope(inst["id"])
+        if scope["top_tags"]:
+            lines.append(f"  Top tags: {', '.join(scope['top_tags'])}")
+        if scope["recent_types"]:
+            lines.append(f"  Content types: {', '.join(scope['recent_types'])}")
+        lines.append(f"  Resources: {scope['resource_count']} ({scope['recent_count']} in last 7d)")
+        lines.append("")
+
+    return [TextContent(type="text", text="\n".join(lines))]
+
+
 def _handle_search(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
     query = args["query"]
     tags = args.get("tags", [])
     collection = args.get("collection", "")
     limit = args.get("limit", 20)
+    submitter_filter = args.get("submitted_by", "")
+    if submitter_filter == "me":
+        submitter_filter = d.get_user_pair_ids(user_id)
 
     # Resolve collection by name if provided
     coll_id = None
@@ -954,15 +1056,25 @@ def _handle_search(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
                 coll_id = c["id"]
                 break
 
-    results = d.search(query, user_id, collection_id=coll_id, tags=tags or None, limit=limit)
+    results = d.search(query, user_id, collection_id=coll_id, tags=tags or None,
+                       submitted_by=submitter_filter or None, limit=limit)
 
     if not results:
         return [TextContent(type="text", text=f"No results for: {query}")]
 
+    submitter_cache: dict[str, str] = {}
     lines = [f"Found {len(results)} result(s) for: {query}\n"]
     for r in results:
         tags_str = ", ".join(t["label"] for t in r.get("tags", []))
+        submitter_name = ""
+        if r.get("submitted_by"):
+            if r["submitted_by"] not in submitter_cache:
+                u = d.get_user(r["submitted_by"])
+                submitter_cache[r["submitted_by"]] = u["name"] if u else r["submitted_by"]
+            submitter_name = submitter_cache[r["submitted_by"]]
         lines.append(f"- [{r['id']}] {r.get('title') or r['url']}")
+        if submitter_name:
+            lines.append(f"  By: {submitter_name}")
         if tags_str:
             lines.append(f"  Tags: {tags_str}")
         if r.get("note"):
@@ -1056,13 +1168,19 @@ def _handle_create_user(d: DuggDB, args: dict) -> list[TextContent]:
     name = args["name"]
     user = d.create_user(name)
     agent = d.create_agent_for_user(user["id"])
+    from dugg.db import dugg_email_address
+    server_url = d.get_config("server_url", "")
+    email_addr = dugg_email_address(user["api_key"], server_url)
+    email_line = f"\nEmail forwarding: {email_addr}\n" if email_addr else ""
     return [TextContent(type="text", text=(
         f"Created user: {user['name']}\n"
         f"ID: {user['id']}\n"
         f"User key:  {user['api_key']}\n"
-        f"Agent key: {agent['api_key']}\n\n"
+        f"Agent key: {agent['api_key']}\n"
+        f"{email_line}\n"
         f"The agent key is tied to this user — if the user is banned, the agent key stops working too.\n"
         f"Save both keys — they won't be shown again."
+        + (f"\n\nForward emails to {email_addr} to add them as resources." if email_addr else "")
     ))]
 
 
@@ -1126,6 +1244,11 @@ def _handle_invite_user(d: DuggDB, user_id: str, args: dict) -> list[TextContent
             f"   dugg_webhook_subscribe for push notifications.\n"
             f"\n   The more servers you subscribe to, the more signal flows\n"
             f"   to you. Each subscription is another curated source.\n"
+            f"\n5. Email forwarding\n"
+            f"\n   Forward emails to your personal Dugg address and they'll\n"
+            f"   appear as searchable resources. Your address is computed from\n"
+            f"   your API key + server hostname after you redeem.\n"
+            f"   Format: {{api_key}}@{{server-hostname-with-double-dashes}}.dugg.fyi\n"
             f"\nPartner guide (read before first submission):\n"
             f"  https://github.com/kadedworkin/dugg-fyi/blob/main/PARTNER_AGENT.md"
         )
@@ -1558,13 +1681,25 @@ def _handle_events(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
     event_types = args.get("event_types", [])
     since = args.get("since", "")
     limit = args.get("limit", 50)
-    events = d.get_events(user_id, event_types=event_types or None, since=since or None, limit=limit)
+    actor_filter = args.get("actor_id", "")
+    if actor_filter == "me":
+        actor_filter = d.get_user_pair_ids(user_id)
+    events = d.get_events(user_id, event_types=event_types or None, since=since or None,
+                          actor_id=actor_filter or None, limit=limit)
     if not events:
         return [TextContent(type="text", text="No events found.")]
+    actor_cache: dict[str, str] = {}
     lines = [f"{len(events)} event(s):\n"]
     for e in events:
-        payload_summary = ", ".join(f"{k}: {v}" for k, v in e["payload"].items() if k != "transcript")
-        lines.append(f"- [{e['event_type']}] {e['created_at']}")
+        payload_summary = ", ".join(f"{k}: {v}" for k, v in e["payload"].items() if k not in ("transcript", "submitted_by"))
+        actor_name = ""
+        if e.get("actor_id"):
+            if e["actor_id"] not in actor_cache:
+                u = d.get_user(e["actor_id"])
+                actor_cache[e["actor_id"]] = u["name"] if u else e["actor_id"]
+            actor_name = actor_cache[e["actor_id"]]
+        actor_str = f" by {actor_name}" if actor_name else ""
+        lines.append(f"- [{e['event_type']}]{actor_str} {e['created_at']}")
         if payload_summary:
             lines.append(f"  {payload_summary}")
     return [TextContent(type="text", text="\n".join(lines))]
@@ -1888,6 +2023,16 @@ def _handle_welcome(d: DuggDB, user_id: str, user: dict) -> list[TextContent]:
     if rate_info:
         lines.append("Rate limits:")
         lines.extend(rate_info)
+        lines.append("")
+
+    # Email forwarding
+    from dugg.db import dugg_email_address
+    server_url = d.get_config("server_url", "")
+    target_key = parent["api_key"] if parent else user["api_key"]
+    email_addr = dugg_email_address(target_key, server_url)
+    if email_addr:
+        lines.append(f"Email forwarding: {email_addr}")
+        lines.append("  Forward emails to this address → they appear as searchable resources.")
         lines.append("")
 
     # Staying updated

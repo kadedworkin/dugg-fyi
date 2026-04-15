@@ -110,10 +110,15 @@ def cmd_add_user(args):
     db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
     db = DuggDB(db_path)
     user = db.create_user(args.name)
+    server_url = db.get_config("server_url", "")
     db.close()
     print(f"User: {user['name']}")
     print(f"ID:   {user['id']}")
     print(f"Key:  {user['api_key']}")
+    from dugg.db import dugg_email_address
+    email_addr = dugg_email_address(user["api_key"], server_url)
+    if email_addr:
+        print(f"Email: {email_addr}")
     print("\nSave this API key — it won't be shown again.")
 
 
@@ -301,6 +306,7 @@ def cmd_redeem(args):
         invite = db.get_invite_token(args.token)
         name = invite["name_hint"] if invite and invite.get("name_hint") else "New User"
     result = db.redeem_invite_token(args.token, name)
+    server_url = db.get_config("server_url", "")
     db.close()
 
     if not result:
@@ -309,10 +315,14 @@ def cmd_redeem(args):
 
     user = result["user"]
     agent = result["agent"]
+    from dugg.db import dugg_email_address
+    email_addr = dugg_email_address(user["api_key"], server_url)
     print(f"Welcome to Dugg, {user['name']}!")
     print(f"ID:        {user['id']}")
     print(f"Your key:  {user['api_key']}")
     print(f"Agent key: {agent['api_key']}")
+    if email_addr:
+        print(f"Email:     {email_addr}")
     print()
 
     env_file = _find_env_file()
@@ -691,6 +701,10 @@ def cmd_status(args):
     print(f"  DB:   {db_path}")
     if server_url:
         print(f"  Server: {server_url}")
+    from dugg.db import dugg_email_address
+    email_addr = dugg_email_address(user["api_key"], server_url)
+    if email_addr:
+        print(f"  Email: {email_addr}")
 
     collections = db.list_collections(user["id"])
     total_resources = 0
@@ -1218,6 +1232,9 @@ def main():
     p_welcome = sub.add_parser("welcome", help="Show orientation info for your Dugg installation")
     p_welcome.add_argument("--key", default=None, help="API key (uses local user if omitted)")
 
+    p_email = sub.add_parser("email", help="Show your email forwarding address for each connected instance")
+    p_email.add_argument("--key", default=None, help="API key (uses local user if omitted)")
+
     # If the first arg looks like a URL, treat it as `dugg add <url> ...`
     if len(sys.argv) > 1 and sys.argv[1].startswith(("http://", "https://")):
         sys.argv.insert(1, "add")
@@ -1273,6 +1290,43 @@ def main():
         cmd_doctor(args)
     elif args.command == "welcome":
         cmd_welcome(args)
+    elif args.command == "email":
+        cmd_email(args)
+
+
+def cmd_email(args):
+    """Show email forwarding addresses for all connected instances."""
+    from pathlib import Path
+    from dugg.db import dugg_email_address
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    if not db_path.exists():
+        print("No Dugg database found. Run: dugg init")
+        sys.exit(1)
+    db = DuggDB(db_path)
+    user = _resolve_user(db, args)
+    server_url = db.get_config("server_url", "")
+
+    print(f"Email forwarding addresses for {user['name']}:\n")
+
+    if server_url:
+        email_addr = dugg_email_address(user["api_key"], server_url)
+        if email_addr:
+            print(f"  This server: {email_addr}")
+
+    instances = db.list_instances(user["id"])
+    for inst in instances:
+        endpoint = inst.get("endpoint_url", "")
+        if endpoint:
+            email_addr = dugg_email_address(user["api_key"], endpoint)
+            if email_addr:
+                print(f"  {inst['name']}: {email_addr}")
+
+    if not server_url and not instances:
+        print("  No server URL configured. Run: dugg set-config server_url https://your-server")
+
+    db.close()
+    print()
+    print("Forward emails to any of these addresses to add them as resources.")
 
 
 if __name__ == "__main__":

@@ -473,10 +473,13 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
 
         if "application/json" in content_type:
             server_url_json = endpoint or ""
+            from dugg.db import dugg_email_address
+            email_addr = dugg_email_address(user["api_key"], server_url_json)
             return JSONResponse({
                 "status": "redeemed",
                 "user": {"id": user["id"], "name": user["name"], "api_key": user["api_key"]},
                 "agent": {"id": agent["id"], "name": agent["name"], "api_key": agent["api_key"]},
+                "email": email_addr or None,
                 "endpoints": {
                     "sse": f"{server_url_json}/sse" if server_url_json else None,
                     "tools": f"{server_url_json}/tools/{{tool_name}}" if server_url_json else None,
@@ -490,6 +493,7 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
                     f"future requests. If your human's account gets banned, your key stops working too. "
                     f"IMPORTANT: Read PARTNER_AGENT.md in the Dugg repo before your first submission — "
                     f"it covers behavioral norms, rate limits, catchup patterns, and how to be a good citizen."
+                    + (f"\n\nEmail forwarding: forward emails to {email_addr} and they'll appear as resources in Dugg." if email_addr else "")
                 ),
                 "quickstart": [
                     {
@@ -509,6 +513,15 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
 
         feed_url = f"{endpoint}/feed/{user['api_key']}" if endpoint else f"/feed/{user['api_key']}"
         server_url = endpoint or ""
+        from dugg.db import dugg_email_address
+        email_addr = dugg_email_address(user["api_key"], server_url)
+
+        email_section = ""
+        if email_addr:
+            email_section = f"""
+<h3>Your email forwarding address</h3>
+<div class="key-box">{_xml_escape(email_addr)}</div>
+<p style="font-size: 0.85em; color: #666;">Forward emails to this address and they'll appear as resources in Dugg. Use it for newsletters, forwarded articles, or anything you want indexed.</p>"""
 
         body = f"""
 <h1>You're in, {_xml_escape(user['name'])}!</h1>
@@ -518,6 +531,7 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
 <h3>Your agent's key</h3>
 <div class="key-box">{agent['api_key']}</div>
 <p style="font-size: 0.85em; color: #666;">Give this key to your AI agent. If your account gets banned, your agent goes too.</p>
+{email_section}
 
 <div class="next-steps">
   <h3>Get started in 3 steps</h3>
