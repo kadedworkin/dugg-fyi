@@ -83,6 +83,13 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
 
     async def handle_sse(request: Request):
         """SSE connection endpoint — clients connect here to receive server events."""
+        api_key = request.headers.get("x-dugg-key", "")
+        if not api_key:
+            return JSONResponse({"error": "Missing X-Dugg-Key header"}, status_code=401)
+        d = get_db()
+        user = d.get_user_by_api_key(api_key)
+        if not user:
+            return JSONResponse({"error": "Invalid API key"}, status_code=401)
         async with sse_transport.connect_sse(
             request.scope, request.receive, request._send
         ) as streams:
@@ -359,7 +366,7 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
 {topic_html}
 <form method="POST" action="/invite/{token}/redeem">
   <label for="name">Your name</label>
-  <input type="text" id="name" name="name" value="{name_hint}" placeholder="Your name" required>
+  <input type="text" id="name" name="name" value="{name_hint}" placeholder="Your name" required maxlength="100">
   <button type="submit">Join</button>
 </form>"""
         return HTMLResponse(_html_page(f"Join {instance_name}", body))
@@ -448,7 +455,7 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
         server_url = endpoint or ""
 
         body = f"""
-<h1>You're in, {user['name']}!</h1>
+<h1>You're in, {_xml_escape(user['name'])}!</h1>
 <p>Here are your keys — save them somewhere safe, they won't be shown again.</p>
 <h3>Your key</h3>
 <div class="key-box">{user['api_key']}</div>
@@ -610,7 +617,7 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
 
         if not rows:
             body = f"""<h1>No active bans</h1>
-<p>You're not currently banned from any collections, {user['name']}.</p>"""
+<p>You're not currently banned from any collections, {_xml_escape(user['name'])}.</p>"""
             return HTMLResponse(_html_page("No Bans", body))
 
         items_html = ""
@@ -637,7 +644,7 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
 </div>\n"""
 
         body = f"""<h1>Ban Appeals</h1>
-<p>Hi {user['name']}. You can appeal bans below. The collection owner will see your credit score and decide.</p>
+<p>Hi {_xml_escape(user['name'])}. You can appeal bans below. The collection owner will see your credit score and decide.</p>
 {items_html}"""
         return HTMLResponse(_html_page("Ban Appeals", body))
 

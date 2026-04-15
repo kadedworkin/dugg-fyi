@@ -417,6 +417,11 @@ class DuggDB:
     # --- Users ---
 
     def create_user(self, name: str) -> dict:
+        import re
+        name = name.strip()[:100]
+        name = re.sub(r'[<>&]', '', name)
+        if not name:
+            name = "New User"
         user_id = _uuid()
         api_key = f"dugg_{uuid.uuid4().hex}"
         now = _now()
