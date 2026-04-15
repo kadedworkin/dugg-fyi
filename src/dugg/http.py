@@ -663,7 +663,7 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
                 author_html = f' · {r["author"]}' if r.get("author") else ""
                 url = r["url"]
                 if url.startswith("dugg://content/"):
-                    url = "/content/" + url.removeprefix("dugg://content/")
+                    url = f"/content/{api_key}/" + url.removeprefix("dugg://content/")
                 items_html += f"""<div class="feed-item">
   <h3><a href="{url}" target="_blank" rel="noopener">{title}</a></h3>
   <p class="meta">{r['created_at'][:10]}{author_html}</p>
@@ -679,16 +679,25 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
     # --- Content View Page ---
 
     async def handle_content_page(request: Request):
-        """GET /content/{resource_id} — render pasted content in the browser."""
+        """GET /content/{key}/{resource_id} — render pasted content in the browser."""
+        api_key = request.path_params["key"]
         resource_id = request.path_params["resource_id"]
         d = get_db()
+        user = d.get_user_by_api_key(api_key)
+
+        if not user:
+            return HTMLResponse(_html_page("Unauthorized", "<h1>Invalid key</h1><p>This link is not valid.</p>"), status_code=401)
+
+        d.touch_user(user["id"])
+        accessible = d._accessible_collection_ids(user["id"])
+
         resource = d.get_resource(resource_id)
         if not resource:
             row = d.conn.execute("SELECT id FROM resources WHERE url = ?", (f"dugg://content/{resource_id}",)).fetchone()
             if row:
                 resource = d.get_resource(row["id"])
 
-        if not resource:
+        if not resource or resource.get("collection_id") not in accessible:
             return HTMLResponse(_html_page("Not Found", "<h1>Not found</h1><p>This content does not exist.</p>"), status_code=404)
 
         title = resource.get("title") or "Untitled"
@@ -1283,7 +1292,7 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
         Route("/appeal/{key}", endpoint=handle_appeal_page),
         Route("/appeal/{key}/submit", endpoint=handle_appeal_submit, methods=["POST"]),
         Route("/appeal/{key}/status", endpoint=handle_appeal_status),
-        Route("/content/{resource_id}", endpoint=handle_content_page),
+        Route("/content/{key}/{resource_id}", endpoint=handle_content_page),
         Route("/events/stream", endpoint=handle_events_stream),
         Route("/tools/{tool_name}", endpoint=handle_tools, methods=["POST"]),
         Route("/slack/command", endpoint=handle_slack_command, methods=["POST"]),
