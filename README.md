@@ -415,14 +415,16 @@ Forward emails directly into Dugg using self-describing email addresses. No emai
 Each Dugg user gets an email address that encodes their server and API key:
 
 ```
-{server-hostname}+{api-key}@dugg.fyi
+{server-hostname-with-underscores}+{api-key}@dugg.fyi
 ```
 
-**Example:** `chino-bandido.kadedworkin.com+dugg_2c7e7d3892ee4cdc96ae0eb62b48f89b@dugg.fyi`
+Dots in the hostname are replaced with underscores (email local parts can't contain dots in all providers):
+
+**Example:** `chino-bandido_kadedworkin_com+dugg_2c7e7d3892ee4cdc96ae0eb62b48f89b@dugg.fyi`
 
 When an email arrives:
 1. Cloudflare Email Worker receives it
-2. Splits the local part on `+` → server hostname + API key
+2. Splits the local part on `+` → server hostname (underscores → dots) + API key
 3. POSTs the email body to `https://{hostname}/tools/dugg_paste` with the API key
 4. Email subject becomes the title, sender becomes the source label
 5. Content is indexed and searchable like any other resource

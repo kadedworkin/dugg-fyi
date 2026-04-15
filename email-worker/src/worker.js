@@ -5,7 +5,7 @@ export default {
     const plusIndex = localPart.indexOf("+");
     if (plusIndex === -1) return;
 
-    const host = localPart.substring(0, plusIndex);
+    const host = localPart.substring(0, plusIndex).replace(/_/g, ".");
     const userKey = localPart.substring(plusIndex + 1);
     if (!host || !userKey) return;
 
