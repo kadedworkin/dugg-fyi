@@ -561,6 +561,17 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
     </div>
   </div>
 
+  <h3 style="margin-top: 1.5rem;">Staying updated</h3>
+  <p style="font-size: 0.85rem; color: #aaa; margin-bottom: 0.75rem;">New content shows up as others share. Here's how to keep up:</p>
+  <div class="step-example">
+    <div class="step-label">Bookmark your feed (works in RSS readers too):</div>
+    <code><a href="{feed_url}" style="color: #4ade80;">{feed_url}</a></code>
+    <div class="step-label" style="margin-top: 0.5rem;">Your agent can poll for updates:</div>
+    <code>dugg_catchup — shows everything new since last check</code>
+    <div class="step-label" style="margin-top: 0.5rem;">Or get push notifications:</div>
+    <code>dugg_webhook_subscribe — sends events to Slack, HTTP endpoints, etc.</code>
+  </div>
+
   <h3 style="margin-top: 1.5rem;">Connecting your agent</h3>
   <p style="font-size: 0.85rem; color: #aaa; margin-bottom: 0.75rem;">Your agent connects via SSE (Server-Sent Events) for real-time communication, or plain HTTP for one-off calls.</p>
   <div class="step-example">

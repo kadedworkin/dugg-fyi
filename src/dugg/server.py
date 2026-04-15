@@ -1807,6 +1807,13 @@ def _handle_welcome(d: DuggDB, user_id: str, user: dict) -> list[TextContent]:
         lines.extend(rate_info)
         lines.append("")
 
+    # Staying updated
+    lines.append("Staying updated:")
+    lines.append("  dugg_catchup      — poll for new activity since your last check (uses read cursors)")
+    lines.append("  dugg_webhook_subscribe — push notifications to a URL (Slack, HTTP, HMAC-signed)")
+    lines.append("  /feed/{key}       — your human's browser feed (also serves Atom XML for RSS readers)")
+    lines.append("")
+
     # Tip based on state
     if total_resources == 0:
         lines.append("Get started: share a link with dugg_add(url=\"...\", note=\"why this matters\")")
