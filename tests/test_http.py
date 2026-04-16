@@ -131,6 +131,35 @@ def test_ingest_dedup(client):
     assert resp2.json()["status"] == "duplicate"
 
 
+def test_ingest_dedup_preserves_foreign_note_in_feed(client):
+    """Cross-server duplicate ingest surfaces the foreign note in the HTML feed."""
+    c, user = client
+    headers = {"X-Dugg-Key": user["api_key"]}
+    first = {
+        "resource": {"url": "https://example.com/collision", "title": "Collision page",
+                     "note": "original note"},
+        "source_instance_id": "remoteA",
+        "source_server": "https://a.example.com",
+    }
+    assert c.post("/ingest", json=first, headers=headers).status_code == 201
+    second = {
+        "resource": {"url": "https://example.com/collision", "title": "Collision page",
+                     "note": "rocco's take", "submitter_name": "Remote Rocco"},
+        "source_instance_id": "remoteB",
+        "source_server": "https://b.example.com",
+    }
+    resp2 = c.post("/ingest", json=second, headers=headers)
+    assert resp2.status_code == 200
+    assert resp2.json()["status"] == "duplicate"
+
+    feed = c.get(f"/feed/{user['api_key']}")
+    assert feed.status_code == 200
+    body = feed.text
+    # Both foreign notes should render as siblings in the feed
+    assert "original note" in body
+    assert "rocco's take" in body
+
+
 def test_ingest_invalid_json(client):
     c, user = client
     resp = c.post("/ingest", content=b"not json",

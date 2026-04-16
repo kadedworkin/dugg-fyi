@@ -191,6 +191,18 @@ class DuggDB:
                 UNIQUE(collection_id, target_user_id)
             );
 
+            CREATE TABLE IF NOT EXISTS resource_notes (
+                id TEXT PRIMARY KEY,
+                resource_id TEXT NOT NULL REFERENCES resources(id) ON DELETE CASCADE,
+                source_server TEXT DEFAULT '',
+                source_instance_id TEXT DEFAULT '',
+                submitter_user_id TEXT DEFAULT '',
+                submitter_name TEXT DEFAULT '',
+                note TEXT NOT NULL,
+                added_at TEXT NOT NULL,
+                UNIQUE(resource_id, source_server, submitter_user_id, note)
+            );
+
             CREATE TABLE IF NOT EXISTS resource_edges (
                 id TEXT PRIMARY KEY,
                 resource_a TEXT NOT NULL REFERENCES resources(id) ON DELETE CASCADE,
@@ -738,8 +750,34 @@ class DuggDB:
         tag_source: str = "human",
         summary: str = "",
     ) -> dict:
-        res_id = _uuid()
         now = _now()
+
+        # Collision path: same URL already exists in this collection.
+        # Attach the new submitter's note as a sibling note (quarantined from
+        # outbound publish) and union their tags onto the existing resource.
+        existing = self.conn.execute(
+            "SELECT id, submitted_by, title FROM resources WHERE url = ? AND collection_id = ?",
+            (url, collection_id),
+        ).fetchone()
+        if existing:
+            submitter_row = self.conn.execute(
+                "SELECT name FROM users WHERE id = ?", (submitted_by,)
+            ).fetchone()
+            submitter_name = submitter_row["name"] if submitter_row else ""
+            self.add_resource_note(
+                existing["id"], note,
+                submitter_user_id=submitted_by,
+                submitter_name=submitter_name,
+            )
+            if tags:
+                for tag in tags:
+                    self._add_tag(existing["id"], tag, tag_source, now)
+                self.conn.commit()
+            full = self.get_resource(existing["id"]) or {}
+            full["status"] = "sibling_note_added"
+            return full
+
+        res_id = _uuid()
         meta_json = json.dumps(raw_metadata or {})
         content_bytes = len((transcript or "").encode("utf-8")) + len((description or "").encode("utf-8")) + len((summary or "").encode("utf-8"))
         self.conn.execute(
@@ -912,6 +950,45 @@ class DuggDB:
     def _get_tags(self, resource_id: str) -> list[dict]:
         rows = self.conn.execute(
             "SELECT label, source FROM tags WHERE resource_id = ?", (resource_id,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    # --- Sibling Notes (collision-safe enrichment) ---
+    # Quarantine layer: when the same URL is added a second time -- whether by
+    # another local user or via cross-server federation -- the incoming note is
+    # stored here instead of being dropped. Publish payload builders must NEVER
+    # read this table; it is inbound-only enrichment for local display.
+
+    def add_resource_note(self, resource_id: str, note: str, *,
+                          source_server: str = "",
+                          source_instance_id: str = "",
+                          submitter_user_id: str = "",
+                          submitter_name: str = "") -> Optional[dict]:
+        """Attach a sibling note to an existing resource. Idempotent via UNIQUE constraint."""
+        if not note or not note.strip():
+            return None
+        note_id = _uuid()
+        now = _now()
+        self.conn.execute(
+            """INSERT OR IGNORE INTO resource_notes
+               (id, resource_id, source_server, source_instance_id,
+                submitter_user_id, submitter_name, note, added_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (note_id, resource_id, source_server, source_instance_id,
+             submitter_user_id, submitter_name, note, now),
+        )
+        self.conn.commit()
+        return {"id": note_id, "resource_id": resource_id, "note": note,
+                "source_server": source_server, "submitter_name": submitter_name,
+                "added_at": now}
+
+    def list_resource_notes(self, resource_id: str) -> list[dict]:
+        """Return all sibling notes attached to a resource, oldest first."""
+        rows = self.conn.execute(
+            """SELECT id, source_server, source_instance_id, submitter_user_id,
+                      submitter_name, note, added_at
+               FROM resource_notes WHERE resource_id = ? ORDER BY added_at ASC""",
+            (resource_id,),
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -2722,11 +2799,18 @@ class DuggDB:
         """Receive a published resource from a remote Dugg instance.
 
         Stores the resource in the target collection with the source tracked.
-        Deduplicates by URL within the collection.
+        Deduplicates by URL within the collection -- but the incoming note is
+        captured into `resource_notes` (quarantined from outbound publish) on
+        both first ingest and duplicate ingest, so cross-server enrichment is
+        never lost.
         """
         url = resource_data.get("url", "")
         if not url:
             return None
+
+        incoming_note = (resource_data.get("note") or "").strip()
+        submitter_name = (resource_data.get("submitter_name")
+                          or resource_data.get("author") or "")
 
         # Deduplicate: check if this URL already exists in this collection
         existing = self.conn.execute(
@@ -2734,7 +2818,24 @@ class DuggDB:
             (url, target_collection_id),
         ).fetchone()
         if existing:
-            return {"id": existing["id"], "status": "duplicate", "url": url}
+            note_added = False
+            if incoming_note:
+                self.add_resource_note(
+                    existing["id"], incoming_note,
+                    source_server=source_server,
+                    source_instance_id=source_instance_id,
+                    submitter_name=submitter_name,
+                )
+                note_added = True
+            # Union tags from the incoming publish onto the existing resource
+            now = _now()
+            for tag in resource_data.get("tags", []) or []:
+                label = tag if isinstance(tag, str) else tag.get("label", "")
+                if label:
+                    self._add_tag(existing["id"], label, "agent", now)
+            self.conn.commit()
+            return {"id": existing["id"], "status": "duplicate", "url": url,
+                    "note_added": note_added}
 
         # Get the collection owner as the submitter
         coll = self.conn.execute("SELECT created_by FROM collections WHERE id = ?", (target_collection_id,)).fetchone()
@@ -2748,6 +2849,11 @@ class DuggDB:
             meta["_source_instance"] = source_instance_id
         meta_json = json.dumps(meta) if isinstance(meta, dict) else meta
 
+        # Store resources.note = '' on cross-server first ingest: the note came
+        # from the source server and belongs in resource_notes so it stays
+        # quarantined. If this server later publishes the resource outbound,
+        # the payload's `note` field will be empty rather than carrying a
+        # foreign submitter's text.
         self.conn.execute(
             """INSERT INTO resources
                (id, url, title, description, thumbnail, source_type, author, transcript, raw_metadata, note, source_server, submitted_by, collection_id, created_at, updated_at, enriched_at)
@@ -2756,11 +2862,19 @@ class DuggDB:
              resource_data.get("title", ""), resource_data.get("description", ""),
              resource_data.get("thumbnail", ""), resource_data.get("source_type", "unknown"),
              resource_data.get("author", ""), resource_data.get("transcript", ""),
-             meta_json, resource_data.get("note", ""),
+             meta_json, "",
              source_server,
              coll["created_by"], target_collection_id, now, now,
              resource_data.get("enriched_at")),
         )
+
+        if incoming_note:
+            self.add_resource_note(
+                res_id, incoming_note,
+                source_server=source_server,
+                source_instance_id=source_instance_id,
+                submitter_name=submitter_name,
+            )
 
         # Copy tags
         tags = resource_data.get("tags", [])

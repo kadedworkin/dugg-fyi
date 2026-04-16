@@ -935,30 +935,32 @@ async def _handle_add(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
         tag_source="human" if tags else "agent",
     )
 
-    # Auto-tag with channel/author name for YouTube
-    if author:
-        author_tag = author.lower().strip()
-        d.tag_resource(resource["id"], [author_tag], source="agent")
+    # Skip re-enrichment when the URL already existed -- the sibling note is
+    # attached to the existing resource, which has already been enriched.
+    if resource.get("status") != "sibling_note_added":
+        if author:
+            author_tag = author.lower().strip()
+            d.tag_resource(resource["id"], [author_tag], source="agent")
 
-    # Mark enriched
-    from dugg.db import _now
-    d.update_resource(resource["id"], enriched_at=_now())
+        from dugg.db import _now
+        d.update_resource(resource["id"], enriched_at=_now())
 
-    # Apply index policy (summary/full/metadata_only) based on instance config
-    agent_summary = args.get("summary", "")
-    d.apply_index_policy(resource["id"], coll_id,
-                         enriched_description=enriched.get("description", ""),
-                         enriched_transcript=enriched.get("transcript", ""),
-                         agent_summary=agent_summary)
+        agent_summary = args.get("summary", "")
+        d.apply_index_policy(resource["id"], coll_id,
+                             enriched_description=enriched.get("description", ""),
+                             enriched_transcript=enriched.get("transcript", ""),
+                             agent_summary=agent_summary)
 
-    summary = f"Added: {resource.get('title') or url}\n"
+    verb = "Note added to existing" if resource.get("status") == "sibling_note_added" else "Added"
+    summary = f"{verb}: {resource.get('title') or url}\n"
     summary += f"ID: {resource['id']}\n"
-    summary += f"Type: {resource['source_type']}\n"
+    summary += f"Type: {resource.get('source_type', 'unknown')}\n"
     if author:
         summary += f"Author: {author}\n"
     if resource.get("tags"):
-        summary += f"Tags: {', '.join(resource['tags'])}\n"
-    if enriched.get("transcript"):
+        tag_labels = [t["label"] if isinstance(t, dict) else t for t in resource["tags"]]
+        summary += f"Tags: {', '.join(tag_labels)}\n"
+    if enriched.get("transcript") and resource.get("status") != "sibling_note_added":
         word_count = len(enriched["transcript"].split())
         summary += f"Transcript: {word_count} words captured\n"
     return [TextContent(type="text", text=summary)]

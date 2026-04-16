@@ -657,7 +657,17 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
                 title = r.get("title") or r["url"]
                 desc = r.get("description", "")
                 note = r.get("note", "")
-                content = f"{desc}\n\n{note}".strip() if (desc or note) else ""
+                sibling_notes = d.list_resource_notes(r["id"])
+                sibling_text = ""
+                if sibling_notes:
+                    parts = []
+                    for sn in sibling_notes:
+                        who = sn.get("submitter_name") or "someone"
+                        origin = sn.get("source_server") or ""
+                        label = f"{who}" + (f" (via {origin})" if origin else "")
+                        parts.append(f"— {label}: {sn['note']}")
+                    sibling_text = "\n\n".join(parts)
+                content = "\n\n".join(p for p in [desc, note, sibling_text] if p)
                 entries += f"""<entry>
   <title>{_xml_escape(title)}</title>
   <link href="{_xml_escape(r['url'])}"/>
@@ -679,7 +689,19 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
             items_html = ""
             for r in feed:
                 title = r.get("title") or r["url"]
-                note_html = f'<p class="note">{r["note"]}</p>' if r.get("note") else ""
+                note_html = f'<p class="note">{_xml_escape(r["note"])}</p>' if r.get("note") else ""
+                sibling_notes = d.list_resource_notes(r["id"])
+                siblings_html = ""
+                if sibling_notes:
+                    sib_parts = []
+                    for sn in sibling_notes:
+                        who = _xml_escape(sn.get("submitter_name") or "someone")
+                        origin = sn.get("source_server") or ""
+                        origin_label = f' <span class="sib-origin">via {_xml_escape(origin)}</span>' if origin else ""
+                        sib_parts.append(
+                            f'<p class="note sibling"><span class="sib-who">{who}{origin_label}:</span> {_xml_escape(sn["note"])}</p>'
+                        )
+                    siblings_html = "".join(sib_parts)
                 author_html = f' · {r["author"]}' if r.get("author") else ""
                 added_date = _short_date(r.get("created_at"))
                 pub_date = _resource_pub_date(r)
@@ -691,6 +713,7 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
   <h3><a href="{url}" target="_blank" rel="noopener">{title}</a></h3>
   <p class="meta">{added_date}{pub_html}{author_html}</p>
   {note_html}
+  {siblings_html}
 </div>\n"""
 
         topic_html = f'<p class="topic">{page_topic}</p>' if page_topic else ""
@@ -750,7 +773,7 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
 </form>""",
         )
 
-    def _render_resource(resource: dict) -> str:
+    def _render_resource(resource: dict, sibling_notes: Optional[list] = None) -> str:
         title = resource.get("title") or "Untitled"
         transcript = resource.get("transcript") or ""
         author = resource.get("author") or ""
@@ -765,11 +788,24 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
             meta_parts.append(author)
         meta_html = " · ".join(meta_parts)
         note_html = f'<p class="note" style="margin-top:1rem;font-style:italic;">{_xml_escape(note)}</p>' if note else ""
+        siblings_html = ""
+        if sibling_notes:
+            parts = []
+            for sn in sibling_notes:
+                who = _xml_escape(sn.get("submitter_name") or "someone")
+                origin = sn.get("source_server") or ""
+                origin_html = f' <span style="color:#888;">via {_xml_escape(origin)}</span>' if origin else ""
+                parts.append(
+                    f'<p class="note sibling" style="margin-top:0.5rem;padding-left:0.75rem;border-left:2px solid #333;font-style:italic;color:#ccc;">'
+                    f'<span style="color:#aaa;font-style:normal;">{who}{origin_html}:</span> {_xml_escape(sn["note"])}</p>'
+                )
+            siblings_html = "".join(parts)
         tags_html = f'<p style="margin-top:0.5rem;font-size:0.8rem;color:#666;">{", ".join(_xml_escape(t) for t in tags)}</p>' if tags else ""
         content_html = _xml_escape(transcript).replace("\n", "<br>")
         body = f"""<h1>{_xml_escape(title)}</h1>
 <p class="meta" style="margin-bottom:1rem;">{meta_html}</p>
 {note_html}
+{siblings_html}
 {tags_html}
 <div style="margin-top:1.5rem;line-height:1.6;font-size:0.9rem;color:#ccc;white-space:pre-wrap;word-break:break-word;">{content_html}</div>"""
         return _html_page(_xml_escape(title), body)
@@ -799,7 +835,8 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
         if not resource or resource.get("collection_id") not in accessible:
             return HTMLResponse(_html_page("Not Found", "<h1>Not found</h1>"), status_code=404)
 
-        return HTMLResponse(_render_resource(resource))
+        siblings = d.list_resource_notes(resource["id"])
+        return HTMLResponse(_render_resource(resource, sibling_notes=siblings))
 
     async def handle_resource_unlock(request: Request):
         """POST /r/{resource_id}/unlock — validate pasted key, set cookie, redirect back."""

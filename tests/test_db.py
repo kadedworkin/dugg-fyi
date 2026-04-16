@@ -1077,6 +1077,154 @@ def test_webhooks_suppressed_after_cascade_ban(db):
     assert urls == ["https://hooks.example.com/owner"]
 
 
+# --- Collision-safe sibling notes ---
+
+def test_same_collection_duplicate_url_preserves_both_notes(db):
+    """Second submitter adding the same URL -> sibling note, one resource row."""
+    kade = db.create_user("Kade")
+    rocco = db.create_user("Rocco")
+    coll = db.create_collection("Shared", kade["id"])
+    db.add_collection_member(coll["id"], rocco["id"])
+
+    first = db.add_resource(url="https://example.com/x", collection_id=coll["id"],
+                             submitted_by=kade["id"], note="Kade's take", title="X")
+    second = db.add_resource(url="https://example.com/x", collection_id=coll["id"],
+                              submitted_by=rocco["id"], note="Rocco's highlight")
+
+    assert second["id"] == first["id"]
+    assert second["status"] == "sibling_note_added"
+
+    siblings = db.list_resource_notes(first["id"])
+    assert len(siblings) == 1
+    assert siblings[0]["note"] == "Rocco's highlight"
+    assert siblings[0]["submitter_name"] == "Rocco"
+    assert siblings[0]["submitter_user_id"] == rocco["id"]
+    # First note stays on the primary resource row
+    primary = db.get_resource(first["id"])
+    assert primary["note"] == "Kade's take"
+
+
+def test_duplicate_same_user_with_different_note_still_captured(db):
+    """Chrome extension case: same user highlights a second passage of the same URL."""
+    kade = db.create_user("Kade")
+    coll = db.create_collection("Inbox", kade["id"])
+    db.add_resource(url="https://example.com/x", collection_id=coll["id"],
+                     submitted_by=kade["id"], note="first highlight")
+    db.add_resource(url="https://example.com/x", collection_id=coll["id"],
+                     submitted_by=kade["id"], note="second highlight")
+    # One row
+    rows = db.conn.execute(
+        "SELECT COUNT(*) AS c FROM resources WHERE url = ? AND collection_id = ?",
+        ("https://example.com/x", coll["id"])
+    ).fetchone()
+    assert rows["c"] == 1
+    # Second note preserved
+    first = db.conn.execute(
+        "SELECT id FROM resources WHERE url = ? AND collection_id = ?",
+        ("https://example.com/x", coll["id"])
+    ).fetchone()
+    siblings = db.list_resource_notes(first["id"])
+    assert len(siblings) == 1
+    assert siblings[0]["note"] == "second highlight"
+
+
+def test_duplicate_empty_note_adds_no_sibling(db):
+    """Re-submitting with an empty note shouldn't fabricate a sibling record."""
+    kade = db.create_user("Kade")
+    coll = db.create_collection("Inbox", kade["id"])
+    first = db.add_resource(url="https://example.com/x", collection_id=coll["id"],
+                             submitted_by=kade["id"], note="original")
+    db.add_resource(url="https://example.com/x", collection_id=coll["id"],
+                     submitted_by=kade["id"], note="")
+    assert db.list_resource_notes(first["id"]) == []
+
+
+def test_duplicate_ingest_preserves_sibling_notes_idempotently(db):
+    """Retried publish delivery must not duplicate sibling notes."""
+    kade = db.create_user("Kade")
+    coll = db.create_collection("Inbox", kade["id"])
+    db.add_resource(url="https://example.com/x", collection_id=coll["id"],
+                     submitted_by=kade["id"], note="local")
+    payload = {"url": "https://example.com/x", "title": "X", "note": "foreign note",
+               "tags": ["t1"]}
+    r1 = db.ingest_remote_publish(payload, source_instance_id="remote1",
+                                    target_collection_id=coll["id"],
+                                    source_server="https://other.example.com")
+    assert r1["status"] == "duplicate"
+    assert r1["note_added"] is True
+    # Retry
+    r2 = db.ingest_remote_publish(payload, source_instance_id="remote1",
+                                    target_collection_id=coll["id"],
+                                    source_server="https://other.example.com")
+    assert r2["status"] == "duplicate"
+    siblings = db.list_resource_notes(r1["id"])
+    assert len(siblings) == 1
+    assert siblings[0]["note"] == "foreign note"
+    assert siblings[0]["source_server"] == "https://other.example.com"
+
+
+def test_cross_server_first_ingest_quarantines_note(db):
+    """First-time cross-server ingest: resources.note stays empty, note lives in sibling table."""
+    kade = db.create_user("Kade")
+    coll = db.create_collection("Inbox", kade["id"])
+    payload = {"url": "https://example.com/new", "title": "New",
+               "note": "from another server", "submitter_name": "Remote Rocco"}
+    result = db.ingest_remote_publish(payload, source_instance_id="remote2",
+                                       target_collection_id=coll["id"],
+                                       source_server="https://other.example.com")
+    assert result["status"] == "ingested"
+    primary = db.get_resource(result["id"])
+    assert primary["note"] == ""  # quarantined -- not on the resource row
+    siblings = db.list_resource_notes(result["id"])
+    assert len(siblings) == 1
+    assert siblings[0]["note"] == "from another server"
+    assert siblings[0]["source_server"] == "https://other.example.com"
+    assert siblings[0]["submitter_name"] == "Remote Rocco"
+
+
+def test_outbound_publish_payload_excludes_sibling_notes(db):
+    """get_resource (used by the publish payload builder) must not include sibling notes."""
+    kade = db.create_user("Kade")
+    rocco = db.create_user("Rocco")
+    coll = db.create_collection("Shared", kade["id"])
+    db.add_collection_member(coll["id"], rocco["id"])
+    first = db.add_resource(url="https://example.com/x", collection_id=coll["id"],
+                             submitted_by=kade["id"], note="mine")
+    db.add_resource(url="https://example.com/x", collection_id=coll["id"],
+                     submitted_by=rocco["id"], note="rocco's")
+    # Foreign server submits into it too
+    db.ingest_remote_publish(
+        {"url": "https://example.com/x", "note": "from remote"},
+        source_instance_id="rem", target_collection_id=coll["id"],
+        source_server="https://other.example.com",
+    )
+    # The publish payload builder uses get_resource() only
+    resource = db.get_resource(first["id"])
+    assert "foreign_notes" not in resource
+    assert "sibling_notes" not in resource
+    assert "resource_notes" not in resource
+    # Primary note is the local author's only; no foreign or second-submitter
+    # content bleeds into what gets federated back out.
+    assert resource["note"] == "mine"
+    # But siblings exist in the quarantine table for local rendering
+    assert len(db.list_resource_notes(first["id"])) == 2
+
+
+def test_duplicate_ingest_unions_tags(db):
+    """Tags from a duplicate cross-server publish get unioned onto the existing resource."""
+    kade = db.create_user("Kade")
+    coll = db.create_collection("Inbox", kade["id"])
+    res = db.add_resource(url="https://example.com/x", collection_id=coll["id"],
+                           submitted_by=kade["id"], tags=["ai"])
+    db.ingest_remote_publish(
+        {"url": "https://example.com/x", "tags": ["agents", "ai"]},
+        source_instance_id="rem", target_collection_id=coll["id"],
+        source_server="https://other.example.com",
+    )
+    labels = sorted(t["label"] for t in db._get_tags(res["id"]))
+    assert labels == ["agents", "ai"]
+
+
 def test_webhooks_without_collection_still_fire(db):
     """System events without collection_id (e.g. user_banned) bypass the membership filter."""
     kade = db.create_user("Kade")
