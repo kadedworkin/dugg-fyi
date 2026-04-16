@@ -2409,7 +2409,11 @@ class DuggDB:
     def _dispatch_webhooks(self, event: dict, sync: bool = False):
         """Fire webhooks matching this event. Async by default; sync=True waits for completion."""
         import threading
-        hooks = self.get_webhooks_for_event(event["event_type"], event.get("instance_id"))
+        hooks = self.get_webhooks_for_event(
+            event["event_type"],
+            event.get("instance_id"),
+            collection_id=event.get("collection_id"),
+        )
         if not hooks:
             return
         actor_name = ""
@@ -2617,9 +2621,40 @@ class DuggDB:
         return {"id": sub_id, "instance_id": instance_id, "user_id": user_id,
                 "callback_url": callback_url, "event_types": event_types or [], "status": "active"}
 
-    def get_webhooks_for_event(self, event_type: str, instance_id: Optional[str] = None) -> list[dict]:
-        """Get active webhook subscriptions that match an event type. Always includes server-wide (NULL instance_id) hooks."""
-        if instance_id:
+    def get_webhooks_for_event(self, event_type: str, instance_id: Optional[str] = None,
+                               collection_id: Optional[str] = None) -> list[dict]:
+        """Get active webhook subscriptions that match an event type.
+
+        When `collection_id` is provided, only returns webhooks whose owning
+        user has an *active* membership in that collection — so banned users
+        (directly or via cascade) stop receiving notifications as soon as
+        their `collection_members.status` flips to 'banned'.
+
+        Always includes server-wide (NULL instance_id) hooks. Events without
+        a collection_id (system events like user_banned) bypass the
+        membership filter.
+        """
+        if collection_id:
+            if instance_id:
+                rows = self.conn.execute(
+                    """SELECT ws.* FROM webhook_subscriptions ws
+                       INNER JOIN collection_members cm ON cm.user_id = ws.user_id
+                       WHERE (ws.instance_id = ? OR ws.instance_id IS NULL)
+                         AND ws.status = 'active'
+                         AND cm.collection_id = ?
+                         AND cm.status = 'active'""",
+                    (instance_id, collection_id),
+                ).fetchall()
+            else:
+                rows = self.conn.execute(
+                    """SELECT ws.* FROM webhook_subscriptions ws
+                       INNER JOIN collection_members cm ON cm.user_id = ws.user_id
+                       WHERE ws.status = 'active'
+                         AND cm.collection_id = ?
+                         AND cm.status = 'active'""",
+                    (collection_id,),
+                ).fetchall()
+        elif instance_id:
             rows = self.conn.execute(
                 "SELECT * FROM webhook_subscriptions WHERE (instance_id = ? OR instance_id IS NULL) AND status = 'active'",
                 (instance_id,),

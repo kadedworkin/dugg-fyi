@@ -1023,6 +1023,72 @@ def test_webhook_success_resets_failures(db):
     assert webhooks[0]["failure_count"] == 0
 
 
+def test_webhooks_filtered_by_collection_membership(db):
+    """Webhooks only fire for users with active membership in the event's collection."""
+    kade = db.create_user("Kade")
+    rocco = db.create_user("Rocco")
+    coll = db.create_collection("Shared", kade["id"])
+    db.add_collection_member(coll["id"], rocco["id"])
+    db.subscribe_webhook(kade["id"], "https://hooks.example.com/owner")
+    db.subscribe_webhook(rocco["id"], "https://hooks.example.com/member")
+
+    hooks = db.get_webhooks_for_event("resource_added", collection_id=coll["id"])
+    urls = sorted(h["callback_url"] for h in hooks)
+    assert urls == ["https://hooks.example.com/member", "https://hooks.example.com/owner"]
+
+
+def test_webhooks_suppressed_after_direct_ban(db):
+    """A banned member's webhook must stop firing for events in that collection."""
+    kade = db.create_user("Kade")
+    rocco = db.create_user("Rocco")
+    coll = db.create_collection("Shared", kade["id"])
+    db.add_collection_member(coll["id"], rocco["id"])
+    db.subscribe_webhook(kade["id"], "https://hooks.example.com/owner")
+    db.subscribe_webhook(rocco["id"], "https://hooks.example.com/member")
+
+    db.ban_member(coll["id"], rocco["id"], cascade=False)
+
+    hooks = db.get_webhooks_for_event("resource_added", collection_id=coll["id"])
+    urls = [h["callback_url"] for h in hooks]
+    assert urls == ["https://hooks.example.com/owner"]
+
+
+def test_webhooks_suppressed_after_cascade_ban(db):
+    """Cascade-banned users (depth-1 invitees of the banned user) also lose webhook delivery."""
+    kade = db.create_user("Kade")
+    rocco = db.create_user("Rocco")
+    sam = db.create_user("Sam")
+    coll = db.create_collection("Shared", kade["id"])
+    db.invite_member(coll["id"], kade["id"], rocco["id"])
+    db.invite_member(coll["id"], rocco["id"], sam["id"])
+    db.subscribe_webhook(kade["id"], "https://hooks.example.com/owner")
+    db.subscribe_webhook(rocco["id"], "https://hooks.example.com/rocco")
+    db.subscribe_webhook(sam["id"], "https://hooks.example.com/sam")
+
+    # Pre-ban: all three fire
+    hooks = db.get_webhooks_for_event("resource_added", collection_id=coll["id"])
+    assert len(hooks) == 3
+
+    # Ban Rocco with cascade -- Sam is depth-1, hard-pruned regardless of grace
+    db.ban_member(coll["id"], rocco["id"], cascade=True)
+
+    hooks = db.get_webhooks_for_event("resource_added", collection_id=coll["id"])
+    urls = [h["callback_url"] for h in hooks]
+    assert urls == ["https://hooks.example.com/owner"]
+
+
+def test_webhooks_without_collection_still_fire(db):
+    """System events without collection_id (e.g. user_banned) bypass the membership filter."""
+    kade = db.create_user("Kade")
+    rocco = db.create_user("Rocco")
+    db.subscribe_webhook(kade["id"], "https://hooks.example.com/owner")
+    db.subscribe_webhook(rocco["id"], "https://hooks.example.com/orphan")
+
+    hooks = db.get_webhooks_for_event("user_banned")
+    urls = sorted(h["callback_url"] for h in hooks)
+    assert urls == ["https://hooks.example.com/orphan", "https://hooks.example.com/owner"]
+
+
 # --- Inbound Publish (Remote Ingest) ---
 
 def test_ingest_remote_publish(db):
