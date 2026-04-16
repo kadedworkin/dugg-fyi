@@ -487,17 +487,17 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="dugg_webhook_subscribe",
-            description="Subscribe a webhook to receive real-time event notifications from a Dugg instance. The callback URL receives POST requests with event payloads.",
+            description="Subscribe a webhook to receive real-time event notifications. Omit instance_id to fire on all events this server emits (most common for personal Slack notifications). Slack incoming-webhook URLs are auto-detected and formatted.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "instance_id": {"type": "string", "description": "Instance to subscribe to"},
-                    "callback_url": {"type": "string", "description": "URL to POST event payloads to"},
+                    "callback_url": {"type": "string", "description": "URL to POST event payloads to (e.g. a Slack incoming-webhook URL)"},
+                    "instance_id": {"type": "string", "description": "Optional — scope to a specific subscribed instance. Omit for all server events.", "default": ""},
                     "event_types": {"type": "array", "items": {"type": "string"}, "description": "Event types to subscribe to (empty = all)", "default": []},
                     "secret": {"type": "string", "description": "HMAC secret for signing webhook payloads (optional)", "default": ""},
                     "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
                 },
-                "required": ["instance_id", "callback_url"],
+                "required": ["callback_url"],
             },
         ),
         Tool(
@@ -1909,13 +1909,13 @@ def _handle_mark_seen(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
 
 
 def _handle_webhook_subscribe(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
-    instance_id = args["instance_id"]
+    instance_id = args.get("instance_id") or None
     callback_url = args["callback_url"]
     event_types = args.get("event_types", [])
     secret = args.get("secret", "")
     result = d.subscribe_webhook(user_id, callback_url, instance_id=instance_id, event_types=event_types, secret=secret)
     lines = [f"Webhook subscribed: {result['callback_url']}"]
-    lines.append(f"Instance: {instance_id}")
+    lines.append(f"Instance: {instance_id or 'all (server-wide)'}")
     if event_types:
         lines.append(f"Events: {', '.join(event_types)}")
     else:

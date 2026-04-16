@@ -13,6 +13,8 @@ dugg webhook test
 
 Dugg auto-detects Slack URLs and formats messages with rich blocks (title, URL, submitter, note, tags).
 
+**New user on an existing server?** See [SLACK_NOTIFICATIONS.md](SLACK_NOTIFICATIONS.md) for a step-by-step walkthrough covering Slack app setup, webhook URL, and registration via agent / curl / CLI.
+
 ### Slash command (`/dugg` in Slack)
 
 Set up a Slack app with a slash command pointing to your server:
