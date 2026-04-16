@@ -1374,7 +1374,7 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
     async def lifespan(app):
         d = get_db()
         sync_task = start_sync_daemon(d, interval=30)
-        rss_task = start_rss_daemon(d, interval=60)
+        rss_task = start_rss_daemon(d, interval=300)
         logger.info("Dugg HTTP server started — sync + RSS daemons running")
         try:
             yield
