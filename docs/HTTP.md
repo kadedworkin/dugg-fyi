@@ -96,3 +96,20 @@ curl -X POST http://localhost:8411/tools/dugg_search \
   -H "Content-Type: application/json" \
   -d '{"query": "webhook architectures"}'
 ```
+
+**Paste raw content with a publication date:**
+
+```bash
+curl -X POST http://localhost:8411/tools/dugg_paste \
+  -H "X-Dugg-Key: dugg_your_api_key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Newsletter: Weekly roundup",
+    "body": "...",
+    "source_type": "email",
+    "source_label": "from editor@example.com",
+    "published_at": "2026-04-15T07:30:00Z"
+  }'
+```
+
+`published_at` is optional; when present it surfaces in feed/search output as `(published YYYY-MM-DD)`.

@@ -49,6 +49,7 @@ When an email arrives:
 2. Parses subdomain -> server hostname, local part -> API key
 3. POSTs to `https://{hostname}/tools/dugg_paste` with the API key
 4. Subject becomes the title, content is parsed and indexed
+5. The email's `Date` header is normalized to ISO 8601 and passed as `published_at`, so the feed can show both "added on" and "published" (original send) dates
 
 Fire-and-forget — no retries, no queues.
 

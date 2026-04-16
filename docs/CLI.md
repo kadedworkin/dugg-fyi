@@ -13,6 +13,8 @@ Dugg ships a full management CLI alongside the MCP server.
 | `dugg add <url> [--note ...]` | Add a resource (URL auto-detected — `dugg https://...` works too) |
 | `dugg feed` | Show recent resources with server health footer |
 | `dugg search <query>` | Full-text search |
+| `dugg paste <title> [--body ... \| --file ...] [--published-at ...]` | Add raw content (no URL) — emails, newsletter excerpts, notes |
+| `dugg link <resource-id>` | Print the shareable `/r/{id}` viewer URL for a resource |
 | `dugg status` | Dashboard: user, DB path, server, collections, resources, webhooks, health |
 | `dugg health` | Ping the configured server and show status + timestamp |
 | `dugg servers` | List this server, subscribed instances, and publish targets |
@@ -23,12 +25,26 @@ Dugg ships a full management CLI alongside the MCP server.
 | `dugg webhook list` | List active webhooks |
 | `dugg webhook remove <id>` | Remove a webhook |
 | `dugg webhook test` | Fire a test event to all webhooks |
+| `dugg rotate-key [--key OLD] [--server URL]` | Issue a new API key, invalidating the current one (works against local DB or remote server) |
 | `dugg set-config <key> <value>` | Set server config (e.g., `server_url`, `server_name`) |
+| `dugg enable-shared-default <collection-id>` | Owner-only: turn a collection into the shared Default for all users on a hosted server |
 | `dugg add-user <name> [--server URL]` | Create a user (local or remote) |
 | `dugg invite-user <name>` | Generate an invite token with a redemption link |
 | `dugg invites` | List invite tokens (pending, redeemed, expired) |
 | `dugg redeem <token>` | Redeem an invite token (both keys auto-saved to `.dugg-env`) |
 | `dugg admin` | Launch the terminal admin UI |
+
+## Feed & search output
+
+Both `dugg feed` and `dugg search` render resources in a three-line block:
+
+```
+  {title}
+    {url}
+    by {submitter} on {YYYY-MM-DD} (published {YYYY-MM-DD})
+```
+
+The `(published ...)` segment appears when the resource carries a publication date in `raw_metadata.published_at` (set automatically during URL enrichment, via the email worker's `Date` header, or explicitly with `dugg paste --published-at`). It's omitted when missing or equal to the added date.
 
 ## URL auto-routing
 

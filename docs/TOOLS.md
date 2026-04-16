@@ -13,7 +13,7 @@ Dugg exposes 44+ tools via MCP. Your agent calls these directly — no REST API 
 | `dugg_get` | Get full details for a specific resource. |
 | `dugg_enrich` | Re-trigger enrichment (metadata, transcript) for a resource. |
 | `dugg_edit` | Update a resource's metadata or content (submitter only). |
-| `dugg_paste` | Submit raw content (text, HTML, email) as a resource. |
+| `dugg_paste` | Submit raw content (text, HTML, email) as a resource. Accepts `published_at` for the original send/pub date. |
 | `dugg_collections` | List all collections you have access to. |
 | `dugg_create_collection` | Create a new collection. |
 | `dugg_link` | Create a relationship between two resources (knowledge graph). |
@@ -61,6 +61,8 @@ When you add a URL, Dugg automatically:
 - **YouTube**: Pulls title, description, thumbnail via oEmbed. Fetches full transcript via yt-dlp.
 - **Articles**: Extracts clean article text via readability-lxml, with auto-generated summaries.
 - **Everything else**: Pulls Open Graph metadata (title, description, image).
+
+Publication dates are captured automatically from `article:published_time`, `<meta name="date">`, JSON-LD `datePublished`, and `<time datetime>` tags, and stored in `raw_metadata.published_at`. The feed renders them as `by X on {added} (published {pub})`.
 
 Agents can also pre-process resources and pass in their own title, description, transcript, and tags — Dugg stores whatever it gets.
 
