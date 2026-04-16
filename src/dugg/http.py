@@ -671,54 +671,6 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
 {items_html}"""
         return HTMLResponse(_html_page(page_title, body))
 
-    # --- Content View Page ---
-
-    async def handle_content_page(request: Request):
-        """GET /content/{key}/{resource_id} — render pasted content in the browser."""
-        api_key = request.path_params["key"]
-        resource_id = request.path_params["resource_id"]
-        d = get_db()
-        user = d.get_user_by_api_key(api_key)
-
-        if not user:
-            return HTMLResponse(_html_page("Unauthorized", "<h1>Invalid key</h1><p>This link is not valid.</p>"), status_code=401)
-
-        d.touch_user(user["id"])
-        accessible = d._accessible_collection_ids(user["id"])
-
-        resource = d.get_resource(resource_id)
-        if not resource:
-            row = d.conn.execute("SELECT id FROM resources WHERE url = ?", (f"dugg://content/{resource_id}",)).fetchone()
-            if row:
-                resource = d.get_resource(row["id"])
-
-        if not resource or resource.get("collection_id") not in accessible:
-            return HTMLResponse(_html_page("Not Found", "<h1>Not found</h1><p>This content does not exist.</p>"), status_code=404)
-
-        title = resource.get("title") or "Untitled"
-        transcript = resource.get("transcript") or ""
-        author = resource.get("author") or ""
-        created = (resource.get("created_at") or "")[:10]
-        note = resource.get("note") or ""
-        tags = resource.get("tags") or []
-
-        meta_parts = [created]
-        if author:
-            meta_parts.append(author)
-        meta_html = " · ".join(meta_parts)
-
-        note_html = f'<p class="note" style="margin-top:1rem;font-style:italic;">{_xml_escape(note)}</p>' if note else ""
-        tags_html = f'<p style="margin-top:0.5rem;font-size:0.8rem;color:#666;">{", ".join(_xml_escape(t) for t in tags)}</p>' if tags else ""
-
-        content_html = _xml_escape(transcript).replace("\n", "<br>")
-
-        body = f"""<h1>{_xml_escape(title)}</h1>
-<p class="meta" style="margin-bottom:1rem;">{meta_html}</p>
-{note_html}
-{tags_html}
-<div style="margin-top:1.5rem;line-height:1.6;font-size:0.9rem;color:#ccc;white-space:pre-wrap;word-break:break-word;">{content_html}</div>"""
-        return HTMLResponse(_html_page(_xml_escape(title), body))
-
     # --- Key Rotation ---
 
     async def handle_rotate_key(request: Request):
@@ -1395,7 +1347,6 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
         Route("/appeal/{key}", endpoint=handle_appeal_page),
         Route("/appeal/{key}/submit", endpoint=handle_appeal_submit, methods=["POST"]),
         Route("/appeal/{key}/status", endpoint=handle_appeal_status),
-        Route("/content/{key}/{resource_id}", endpoint=handle_content_page),
         Route("/r/{resource_id}", endpoint=handle_resource_page),
         Route("/r/{resource_id}/unlock", endpoint=handle_resource_unlock, methods=["POST"]),
         Route("/rotate-key", endpoint=handle_rotate_key, methods=["POST"]),

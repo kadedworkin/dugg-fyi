@@ -59,7 +59,9 @@ Configure your MCP client with the SSE transport and your API key:
 | `/invite/{token}` | GET | None | Invite page (HTML for browsers, JSON for agents via `Accept: application/json`) |
 | `/invite/{token}/redeem` | POST | None | Process invite (form or JSON) |
 | `/feed/{key}` | GET | None | Browser-friendly feed (HTML or Atom XML) |
-| `/content/{key}/{id}` | GET | Key-in-URL | View full content of a pasted/forwarded resource |
+| `/r/{id}` | GET | Cookie/Header | View full content of a resource. Unauthenticated visitors get a paste-your-key form; submitting sets an HttpOnly cookie for subsequent visits. |
+| `/r/{id}/unlock` | POST | Form | Validate pasted key, set cookie, redirect to `/r/{id}`. |
+| `/rotate-key` | POST | Key | Issue a new API key for the caller, invalidating the old one. |
 | `/paste/{key}` | GET | Key-in-URL | Browser form for pasting raw content |
 | `/health` | GET | None | Liveness check |
 | `/bootstrap` | POST | None | Create first admin user (disabled once any user exists) |
