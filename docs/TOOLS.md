@@ -53,6 +53,10 @@ Dugg exposes 44+ tools via MCP. Your agent calls these directly — no REST API 
 | `dugg_set_successor` | Designate a successor for instance ownership (owner only). |
 | `dugg_prune_inactive` | List or remove inactive members past grace period (owner only). |
 | `dugg_welcome` | Orientation for new connections — instance topics, activity, rate limits. |
+| `dugg_rss_subscribe` | Subscribe a collection to an RSS/Atom feed (parameterized/authenticated URLs supported). |
+| `dugg_rss_list` | List the authenticated user's RSS subscriptions. |
+| `dugg_rss_remove` | Remove an RSS subscription (ingested resources are kept). |
+| `dugg_rss_poll` | Manually poll one subscription (or all) right now, bypassing the schedule. |
 
 ## Enrichment
 

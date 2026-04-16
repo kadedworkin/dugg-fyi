@@ -21,6 +21,11 @@ Dugg ships a full management CLI alongside the MCP server.
 | `dugg remove <id-or-url>` | Delete a resource (submitter or owner) |
 | `dugg edit <id-or-url> [--title ...] [--note ...]` | Edit a resource's title or note (submitter only) |
 | `dugg email` | Show your Dugg email forwarding address |
+| `dugg rss subscribe <url> [--collection ...] [--tag ...] [--interval 1h] [--now]` | Subscribe a collection to an RSS/Atom feed |
+| `dugg rss list` | List your RSS subscriptions with state (active/paused) and last-poll timestamp |
+| `dugg rss remove <sub-id>` | Unsubscribe (ingested resources are kept) |
+| `dugg rss pause <sub-id>` / `rss resume <sub-id>` | Temporarily disable / re-enable polling |
+| `dugg rss poll [<sub-id>]` | Force a poll right now (one subscription, or all active subscriptions) |
 | `dugg webhook add <url>` | Subscribe a webhook (Slack URLs auto-detected) |
 | `dugg webhook list` | List active webhooks |
 | `dugg webhook remove <id>` | Remove a webhook |
@@ -45,6 +50,24 @@ Both `dugg feed` and `dugg search` render resources in a three-line block:
 ```
 
 The `(published ...)` segment appears when the resource carries a publication date in `raw_metadata.published_at` (set automatically during URL enrichment, via the email worker's `Date` header, or explicitly with `dugg paste --published-at`). It's omitted when missing or equal to the added date.
+
+## RSS subscriptions
+
+Dugg can poll RSS/Atom feeds on a schedule and ingest new entries as resources. Subscriptions belong to a user + collection pair; the server-side polling daemon runs automatically in HTTP mode.
+
+```bash
+dugg rss subscribe https://daringfireball.net/feeds/main
+dugg rss subscribe https://atp.fm/rss?token=PRIVATE_TOKEN --tag podcasts --interval 6h
+dugg rss subscribe https://every.to/feed --collection Reading --now
+dugg rss list
+dugg rss poll <sub-id>
+```
+
+**Parameterized / authenticated feed URLs** are preserved as-is — subscription-gated feeds like ATP premium, Every.to, or Stratechery work. Private links are flagged in `raw_metadata.is_private_link` so other viewers know they may need their own subscription; titles, descriptions, and publication dates still land in everyone's feed.
+
+**Intervals:** `1h` / `30m` / `6h` / `1d` or bare seconds (minimum 60s).
+
+For a client-side / single-player watcher that pushes into one or more Dugg servers without touching the server's polling daemon, see `agent/dugg_rss_agent.py`.
 
 ## URL auto-routing
 

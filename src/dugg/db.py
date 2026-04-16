@@ -289,6 +289,23 @@ class DuggDB:
                 value TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS rss_subscriptions (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES users(id),
+                collection_id TEXT NOT NULL REFERENCES collections(id),
+                feed_url TEXT NOT NULL,
+                feed_title TEXT DEFAULT '',
+                tag_label TEXT DEFAULT 'rss',
+                poll_interval_seconds INTEGER DEFAULT 3600,
+                last_polled_at TEXT DEFAULT '',
+                etag TEXT DEFAULT '',
+                last_modified TEXT DEFAULT '',
+                seen_entry_ids TEXT DEFAULT '[]',
+                enabled INTEGER DEFAULT 1,
+                created_at TEXT NOT NULL,
+                UNIQUE(user_id, collection_id, feed_url)
+            );
+
             CREATE VIRTUAL TABLE IF NOT EXISTS resources_fts USING fts5(
                 title, description, author, transcript, note, summary,
                 content='resources',
@@ -505,6 +522,106 @@ class DuggDB:
         self.conn.execute("UPDATE users SET api_key = ? WHERE id = ?", (new_key, user_id))
         self.conn.commit()
         return new_key
+
+    # --- RSS Subscriptions ---
+
+    def add_rss_subscription(
+        self,
+        user_id: str,
+        collection_id: str,
+        feed_url: str,
+        *,
+        tag_label: str = "rss",
+        poll_interval_seconds: int = 3600,
+        feed_title: str = "",
+    ) -> dict:
+        """Register a feed for periodic polling. Returns the subscription row."""
+        sub_id = _uuid()
+        now = _now()
+        self.conn.execute(
+            """INSERT INTO rss_subscriptions
+                 (id, user_id, collection_id, feed_url, feed_title, tag_label,
+                  poll_interval_seconds, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (sub_id, user_id, collection_id, feed_url, feed_title, tag_label,
+             poll_interval_seconds, now),
+        )
+        self.conn.commit()
+        return self.get_rss_subscription(sub_id)
+
+    def get_rss_subscription(self, sub_id: str) -> Optional[dict]:
+        row = self.conn.execute(
+            "SELECT * FROM rss_subscriptions WHERE id = ?", (sub_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def list_rss_subscriptions(self, user_id: Optional[str] = None) -> list[dict]:
+        if user_id:
+            rows = self.conn.execute(
+                "SELECT * FROM rss_subscriptions WHERE user_id = ? ORDER BY created_at DESC",
+                (user_id,),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM rss_subscriptions ORDER BY created_at DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_due_rss_subscriptions(self) -> list[dict]:
+        """Return enabled subscriptions whose last_polled_at + interval has passed."""
+        rows = self.conn.execute(
+            "SELECT * FROM rss_subscriptions WHERE enabled = 1"
+        ).fetchall()
+        now = datetime.now(timezone.utc)
+        due: list[dict] = []
+        for r in rows:
+            last = r["last_polled_at"] or ""
+            if not last:
+                due.append(dict(r))
+                continue
+            try:
+                parsed = datetime.fromisoformat(last.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+            except ValueError:
+                due.append(dict(r))
+                continue
+            age = (now - parsed).total_seconds()
+            if age >= (r["poll_interval_seconds"] or 3600):
+                due.append(dict(r))
+        return due
+
+    def update_rss_subscription_state(
+        self,
+        sub_id: str,
+        *,
+        etag: str = "",
+        last_modified: str = "",
+        seen_entry_ids: str = "",
+        feed_title: str = "",
+    ) -> None:
+        self.conn.execute(
+            """UPDATE rss_subscriptions
+               SET etag = ?, last_modified = ?, seen_entry_ids = ?,
+                   feed_title = COALESCE(NULLIF(?, ''), feed_title),
+                   last_polled_at = ?
+               WHERE id = ?""",
+            (etag, last_modified, seen_entry_ids or "[]", feed_title, _now(), sub_id),
+        )
+        self.conn.commit()
+
+    def remove_rss_subscription(self, sub_id: str) -> bool:
+        cur = self.conn.execute("DELETE FROM rss_subscriptions WHERE id = ?", (sub_id,))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def set_rss_subscription_enabled(self, sub_id: str, enabled: bool) -> bool:
+        cur = self.conn.execute(
+            "UPDATE rss_subscriptions SET enabled = ? WHERE id = ?",
+            (1 if enabled else 0, sub_id),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
 
     # --- User Agents ---
 

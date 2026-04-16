@@ -699,6 +699,54 @@ async def list_tools() -> list[Tool]:
                 },
             },
         ),
+        Tool(
+            name="dugg_rss_subscribe",
+            description="Subscribe a collection to an RSS/Atom feed. The server polls the feed periodically and auto-ingests new entries as resources. Parameterized/authenticated feed URLs (e.g. ATP.fm premium) are preserved as-is; private links are flagged in raw_metadata so other viewers know they may need their own subscription.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "Feed URL (RSS or Atom). May include auth query params."},
+                    "collection": {"type": "string", "description": "Collection name (uses Default if omitted)", "default": ""},
+                    "tag": {"type": "string", "description": "Tag to apply to every ingested entry", "default": "rss"},
+                    "interval": {"type": "string", "description": "Poll interval: '30m', '1h', '6h', or bare seconds", "default": "1h"},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+                "required": ["url"],
+            },
+        ),
+        Tool(
+            name="dugg_rss_list",
+            description="List all RSS subscriptions belonging to the authenticated user.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+            },
+        ),
+        Tool(
+            name="dugg_rss_remove",
+            description="Remove an RSS subscription by id. Previously-ingested resources are kept.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "subscription_id": {"type": "string", "description": "ID of the subscription to remove"},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+                "required": ["subscription_id"],
+            },
+        ),
+        Tool(
+            name="dugg_rss_poll",
+            description="Manually poll a single RSS subscription (or all user subscriptions) right now, bypassing the scheduled interval.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "subscription_id": {"type": "string", "description": "ID of one subscription to poll. Omit to poll all.", "default": ""},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+            },
+        ),
     ]
 
 
@@ -810,6 +858,14 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = _handle_edit(d, user_id, arguments)
         elif name == "dugg_my_servers":
             result = _handle_my_servers(d, user_id)
+        elif name == "dugg_rss_subscribe":
+            result = await _handle_rss_subscribe(d, user_id, arguments)
+        elif name == "dugg_rss_list":
+            result = _handle_rss_list(d, user_id)
+        elif name == "dugg_rss_remove":
+            result = _handle_rss_remove(d, user_id, arguments)
+        elif name == "dugg_rss_poll":
+            result = await _handle_rss_poll(d, user_id, arguments)
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
@@ -1036,6 +1092,128 @@ def _handle_my_servers(d: DuggDB, user_id: str) -> list[TextContent]:
         lines.append(f"  Resources: {scope['resource_count']} ({scope['recent_count']} in last 7d)")
         lines.append("")
 
+    return [TextContent(type="text", text="\n".join(lines))]
+
+
+def _parse_rss_interval(raw: str) -> int:
+    """Parse a human interval like '1h', '30m', '15s'. Clamps to >= 60s."""
+    raw = (raw or "").strip().lower()
+    if not raw:
+        return 3600
+    if raw.isdigit():
+        return max(60, int(raw))
+    try:
+        num = int(raw[:-1])
+    except ValueError:
+        return 3600
+    suffix = raw[-1]
+    if suffix == "s":
+        return max(60, num)
+    if suffix == "m":
+        return max(60, num * 60)
+    if suffix == "h":
+        return max(60, num * 3600)
+    if suffix == "d":
+        return max(60, num * 86400)
+    return 3600
+
+
+async def _handle_rss_subscribe(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    import sqlite3
+    from dugg.rss import sync_feed
+
+    url = args["url"]
+    collection_name = args.get("collection", "")
+    tag_label = args.get("tag", "") or "rss"
+    interval_raw = args.get("interval", "1h") or "1h"
+    interval_seconds = _parse_rss_interval(interval_raw)
+
+    if collection_name:
+        coll_id = None
+        for c in d.list_collections(user_id):
+            if c["name"].lower() == collection_name.lower():
+                coll_id = c["id"]
+                break
+        if not coll_id:
+            result = d.create_collection(collection_name, user_id, visibility="private")
+            coll_id = result["id"]
+    else:
+        coll_id = ensure_default_collection(user_id)
+
+    try:
+        sub = d.add_rss_subscription(
+            user_id=user_id,
+            collection_id=coll_id,
+            feed_url=url,
+            tag_label=tag_label,
+            poll_interval_seconds=interval_seconds,
+        )
+    except sqlite3.IntegrityError:
+        return [TextContent(type="text", text=f"Already subscribed to {url} for that collection.")]
+
+    lines = [
+        f"Subscribed: {url}",
+        f"  ID: {sub['id']}",
+        f"  Collection: {collection_name or 'Default'}",
+        f"  Poll every: {interval_seconds}s",
+        f"  Tag: {tag_label}",
+    ]
+    return [TextContent(type="text", text="\n".join(lines))]
+
+
+def _handle_rss_list(d: DuggDB, user_id: str) -> list[TextContent]:
+    subs = d.list_rss_subscriptions(user_id=user_id)
+    if not subs:
+        return [TextContent(type="text", text="No RSS subscriptions.")]
+
+    lines = [f"{len(subs)} subscription(s):"]
+    for s in subs:
+        state = "paused" if not s["enabled"] else "active"
+        last = (s.get("last_polled_at") or "").split("T")[0] or "never"
+        lines.append(f"  [{state}] {s['feed_url']}")
+        lines.append(f"    id: {s['id']}  every: {s['poll_interval_seconds']}s  last: {last}")
+        if s.get("feed_title"):
+            lines.append(f"    title: {s['feed_title']}")
+    return [TextContent(type="text", text="\n".join(lines))]
+
+
+def _handle_rss_remove(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    sub_id = args["subscription_id"]
+    sub = d.get_rss_subscription(sub_id)
+    if not sub or sub.get("user_id") != user_id:
+        return [TextContent(type="text", text="Subscription not found.")]
+    d.remove_rss_subscription(sub_id)
+    return [TextContent(type="text", text=f"Removed subscription {sub_id}.")]
+
+
+async def _handle_rss_poll(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    from dugg.rss import sync_feed
+    sub_id = args.get("subscription_id", "")
+
+    if sub_id:
+        sub = d.get_rss_subscription(sub_id)
+        if not sub or sub.get("user_id") != user_id:
+            return [TextContent(type="text", text="Subscription not found.")]
+        subs = [sub]
+    else:
+        subs = [s for s in d.list_rss_subscriptions(user_id=user_id) if s["enabled"]]
+        if not subs:
+            return [TextContent(type="text", text="No active subscriptions to poll.")]
+
+    lines = []
+    for sub in subs:
+        try:
+            result = await sync_feed(d, dict(sub))
+            d.update_rss_subscription_state(
+                sub["id"],
+                etag=result["etag"],
+                last_modified=result["last_modified"],
+                seen_entry_ids=result["seen_entry_ids"],
+                feed_title=result["feed_title"] or sub.get("feed_title") or "",
+            )
+            lines.append(f"  {sub['feed_url']}: +{result['new']} new, {result['skipped']} skipped (HTTP {result['status']})")
+        except Exception as e:
+            lines.append(f"  {sub['feed_url']}: ERROR {e}")
     return [TextContent(type="text", text="\n".join(lines))]
 
 

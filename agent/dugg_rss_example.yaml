@@ -1,0 +1,50 @@
+# Dugg RSS Agent config — copy to ~/.dugg/rss.yaml and edit.
+#
+# Run:
+#   python dugg_rss_agent.py --once       # poll once and exit
+#   python dugg_rss_agent.py --watch      # daemon: poll on each feed's interval
+
+servers:
+  - name: chino-bandido
+    url: https://chino-bandido.kadedworkin.com
+    api_key: dugg_REPLACE_ME
+
+  - name: local
+    url: http://localhost:8411
+    api_key: dugg_REPLACE_ME_TOO
+
+# Where entries land if a feed doesn't specify its own target.
+default_target:
+  server: chino-bandido
+  collection: Default          # empty → the server's Default
+
+feeds:
+  # Simple case — everything from Daring Fireball goes to Reading.
+  - url: https://daringfireball.net/feeds/main
+    tag: daringfireball
+    interval: 1h
+    target:
+      server: chino-bandido
+      collection: Reading
+
+  # Parameterized / authenticated feed — URL is preserved as-is, private
+  # link is flagged in raw_metadata so other viewers know they need their
+  # own subscription. Titles + pub dates still captured either way.
+  - url: https://atp.fm/rss?token=YOUR_PREMIUM_TOKEN
+    tag: atp
+    interval: 6h
+    target:
+      server: chino-bandido
+      collection: Podcasts
+
+  # Routing rules — first rule whose match_tags overlap the feed's tag set
+  # wins. Useful for splitting one feed across collections/servers.
+  - url: https://example.com/mixed.xml
+    tag: mixed
+    interval: 30m
+    rules:
+      - match_tags: [mixed]
+        target:
+          server: chino-bandido
+          collection: Reading
+      # Fallback when no rule matches falls through to default_target.

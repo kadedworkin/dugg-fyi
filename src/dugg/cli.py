@@ -2,7 +2,9 @@
 
 import argparse
 import json
+import sqlite3
 import sys
+from typing import Optional
 
 from dugg.db import DuggDB, DEFAULT_DB_PATH, DEFAULT_API_KEY
 
@@ -1408,6 +1410,36 @@ def main():
     p_email = sub.add_parser("email", help="Show your email forwarding address for each connected instance")
     p_email.add_argument("--key", default=None, help="API key (uses local user if omitted)")
 
+    p_rss = sub.add_parser("rss", help="Subscribe to RSS / Atom feeds and ingest entries as resources")
+    rss_sub = p_rss.add_subparsers(dest="rss_action")
+
+    pr_sub = rss_sub.add_parser("subscribe", help="Register a feed URL to poll")
+    pr_sub.add_argument("url", help="Feed URL (RSS or Atom; parameterized/auth URLs are preserved as-is)")
+    pr_sub.add_argument("--collection", default="", help="Collection name or id (defaults to Default)")
+    pr_sub.add_argument("--interval", default="1h", help="Poll interval: 30m, 1h, 6h, 1d, or bare seconds (default: 1h, min 60s)")
+    pr_sub.add_argument("--tag", default="rss", help="Tag applied to each ingested entry (default: rss)")
+    pr_sub.add_argument("--now", action="store_true", help="Poll the feed immediately after subscribing")
+    pr_sub.add_argument("--key", default=None, help="Your API key")
+
+    pr_list = rss_sub.add_parser("list", help="List your RSS subscriptions")
+    pr_list.add_argument("--key", default=None, help="Your API key")
+
+    pr_rm = rss_sub.add_parser("remove", help="Remove an RSS subscription")
+    pr_rm.add_argument("sub_id", help="Subscription id")
+    pr_rm.add_argument("--key", default=None, help="Your API key")
+
+    pr_pause = rss_sub.add_parser("pause", help="Pause polling for a subscription")
+    pr_pause.add_argument("sub_id", help="Subscription id")
+    pr_pause.add_argument("--key", default=None, help="Your API key")
+
+    pr_resume = rss_sub.add_parser("resume", help="Resume polling for a subscription")
+    pr_resume.add_argument("sub_id", help="Subscription id")
+    pr_resume.add_argument("--key", default=None, help="Your API key")
+
+    pr_poll = rss_sub.add_parser("poll", help="Poll a subscription right now (or all if no id given)")
+    pr_poll.add_argument("sub_id", nargs="?", default=None, help="Optional subscription id")
+    pr_poll.add_argument("--key", default=None, help="Your API key")
+
     # If the first arg looks like a URL, treat it as `dugg add <url> ...`
     if len(sys.argv) > 1 and sys.argv[1].startswith(("http://", "https://")):
         sys.argv.insert(1, "add")
@@ -1471,6 +1503,200 @@ def main():
         cmd_welcome(args)
     elif args.command == "email":
         cmd_email(args)
+    elif args.command == "rss":
+        cmd_rss(args)
+
+
+def _resolve_collection(db, user_id: str, name_or_id: str) -> Optional[str]:
+    """Return a collection_id for either an id or a case-insensitive name."""
+    if not name_or_id:
+        return None
+    row = db.conn.execute(
+        "SELECT id FROM collections WHERE id = ?", (name_or_id,)
+    ).fetchone()
+    if row:
+        return row["id"]
+    for c in db.list_collections(user_id):
+        if c["name"].lower() == name_or_id.lower():
+            return c["id"]
+    return None
+
+
+def cmd_rss(args):
+    """Dispatch for `dugg rss <action>`."""
+    action = getattr(args, "rss_action", None)
+    if action == "subscribe":
+        cmd_rss_subscribe(args)
+    elif action == "list":
+        cmd_rss_list(args)
+    elif action == "remove":
+        cmd_rss_remove(args)
+    elif action == "pause":
+        cmd_rss_pause(args)
+    elif action == "resume":
+        cmd_rss_resume(args)
+    elif action == "poll":
+        cmd_rss_poll(args)
+    else:
+        print("Usage: dugg rss {subscribe,list,remove,pause,resume,poll}")
+        sys.exit(1)
+
+
+def cmd_rss_subscribe(args):
+    """Register a feed URL for polling into a collection."""
+    from pathlib import Path
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+    user = _resolve_user(db, args)
+
+    interval_raw = (getattr(args, "interval", "1h") or "1h").strip().lower()
+    interval_seconds = _parse_interval(interval_raw)
+
+    collection_arg = getattr(args, "collection", "") or ""
+    if collection_arg:
+        coll_id = _resolve_collection(db, user["id"], collection_arg)
+        if not coll_id:
+            print(f"Collection not found: {collection_arg}")
+            db.close()
+            sys.exit(1)
+    else:
+        coll_id = _ensure_default_collection(db, user["id"])
+
+    tag_label = getattr(args, "tag", "") or "rss"
+
+    try:
+        sub = db.add_rss_subscription(
+            user_id=user["id"],
+            collection_id=coll_id,
+            feed_url=args.url,
+            tag_label=tag_label,
+            poll_interval_seconds=interval_seconds,
+        )
+    except sqlite3.IntegrityError:
+        print("Already subscribed to that feed for this collection.")
+        db.close()
+        sys.exit(1)
+
+    print(f"  Subscribed: {args.url}")
+    print(f"  ID: {sub['id']}")
+    print(f"  Collection: {collection_arg or 'Default'} ({coll_id[:12]})")
+    print(f"  Poll every: {interval_raw} ({interval_seconds}s)")
+    print(f"  Tag: {tag_label}")
+    if getattr(args, "now", False):
+        print("\nPolling now…")
+        _poll_one_subscription(db, sub["id"])
+    db.close()
+
+
+def cmd_rss_list(args):
+    from pathlib import Path
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+    user = _resolve_user(db, args)
+    subs = db.list_rss_subscriptions(user_id=user["id"])
+    db.close()
+
+    if not subs:
+        print("No RSS subscriptions. Add one with: dugg rss subscribe <url>")
+        return
+    print(f"{len(subs)} subscription(s):\n")
+    for s in subs:
+        state = "paused" if not s["enabled"] else "active"
+        last = (s["last_polled_at"] or "").split("T")[0] or "never"
+        print(f"  [{state}] {s['feed_url']}")
+        print(f"    id: {s['id'][:12]}  every: {s['poll_interval_seconds']}s  last: {last}")
+        if s["feed_title"]:
+            print(f"    title: {s['feed_title']}")
+
+
+def cmd_rss_remove(args):
+    from pathlib import Path
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+    _resolve_user(db, args)
+    ok = db.remove_rss_subscription(args.sub_id)
+    db.close()
+    print("  Removed." if ok else "  Not found.")
+    if not ok:
+        sys.exit(1)
+
+
+def cmd_rss_pause(args):
+    _set_rss_enabled(args, False)
+
+
+def cmd_rss_resume(args):
+    _set_rss_enabled(args, True)
+
+
+def _set_rss_enabled(args, enabled: bool):
+    from pathlib import Path
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+    _resolve_user(db, args)
+    ok = db.set_rss_subscription_enabled(args.sub_id, enabled)
+    db.close()
+    print(f"  {'Resumed' if enabled else 'Paused'}." if ok else "  Not found.")
+    if not ok:
+        sys.exit(1)
+
+
+def cmd_rss_poll(args):
+    """Manually poll a single subscription (or all) right now."""
+    from pathlib import Path
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+    user = _resolve_user(db, args)
+
+    if getattr(args, "sub_id", None):
+        _poll_one_subscription(db, args.sub_id)
+    else:
+        for s in db.list_rss_subscriptions(user_id=user["id"]):
+            if s["enabled"]:
+                _poll_one_subscription(db, s["id"])
+    db.close()
+
+
+def _poll_one_subscription(db, sub_id: str):
+    import asyncio
+    from dugg.rss import sync_feed
+    sub = db.get_rss_subscription(sub_id)
+    if not sub:
+        print(f"  Subscription not found: {sub_id}")
+        return
+    result = asyncio.run(sync_feed(db, sub))
+    db.update_rss_subscription_state(
+        sub["id"],
+        etag=result["etag"],
+        last_modified=result["last_modified"],
+        seen_entry_ids=result["seen_entry_ids"],
+        feed_title=result["feed_title"] or sub.get("feed_title") or "",
+    )
+    db.wait_for_webhooks()
+    print(f"  {sub['feed_url']}: +{result['new']} new, {result['skipped']} skipped (HTTP {result['status']})")
+
+
+def _parse_interval(raw: str) -> int:
+    """Parse a human interval like '1h', '30m', '15s', or a bare integer (seconds)."""
+    raw = (raw or "").strip().lower()
+    if not raw:
+        return 3600
+    if raw.isdigit():
+        return max(60, int(raw))
+    try:
+        num = int(raw[:-1])
+    except ValueError:
+        return 3600
+    suffix = raw[-1]
+    if suffix == "s":
+        return max(60, num)
+    if suffix == "m":
+        return max(60, num * 60)
+    if suffix == "h":
+        return max(60, num * 3600)
+    if suffix == "d":
+        return max(60, num * 86400)
+    return 3600
 
 
 def cmd_email(args):

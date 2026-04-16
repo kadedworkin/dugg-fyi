@@ -31,6 +31,8 @@ dependencies = [
     "uvicorn>=0.27.0",
     "textual>=8.2.3",
     "fastapi>=0.135.3",
+    "feedparser>=6.0.11",
+    "pyyaml>=6.0",
 ]
 
 [project.urls]

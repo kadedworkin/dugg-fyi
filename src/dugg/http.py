@@ -27,6 +27,7 @@ from mcp.server.sse import SseServerTransport
 
 from dugg.db import DuggDB
 from dugg.sync import start_sync_daemon
+from dugg.rss import start_rss_daemon
 
 logger = logging.getLogger("dugg.http")
 
@@ -1373,11 +1374,13 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
     async def lifespan(app):
         d = get_db()
         sync_task = start_sync_daemon(d, interval=30)
-        logger.info("Dugg HTTP server started — sync daemon running")
+        rss_task = start_rss_daemon(d, interval=60)
+        logger.info("Dugg HTTP server started — sync + RSS daemons running")
         try:
             yield
         finally:
             sync_task.cancel()
+            rss_task.cancel()
             if db:
                 db.close()
             logger.info("Dugg HTTP server shut down")
