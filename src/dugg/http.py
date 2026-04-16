@@ -36,6 +36,30 @@ def _xml_escape(s: str) -> str:
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
+def _short_date(value) -> str:
+    if not value:
+        return ""
+    s = str(value).strip()
+    if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+        return s[:10]
+    return ""
+
+
+def _resource_pub_date(resource: dict) -> str:
+    """Pull a publication date (YYYY-MM-DD) out of the resource's raw_metadata, if any."""
+    raw = resource.get("raw_metadata")
+    if not raw:
+        return ""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (ValueError, TypeError):
+            return ""
+    if not isinstance(raw, dict):
+        return ""
+    return _short_date(raw.get("published_at") or raw.get("updated_at"))
+
+
 def create_app(db_path: Optional[Path] = None) -> Starlette:
     """Create the Starlette ASGI app with MCP SSE transport and REST endpoints."""
 
@@ -656,12 +680,15 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
                 title = r.get("title") or r["url"]
                 note_html = f'<p class="note">{r["note"]}</p>' if r.get("note") else ""
                 author_html = f' · {r["author"]}' if r.get("author") else ""
+                added_date = _short_date(r.get("created_at"))
+                pub_date = _resource_pub_date(r)
+                pub_html = f" (published {pub_date})" if pub_date and pub_date != added_date else ""
                 url = r["url"]
                 if url.startswith("dugg://content/"):
                     url = "/r/" + url.removeprefix("dugg://content/")
                 items_html += f"""<div class="feed-item">
   <h3><a href="{url}" target="_blank" rel="noopener">{title}</a></h3>
-  <p class="meta">{r['created_at'][:10]}{author_html}</p>
+  <p class="meta">{added_date}{pub_html}{author_html}</p>
   {note_html}
 </div>\n"""
 
@@ -727,9 +754,14 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
         transcript = resource.get("transcript") or ""
         author = resource.get("author") or ""
         created = (resource.get("created_at") or "")[:10]
+        pub_date = _resource_pub_date(resource)
         note = resource.get("note") or ""
         tags = resource.get("tags") or []
-        meta_parts = [created] + ([author] if author else [])
+        meta_parts = [created]
+        if pub_date and pub_date != created:
+            meta_parts.append(f"published {pub_date}")
+        if author:
+            meta_parts.append(author)
         meta_html = " · ".join(meta_parts)
         note_html = f'<p class="note" style="margin-top:1rem;font-style:italic;">{_xml_escape(note)}</p>' if note else ""
         tags_html = f'<p style="margin-top:0.5rem;font-size:0.8rem;color:#666;">{", ".join(_xml_escape(t) for t in tags)}</p>' if tags else ""
@@ -999,16 +1031,24 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
                 title = r.get("title") or r["url"]
                 added_by = names.get(r.get("submitted_by", ""), "")
                 source = r.get("source_server", "")
-                date = r.get("created_at", "")[:10]
+                added_date = _short_date(r.get("created_at"))
+                pub_date = _resource_pub_date(r)
                 lines.append(f"*{_xml_escape(title)}*")
                 lines.append(f"<{r['url']}>")
+                attrib = ""
+                if added_by and added_date:
+                    attrib = f"by {added_by} on {added_date}"
+                elif added_by:
+                    attrib = f"by {added_by}"
+                elif added_date:
+                    attrib = f"on {added_date}"
+                if attrib and pub_date and pub_date != added_date:
+                    attrib += f" (published {pub_date})"
                 meta = []
-                if added_by:
-                    meta.append(f"by {added_by}")
+                if attrib:
+                    meta.append(attrib)
                 if source:
                     meta.append(f"from {source}")
-                if date:
-                    meta.append(date)
                 if meta:
                     lines.append(" · ".join(meta))
                 if r.get("note"):
@@ -1064,10 +1104,21 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
         for r in results:
             title = r.get("title") or r["url"]
             added_by = names.get(r.get("submitted_by", ""), "")
+            added_date = _short_date(r.get("created_at"))
+            pub_date = _resource_pub_date(r)
             lines.append(f"*{_xml_escape(title)}*")
             lines.append(f"<{r['url']}>")
-            if added_by:
-                lines.append(f"by {added_by}")
+            attrib = ""
+            if added_by and added_date:
+                attrib = f"by {added_by} on {added_date}"
+            elif added_by:
+                attrib = f"by {added_by}"
+            elif added_date:
+                attrib = f"on {added_date}"
+            if attrib and pub_date and pub_date != added_date:
+                attrib += f" (published {pub_date})"
+            if attrib:
+                lines.append(attrib)
             if r.get("note"):
                 lines.append(f"_{_xml_escape(r['note'])}_")
             lines.append("")

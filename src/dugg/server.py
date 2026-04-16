@@ -660,6 +660,7 @@ async def list_tools() -> list[Tool]:
                     "body": {"type": "string", "description": "The content — plain text or HTML"},
                     "source_type": {"type": "string", "enum": ["note", "email", "document"], "description": "What kind of content this is", "default": "email"},
                     "source_label": {"type": "string", "description": "Origin label (e.g. 'Substack', 'forwarded email', 'meeting notes')", "default": ""},
+                    "published_at": {"type": "string", "description": "Original publication/send date (ISO 8601, e.g. email Date header). Optional.", "default": ""},
                     "note": {"type": "string", "description": "Why this content matters — context for future retrieval", "default": ""},
                     "tags": {"type": "array", "items": {"type": "string"}, "description": "Tags for categorization", "default": []},
                     "collection": {"type": "string", "description": "Collection name (uses Default if omitted)", "default": ""},
@@ -912,6 +913,7 @@ def _handle_paste(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
     body = args["body"]
     source_type = args.get("source_type", "email")
     source_label = args.get("source_label", "")
+    published_at = args.get("published_at", "")
     note = args.get("note", "")
     tags = args.get("tags", [])
     collection_name = args.get("collection", "")
@@ -942,7 +944,11 @@ def _handle_paste(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
     res_id = _uuid()
     synthetic_url = f"dugg://content/{res_id}"
 
-    metadata = {"source_label": source_label} if source_label else {}
+    metadata = {}
+    if source_label:
+        metadata["source_label"] = source_label
+    if published_at:
+        metadata["published_at"] = published_at
 
     resource = d.add_resource(
         url=synthetic_url,

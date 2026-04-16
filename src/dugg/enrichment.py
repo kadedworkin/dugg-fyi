@@ -114,7 +114,15 @@ def extract_youtube_id(url: str) -> Optional[str]:
 
 async def fetch_og_metadata(url: str) -> dict:
     """Fetch Open Graph metadata and article body text from a URL."""
-    result = {"title": "", "description": "", "thumbnail": "", "site_name": "", "article_text": ""}
+    result = {
+        "title": "",
+        "description": "",
+        "thumbnail": "",
+        "site_name": "",
+        "article_text": "",
+        "published_at": "",
+        "updated_at": "",
+    }
     try:
         async with httpx.AsyncClient(follow_redirects=True, timeout=15.0) as client:
             resp = await client.get(url, headers={"User-Agent": "Dugg/0.1 (metadata fetcher)"})
@@ -130,6 +138,8 @@ async def fetch_og_metadata(url: str) -> dict:
         "og:description": "description",
         "og:image": "thumbnail",
         "og:site_name": "site_name",
+        "article:published_time": "published_at",
+        "article:modified_time": "updated_at",
     }
     for meta in soup.find_all("meta"):
         prop = meta.get("property", "") or meta.get("name", "")
@@ -146,10 +156,46 @@ async def fetch_og_metadata(url: str) -> dict:
         if desc_meta and desc_meta.get("content"):
             result["description"] = desc_meta["content"]
 
+    if not result["published_at"]:
+        result["published_at"] = _extract_published_at(soup)
+    if not result["updated_at"]:
+        mod_meta = soup.find("meta", attrs={"name": "last-modified"})
+        if mod_meta and mod_meta.get("content"):
+            result["updated_at"] = mod_meta["content"]
+
     # Extract article body text using readability-lxml
     result["article_text"] = extract_article_text(html)
 
     return result
+
+
+def _extract_published_at(soup: BeautifulSoup) -> str:
+    """Probe common publication-date locations in an HTML document."""
+    for name in ("pubdate", "publishdate", "date", "dc.date", "dc.date.issued", "article.published"):
+        m = soup.find("meta", attrs={"name": name})
+        if m and m.get("content"):
+            return m["content"]
+    for itemprop in ("datePublished", "dateCreated"):
+        el = soup.find(attrs={"itemprop": itemprop})
+        if el:
+            val = el.get("content") or el.get("datetime") or el.get_text(strip=True)
+            if val:
+                return val
+    time_el = soup.find("time", attrs={"datetime": True})
+    if time_el and time_el.get("datetime"):
+        return time_el["datetime"]
+    for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
+        try:
+            data = json.loads(script.string or "")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        candidates = data if isinstance(data, list) else [data]
+        for item in candidates:
+            if isinstance(item, dict):
+                val = item.get("datePublished") or item.get("dateCreated")
+                if val:
+                    return val
+    return ""
 
 
 def extract_article_text(html: str) -> str:

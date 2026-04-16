@@ -639,11 +639,16 @@ def cmd_paste(args):
     tags = [t.strip() for t in (getattr(args, "tags", "") or "").split(",") if t.strip()]
     source_type = getattr(args, "source_type", "email")
     source_label = getattr(args, "source_label", "")
+    published_at = getattr(args, "published_at", "") or ""
 
     from dugg.db import _uuid
     res_id = _uuid()
     synthetic_url = f"dugg://content/{res_id}"
-    metadata = {"source_label": source_label} if source_label else {}
+    metadata = {}
+    if source_label:
+        metadata["source_label"] = source_label
+    if published_at:
+        metadata["published_at"] = published_at
 
     resource = db.add_resource(
         url=synthetic_url,
@@ -676,6 +681,52 @@ def _user_name_cache(db):
     return {r["id"]: r["name"] for r in rows}
 
 
+def _short_date(value) -> str:
+    """Coerce an ISO-ish date/datetime string to YYYY-MM-DD, or '' if it can't."""
+    if not value:
+        return ""
+    s = str(value).strip()
+    if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+        return s[:10]
+    return ""
+
+
+def _publication_date(raw_metadata) -> str:
+    """Extract a publication date from a resource's raw_metadata blob."""
+    if not raw_metadata:
+        return ""
+    if isinstance(raw_metadata, str):
+        import json as _json
+        try:
+            raw_metadata = _json.loads(raw_metadata)
+        except (ValueError, TypeError):
+            return ""
+    if not isinstance(raw_metadata, dict):
+        return ""
+    return _short_date(raw_metadata.get("published_at") or raw_metadata.get("updated_at"))
+
+
+def _format_attribution(added_by: str, added_date: str, pub_date: str, source: str = "") -> str:
+    """Render the 'by X on YYYY-MM-DD (published YYYY-MM-DD)' line."""
+    parts = []
+    who_when = ""
+    if added_by and added_date:
+        who_when = f"by {added_by} on {added_date}"
+    elif added_by:
+        who_when = f"by {added_by}"
+    elif added_date:
+        who_when = f"on {added_date}"
+    if who_when:
+        if pub_date and pub_date != added_date:
+            who_when += f" (published {pub_date})"
+        parts.append(who_when)
+    elif pub_date:
+        parts.append(f"published {pub_date}")
+    if source:
+        parts.append(f"from {source}")
+    return " · ".join(parts)
+
+
 def cmd_search(args):
     """Search Dugg for resources."""
     from pathlib import Path
@@ -695,16 +746,14 @@ def cmd_search(args):
     for r in results:
         title = r.get("title") or r["url"]
         added_by = names.get(r.get("submitted_by", ""), "")
+        added_date = _short_date(r.get("created_at", ""))
+        pub_date = _publication_date(r.get("raw_metadata"))
         source = r.get("source_server", "")
         print(f"  {title}")
         print(f"    {r['url']}")
-        meta = []
-        if added_by:
-            meta.append(f"by {added_by}")
-        if source:
-            meta.append(f"from {source}")
+        meta = _format_attribution(added_by, added_date, pub_date, source)
         if meta:
-            print(f"    {' · '.join(meta)}")
+            print(f"    {meta}")
         if r.get("note"):
             print(f"    Note: {r['note']}")
         print()
@@ -772,20 +821,15 @@ def cmd_feed(args):
     print(f"Latest {len(results)} resource(s):\n")
     for r in results:
         title = r.get("title") or r["url"]
-        date = r.get("created_at", "")[:10]
+        added_date = _short_date(r.get("created_at", ""))
         added_by = names.get(r.get("submitted_by", ""), "")
+        pub_date = _publication_date(r.get("raw_metadata"))
         source = r.get("source_server", "")
         print(f"  {title}")
         print(f"    {r['url']}")
-        meta = []
-        if added_by:
-            meta.append(f"by {added_by}")
-        if source:
-            meta.append(f"from {source}")
-        if date:
-            meta.append(date)
+        meta = _format_attribution(added_by, added_date, pub_date, source)
         if meta:
-            print(f"    {' · '.join(meta)}")
+            print(f"    {meta}")
         if r.get("note"):
             print(f"    Note: {r['note']}")
         print()
@@ -1304,6 +1348,7 @@ def main():
     p_paste.add_argument("--file", default=None, help="Read body from a file")
     p_paste.add_argument("--source-type", default="email", choices=["note", "email", "document"], help="Content type (default: email)")
     p_paste.add_argument("--source-label", default="", help="Origin label (e.g. 'Substack', 'meeting notes')")
+    p_paste.add_argument("--published-at", default="", help="Original publication/send date (ISO 8601)")
     p_paste.add_argument("--note", default="", help="Why this content matters")
     p_paste.add_argument("--tags", default="", help="Comma-separated tags")
     p_paste.add_argument("--key", default=None, help="Your API key (uses local user if omitted)")
