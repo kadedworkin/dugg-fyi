@@ -1210,6 +1210,77 @@ def test_outbound_publish_payload_excludes_sibling_notes(db):
     assert len(db.list_resource_notes(first["id"])) == 2
 
 
+def test_search_finds_sibling_note_text(db):
+    """Text that only appears in a sibling note must be findable via search."""
+    kade = db.create_user("Kade")
+    rocco = db.create_user("Rocco")
+    coll = db.create_collection("Shared", kade["id"])
+    db.add_collection_member(coll["id"], rocco["id"])
+    first = db.add_resource(url="https://example.com/x", collection_id=coll["id"],
+                             submitted_by=kade["id"], note="kade's generic take",
+                             title="Article", description="Some article")
+    db.add_resource(url="https://example.com/x", collection_id=coll["id"],
+                     submitted_by=rocco["id"], note="fascinating tidbit about ferrets")
+
+    results = db.search("ferrets", kade["id"])
+    assert len(results) == 1
+    assert results[0]["id"] == first["id"]
+
+
+def test_search_sibling_filtered_by_ban(db):
+    """After a local submitter is banned, their sibling notes drop out of search."""
+    kade = db.create_user("Kade")
+    rocco = db.create_user("Rocco")
+    coll = db.create_collection("Shared", kade["id"])
+    db.add_collection_member(coll["id"], rocco["id"])
+    first = db.add_resource(url="https://example.com/x", collection_id=coll["id"],
+                             submitted_by=kade["id"], note="kade's take", title="Article")
+    db.add_resource(url="https://example.com/x", collection_id=coll["id"],
+                     submitted_by=rocco["id"], note="rocco's unique phrase xyzzy")
+
+    # Pre-ban: rocco's note is findable
+    assert len(db.search("xyzzy", kade["id"])) == 1
+
+    # Ban rocco directly
+    db.ban_member(coll["id"], rocco["id"], cascade=False)
+
+    # Post-ban: sibling note no longer surfaces in search
+    assert db.search("xyzzy", kade["id"]) == []
+
+    # But the primary resource is still findable by its own fields
+    assert len(db.search("Article", kade["id"])) == 1
+    assert db.search("Article", kade["id"])[0]["id"] == first["id"]
+
+
+def test_search_sibling_foreign_always_findable(db):
+    """Cross-server sibling notes (no local user_id) pass the ban filter."""
+    kade = db.create_user("Kade")
+    coll = db.create_collection("Inbox", kade["id"])
+    db.add_resource(url="https://example.com/x", collection_id=coll["id"],
+                     submitted_by=kade["id"], note="local", title="Article")
+    db.ingest_remote_publish(
+        {"url": "https://example.com/x", "note": "remote tidbit qrstuv"},
+        source_instance_id="rem", target_collection_id=coll["id"],
+        source_server="https://other.example.com",
+    )
+    results = db.search("qrstuv", kade["id"])
+    assert len(results) == 1
+
+
+def test_search_dedups_when_match_in_both_indexes(db):
+    """Same word appearing in both primary note and sibling note returns one row."""
+    kade = db.create_user("Kade")
+    rocco = db.create_user("Rocco")
+    coll = db.create_collection("Shared", kade["id"])
+    db.add_collection_member(coll["id"], rocco["id"])
+    db.add_resource(url="https://example.com/x", collection_id=coll["id"],
+                     submitted_by=kade["id"], note="plover thing", title="A")
+    db.add_resource(url="https://example.com/x", collection_id=coll["id"],
+                     submitted_by=rocco["id"], note="another plover note")
+    results = db.search("plover", kade["id"])
+    assert len(results) == 1
+
+
 def test_duplicate_ingest_unions_tags(db):
     """Tags from a duplicate cross-server publish get unioned onto the existing resource."""
     kade = db.create_user("Kade")

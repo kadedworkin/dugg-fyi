@@ -340,6 +340,31 @@ class DuggDB:
                 INSERT INTO resources_fts(rowid, title, description, author, transcript, note, summary)
                 VALUES (new.rowid, new.title, new.description, new.author, new.transcript, new.note, new.summary);
             END;
+
+            -- Sibling-note FTS index: separate virtual table so quarantined
+            -- note text is searchable without being pulled into the primary
+            -- `resources_fts` row. The publish payload builder reads neither
+            -- index, so outbound federation is unaffected.
+            CREATE VIRTUAL TABLE IF NOT EXISTS resource_notes_fts USING fts5(
+                note,
+                content='resource_notes',
+                content_rowid='rowid'
+            );
+
+            CREATE TRIGGER IF NOT EXISTS resource_notes_ai AFTER INSERT ON resource_notes BEGIN
+                INSERT INTO resource_notes_fts(rowid, note) VALUES (new.rowid, new.note);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS resource_notes_ad AFTER DELETE ON resource_notes BEGIN
+                INSERT INTO resource_notes_fts(resource_notes_fts, rowid, note)
+                VALUES ('delete', old.rowid, old.note);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS resource_notes_au AFTER UPDATE ON resource_notes BEGIN
+                INSERT INTO resource_notes_fts(resource_notes_fts, rowid, note)
+                VALUES ('delete', old.rowid, old.note);
+                INSERT INTO resource_notes_fts(rowid, note) VALUES (new.rowid, new.note);
+            END;
         """)
         self.conn.commit()
         self._migrate()
@@ -750,6 +775,28 @@ class DuggDB:
         tag_source: str = "human",
         summary: str = "",
     ) -> dict:
+        """Add a resource to a collection, or attach a sibling note on collision.
+
+        Two paths:
+
+        * **New URL:** inserts a ``resources`` row, tags, emits a
+          ``resource_added`` event, returns ``{"status": <unset>, ...}``
+          with full resource fields.
+        * **URL already present in this collection** (regardless of
+          submitter): attaches the note as a sibling record on the existing
+          resource, unions the incoming tags, skips event emission and
+          enrichment, returns the existing resource dict with
+          ``status="sibling_note_added"``. Callers that drive post-add
+          enrichment (author tagging, index policy application) should check
+          this status and skip their work -- the existing resource has
+          already been enriched.
+
+        Collision semantics exist to preserve every submitter's note. A
+        second user's highlight via the Chrome extension, a paste of the
+        same URL, or a re-save with additional context all end up attached
+        to the original resource as sibling notes, visible in the feed and
+        findable in search.
+        """
         now = _now()
 
         # Collision path: same URL already exists in this collection.
@@ -842,7 +889,23 @@ class DuggDB:
         return results
 
     def search(self, query: str, user_id: str, collection_id: Optional[str] = None, tags: Optional[list[str]] = None, submitted_by: Optional[Union[str, list[str]]] = None, limit: int = 20) -> list[dict]:
-        """Full-text search across resources the user has access to."""
+        """Full-text search across resources the user has access to.
+
+        Matches are drawn from two FTS indexes:
+
+        * ``resources_fts`` — the primary index over title / description /
+          author / transcript / note / summary on the ``resources`` row.
+        * ``resource_notes_fts`` — quarantined sibling notes attached to a
+          resource (second submitter's note, cross-server enrichment). These
+          live in a separate table so they never federate outbound, but they
+          ARE searchable locally so nothing gets buried.
+
+        Sibling-match filter: when a sibling note was contributed by a local
+        user who was subsequently banned from the collection (directly or via
+        cascade), that note drops out of search results at query time via a
+        JOIN against ``collection_members``. No stored-state mutation is
+        required on ban — the filter is applied at read time.
+        """
         accessible = self._accessible_collection_ids(user_id)
         if not accessible:
             return []
@@ -869,20 +932,40 @@ class DuggDB:
                 submitter_params = [submitted_by]
 
         if query.strip():
-            # FTS5 search
             fts_query = query.replace('"', '""')
+            # UNION ALL both FTS indexes, keep the best rank per resource, then
+            # rejoin `resources` for the full row. Sibling matches are filtered
+            # so banned local submitters' notes stop surfacing immediately.
             sql = f"""
-                SELECT r.*, resources_fts.rank
-                FROM resources_fts
-                JOIN resources r ON r.rowid = resources_fts.rowid
-                WHERE resources_fts MATCH ?
-                  AND r.collection_id IN ({placeholders})
+                WITH all_matches AS (
+                    SELECT r.id AS id, resources_fts.rank AS rank
+                    FROM resources_fts
+                    JOIN resources r ON r.rowid = resources_fts.rowid
+                    WHERE resources_fts MATCH ?
+                    UNION ALL
+                    SELECT r.id AS id, resource_notes_fts.rank AS rank
+                    FROM resource_notes_fts
+                    JOIN resource_notes rn ON rn.rowid = resource_notes_fts.rowid
+                    JOIN resources r ON r.id = rn.resource_id
+                    LEFT JOIN collection_members cm
+                           ON cm.user_id = rn.submitter_user_id
+                          AND cm.collection_id = r.collection_id
+                    WHERE resource_notes_fts MATCH ?
+                      AND (rn.submitter_user_id = '' OR cm.status = 'active')
+                ),
+                best_rank AS (
+                    SELECT id, MIN(rank) AS rank FROM all_matches GROUP BY id
+                )
+                SELECT r.*, best_rank.rank
+                FROM best_rank
+                JOIN resources r ON r.id = best_rank.id
+                WHERE r.collection_id IN ({placeholders})
                   {horizon_sql}
                   {submitter_sql}
-                ORDER BY resources_fts.rank
+                ORDER BY best_rank.rank
                 LIMIT ?
             """
-            params = [fts_query] + accessible + horizon_params + submitter_params + [limit]
+            params = [fts_query, fts_query] + accessible + horizon_params + submitter_params + [limit]
         else:
             sql = f"""
                 SELECT r.*, 0 as rank
@@ -954,17 +1037,61 @@ class DuggDB:
         return [dict(r) for r in rows]
 
     # --- Sibling Notes (collision-safe enrichment) ---
-    # Quarantine layer: when the same URL is added a second time -- whether by
-    # another local user or via cross-server federation -- the incoming note is
-    # stored here instead of being dropped. Publish payload builders must NEVER
-    # read this table; it is inbound-only enrichment for local display.
+    #
+    # Design: when the same URL is submitted a second time to a collection --
+    # whether by another local user ("Rocco also saved this page and added his
+    # own highlight") or via cross-server federation ("Server B published this
+    # URL to us with its own submitter's note") -- the incoming note must NOT
+    # overwrite the primary `resources.note`, and must NOT be dropped either.
+    # Instead it lands in a dedicated `resource_notes` table and renders
+    # alongside the primary note in the feed, /r/{id} viewer, and search.
+    #
+    # Quarantine guarantee: nothing in this table ever leaves the server. The
+    # outbound publish payload builder at `sync.deliver_publish` reads only
+    # `get_resource()` output, which does not touch `resource_notes`. That
+    # means a note authored on Server B, federated into Server A as a sibling,
+    # cannot then federate from A back out to C -- the boundary is enforced
+    # by the schema, not by "remember to strip on the way out" discipline.
+    #
+    # Search: a parallel `resource_notes_fts` index makes sibling text
+    # findable locally (see `search()`). Banned authors' sibling notes are
+    # filtered at query time via a JOIN to `collection_members.status`, so
+    # ban events do not trigger mass rewrites of stored state.
 
     def add_resource_note(self, resource_id: str, note: str, *,
                           source_server: str = "",
                           source_instance_id: str = "",
                           submitter_user_id: str = "",
                           submitter_name: str = "") -> Optional[dict]:
-        """Attach a sibling note to an existing resource. Idempotent via UNIQUE constraint."""
+        """Attach a sibling note to an existing resource.
+
+        A sibling note is a second-submitter or cross-server enrichment: the
+        resource already exists (matched by URL + collection), and this call
+        records the new note without duplicating the resource row.
+
+        Idempotent: the table has a UNIQUE constraint on
+        ``(resource_id, source_server, submitter_user_id, note)``, so a
+        retried publish delivery or a redundant add from the same submitter
+        with identical text will silently no-op.
+
+        Args:
+            resource_id: ID of the existing resource to attach the note to.
+            note: The note text. Empty / whitespace-only notes are ignored.
+            source_server: Origin server URL if this note came from
+                cross-server federation (``""`` for same-server adds).
+            source_instance_id: Remote instance ID that delivered the
+                note (empty for same-server adds).
+            submitter_user_id: Local user ID of the submitter (empty for
+                cross-server notes, since the remote user is not a local
+                principal). Used by the search ban-filter.
+            submitter_name: Display name to render in the feed.
+
+        Returns:
+            A dict summarizing the stored note, or ``None`` if the note
+            was empty. The returned dict does not leak the deduplicated
+            outcome -- callers relying on "was this a new insert" should
+            consult ``list_resource_notes`` before and after.
+        """
         if not note or not note.strip():
             return None
         note_id = _uuid()
@@ -983,7 +1110,12 @@ class DuggDB:
                 "added_at": now}
 
     def list_resource_notes(self, resource_id: str) -> list[dict]:
-        """Return all sibling notes attached to a resource, oldest first."""
+        """Return all sibling notes attached to a resource, oldest first.
+
+        Callers: feed renderer, Atom feed, ``/r/{id}`` viewer. Do NOT call
+        this from any code path that constructs an outbound publish payload
+        -- sibling notes are local-only enrichment and must not federate.
+        """
         rows = self.conn.execute(
             """SELECT id, source_server, source_instance_id, submitter_user_id,
                       submitter_name, note, added_at

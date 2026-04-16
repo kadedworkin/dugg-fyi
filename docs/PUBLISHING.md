@@ -69,9 +69,20 @@ dugg_publish_clear()                                     # clear failed entries
 
 The receiving side of federation. When a remote Dugg pushes content:
 
-- **Deduplication** — same URL in the same collection = skip
+- **Deduplication, with preserved enrichment** — same URL in the same collection does not create a second row, but the incoming note is attached as a *sibling note* on the existing resource. Tags from the incoming payload are unioned onto the existing resource.
 - **Source tracking** — originating instance ID and server URL stored in metadata
 - Feed and search results display the source server
+
+### Sibling notes (collision quarantine)
+
+When a URL arrives that the receiving server already has (whether it was saved locally or received from a third server previously), the incoming note lives in a dedicated `resource_notes` table instead of overwriting `resources.note` or being dropped. This protects against two failure modes:
+
+1. **Lost enrichment** — multiple people saving the same URL with different context would otherwise lose every note past the first.
+2. **Outbound re-federation of foreign content** — if incoming notes merged into `resources.note`, the next outbound publish from this server would carry a foreign submitter's text onward to a third server. Storing siblings in a separate table that the publish payload builder never reads makes that leakage structurally impossible.
+
+The same quarantine handles same-server collisions: when a second user (or the same user with a different highlight via the Chrome extension) saves a URL already present in the collection, their note becomes a sibling rather than a duplicate resource row.
+
+**Search:** sibling text is searchable through a parallel FTS index. A ban on the contributing user (direct or via cascade) removes their sibling notes from search results at query time — no stored-state rewrite needed.
 
 ## Events
 
