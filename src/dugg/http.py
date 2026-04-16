@@ -51,12 +51,7 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
 
     def _ensure_default_collection(d: DuggDB, user_id: str) -> str:
         """Ensure user has a default collection, return its ID."""
-        collections = d.list_collections(user_id)
-        for c in collections:
-            if c["name"] == "Default":
-                return c["id"]
-        result = d.create_collection("Default", user_id, description="Default collection", visibility="private")
-        return result["id"]
+        return d.ensure_default_collection(user_id)
 
     def resolve_user_from_request(request: Request) -> dict:
         """Resolve user from X-Dugg-Key header."""
@@ -962,16 +957,7 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
             elif rest:
                 note = rest
 
-            # Ensure user has a default collection
-            collections = d.list_collections(user["id"])
-            coll_id = None
-            for c in collections:
-                if c["name"] == "Default":
-                    coll_id = c["id"]
-                    break
-            if not coll_id:
-                result = d.create_collection("Default", user["id"], description="Default collection", visibility="private")
-                coll_id = result["id"]
+            coll_id = _ensure_default_collection(d, user["id"])
 
             try:
                 from dugg.enrichment import enrich_url

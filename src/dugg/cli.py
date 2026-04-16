@@ -68,6 +68,32 @@ def cmd_set_config(args):
     print(f"Config set: {args.key} = {args.value}")
 
 
+def cmd_enable_shared_default(args):
+    """Mark a collection as the server's shared default. All existing users are
+    auto-added as members, and new invite-redeemers will be added automatically."""
+    from pathlib import Path
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+    try:
+        db.enable_shared_default(args.collection_id)
+    except ValueError as e:
+        print(f"Error: {e}")
+        db.close()
+        sys.exit(1)
+    added = 0
+    for user in db.conn.execute("SELECT id FROM users").fetchall():
+        before = db.conn.execute(
+            "SELECT 1 FROM collection_members WHERE collection_id = ? AND user_id = ?",
+            (args.collection_id, user[0]),
+        ).fetchone()
+        if not before:
+            db.add_collection_member(args.collection_id, user[0], role="member")
+            added += 1
+    db.close()
+    print(f"Shared-default collection set: {args.collection_id}")
+    print(f"Auto-added {added} existing user(s) as members.")
+
+
 def cmd_add_user(args):
     """Create a user and print their API key."""
     server = getattr(args, "server", None)
@@ -384,12 +410,7 @@ def _resolve_user(db, args):
 
 def _ensure_default_collection(db, user_id):
     """Ensure user has a default collection, return its ID."""
-    collections = db.list_collections(user_id)
-    for c in collections:
-        if c["name"] == "Default":
-            return c["id"]
-    result = db.create_collection("Default", user_id, description="Default collection", visibility="private")
-    return result["id"]
+    return db.ensure_default_collection(user_id)
 
 
 def _find_env_file():
@@ -1141,6 +1162,12 @@ def main():
     p_setconf.add_argument("key", help="Config key (e.g. slack_signing_secret)")
     p_setconf.add_argument("value", help="Config value")
 
+    p_shared = sub.add_parser(
+        "enable-shared-default",
+        help="Mark a collection as the server's shared Default (hosted-instance mode)",
+    )
+    p_shared.add_argument("collection_id", help="Collection ID to make the shared default")
+
     p_user = sub.add_parser("add-user", help="Create a new user")
     p_user.add_argument("name", help="User display name")
     p_user.add_argument("--server", default=None, help="Remote server URL — create user via HTTP instead of local DB")
@@ -1252,6 +1279,8 @@ def main():
         cmd_set_url(args)
     elif args.command == "set-config":
         cmd_set_config(args)
+    elif args.command == "enable-shared-default":
+        cmd_enable_shared_default(args)
     elif args.command == "add-user":
         cmd_add_user(args)
     elif args.command == "invite-user":

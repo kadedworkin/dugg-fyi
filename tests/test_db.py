@@ -1583,3 +1583,83 @@ def test_delete_resource_not_found(db):
     coll = db.create_collection("Shared", kade["id"], visibility="shared")
     result = db.delete_resource("nonexistent", coll["id"], kade["id"])
     assert "error" in result
+
+
+# --- Shared Default Collection (hosted-instance mode) ---
+
+def test_ensure_default_collection_creates_private_default(db):
+    kade = db.create_user("Kade")
+    coll_id = db.ensure_default_collection(kade["id"])
+    row = db.conn.execute("SELECT name, visibility FROM collections WHERE id = ?", (coll_id,)).fetchone()
+    assert row[0] == "Default"
+    assert row[1] == "private"
+
+
+def test_ensure_default_collection_idempotent(db):
+    kade = db.create_user("Kade")
+    a = db.ensure_default_collection(kade["id"])
+    b = db.ensure_default_collection(kade["id"])
+    assert a == b
+
+
+def test_enable_shared_default_rejects_missing_collection(db):
+    with pytest.raises(ValueError):
+        db.enable_shared_default("nonexistent-id")
+
+
+def test_shared_default_returned_for_all_users(db):
+    kade = db.create_user("Kade")
+    rocco = db.create_user("Rocco")
+    shared = db.create_collection("Default", kade["id"], visibility="shared")
+    db.enable_shared_default(shared["id"])
+
+    assert db.ensure_default_collection(kade["id"]) == shared["id"]
+    assert db.ensure_default_collection(rocco["id"]) == shared["id"]
+    # Rocco is now a member, so feed works
+    rocco_colls = [c["id"] for c in db.list_collections(rocco["id"])]
+    assert shared["id"] in rocco_colls
+
+
+def test_shared_default_feed_shows_other_users_resources(db):
+    kade = db.create_user("Kade")
+    rocco = db.create_user("Rocco")
+    shared = db.create_collection("Default", kade["id"], visibility="shared")
+    db.enable_shared_default(shared["id"])
+    coll_k = db.ensure_default_collection(kade["id"])
+    coll_r = db.ensure_default_collection(rocco["id"])
+    assert coll_k == coll_r == shared["id"]
+
+    db.add_resource(url="https://a.example", collection_id=coll_k, submitted_by=kade["id"], title="K")
+    db.add_resource(url="https://b.example", collection_id=coll_r, submitted_by=rocco["id"], title="R")
+
+    feed = db.get_feed(rocco["id"])
+    titles = {r["title"] for r in feed}
+    assert titles == {"K", "R"}
+
+
+def test_redeem_invite_auto_joins_shared_default(db):
+    kade = db.create_user("Kade")
+    shared = db.create_collection("Default", kade["id"], visibility="shared")
+    db.enable_shared_default(shared["id"])
+    invite = db.create_invite_token(kade["id"], name_hint="Rocco")
+    result = db.redeem_invite_token(invite["token"], "Rocco")
+    assert result is not None
+    # Both the new user and their agent are members before touching anything else
+    user_colls = [c["id"] for c in db.list_collections(result["user"]["id"])]
+    agent_colls = [c["id"] for c in db.list_collections(result["agent"]["id"])]
+    assert shared["id"] in user_colls
+    assert shared["id"] in agent_colls
+
+
+def test_shared_default_disabled_when_collection_deleted(db):
+    kade = db.create_user("Kade")
+    shared = db.create_collection("Default", kade["id"], visibility="shared")
+    db.enable_shared_default(shared["id"])
+    db.conn.execute("DELETE FROM collections WHERE id = ?", (shared["id"],))
+    db.conn.commit()
+    # Falls back to per-user behavior
+    rocco = db.create_user("Rocco")
+    coll_id = db.ensure_default_collection(rocco["id"])
+    assert coll_id != shared["id"]
+    row = db.conn.execute("SELECT name FROM collections WHERE id = ?", (coll_id,)).fetchone()
+    assert row[0] == "Default"

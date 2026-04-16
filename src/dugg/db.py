@@ -431,6 +431,40 @@ class DuggDB:
         row = self.conn.execute("SELECT value FROM server_config WHERE key = ?", (key,)).fetchone()
         return row[0] if row else default
 
+    # --- Shared Default Collection (hosted-server mode) ---
+
+    def get_shared_default_id(self) -> Optional[str]:
+        val = self.get_config("shared_default_collection_id", "")
+        if not val:
+            return None
+        exists = self.conn.execute("SELECT 1 FROM collections WHERE id = ?", (val,)).fetchone()
+        return val if exists else None
+
+    def enable_shared_default(self, collection_id: str) -> None:
+        """Mark a collection as the server's shared default. New users auto-join it,
+        and ensure_default_collection will return this ID instead of creating a private one."""
+        exists = self.conn.execute("SELECT 1 FROM collections WHERE id = ?", (collection_id,)).fetchone()
+        if not exists:
+            raise ValueError(f"Collection {collection_id} not found")
+        self.set_config("shared_default_collection_id", collection_id)
+
+    def ensure_default_collection(self, user_id: str) -> str:
+        """Return the default collection id for this user.
+
+        If the server has a shared default (hosted-instance mode), auto-joins the user
+        and returns that id. Otherwise returns (creating if needed) the user's private
+        'Default' collection."""
+        shared_id = self.get_shared_default_id()
+        if shared_id:
+            self.add_collection_member(shared_id, user_id, role="member")
+            return shared_id
+        for c in self.list_collections(user_id):
+            if c["name"] == "Default":
+                return c["id"]
+        return self.create_collection(
+            "Default", user_id, description="Default collection", visibility="private"
+        )["id"]
+
     # --- Users ---
 
     def create_user(self, name: str) -> dict:
@@ -1610,6 +1644,10 @@ class DuggDB:
             (user["id"], now, token),
         )
         self.conn.commit()
+        shared_id = self.get_shared_default_id()
+        if shared_id:
+            self.add_collection_member(shared_id, user["id"], role="member", invited_by=invite["created_by"])
+            self.add_collection_member(shared_id, agent["id"], role="member", invited_by=invite["created_by"])
         self.emit_event("invite_redeemed", actor_id=user["id"],
                         payload={"token": token, "invited_by": invite["created_by"], "name": name})
         return {"user": user, "agent": agent, "invite": {**invite, "redeemed_by": user["id"], "redeemed_at": now}}

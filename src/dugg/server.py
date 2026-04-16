@@ -52,13 +52,7 @@ def resolve_user(api_key: Optional[str] = None) -> dict:
 
 def ensure_default_collection(user_id: str) -> str:
     """Ensure user has a default collection, return its ID."""
-    d = get_db()
-    collections = d.list_collections(user_id)
-    for c in collections:
-        if c["name"] == "Default":
-            return c["id"]
-    result = d.create_collection("Default", user_id, description="Default collection", visibility="private")
-    return result["id"]
+    return get_db().ensure_default_collection(user_id)
 
 
 # --- MCP Tools ---
