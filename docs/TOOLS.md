@@ -1,6 +1,6 @@
 # MCP Tools
 
-Dugg exposes 44+ tools via MCP. Your agent calls these directly — no REST API wrapper needed.
+Dugg exposes 51 tools via MCP. Your agent calls these directly — no REST API wrapper needed.
 
 ## Tool reference
 
@@ -24,6 +24,7 @@ Dugg exposes 44+ tools via MCP. Your agent calls these directly — no REST API 
 | `dugg_reactions` | View reaction counts on your resources (submitter only). |
 | `dugg_instance_create` | Create a hosted Dugg instance with topic and access mode. |
 | `dugg_instance_list` | List instances you're subscribed to with their topics. |
+| `dugg_my_servers` | Get subscribed servers with current scope — topic, top tags, recent activity. Use for cross-post routing decisions. |
 | `dugg_instance_update` | Update instance config: name, topic, endpoint, policies (owner only). |
 | `dugg_instance_policy` | Get current policy configuration for an instance. |
 | `dugg_invite` | Invite a user to a collection with invite tree tracking. |

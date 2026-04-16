@@ -56,7 +56,7 @@ For remote connections (HTTP/SSE), see [docs/HTTP.md](docs/HTTP.md).
 └──────────────────┬──────────────────────────┘
                    │ MCP (stdio or HTTP/SSE)
 ┌──────────────────▼──────────────────────────┐
-│  Dugg MCP Server — 44+ tools                │
+│  Dugg MCP Server — 51 tools                 │
 │  - Auth, rate limiting, event emission      │
 │  - Publish sync daemon (federation)         │
 │  - SQLite storage, FTS5 search              │
@@ -87,7 +87,7 @@ For remote connections (HTTP/SSE), see [docs/HTTP.md](docs/HTTP.md).
 
 | Surface | Description |
 |---------|-------------|
-| **MCP tools** | 44+ tools for agents — add, search, publish, moderate |
+| **MCP tools** | 51 tools for agents — add, search, publish, moderate |
 | **CLI** | `dugg add`, `dugg search`, `dugg feed`, `dugg admin` |
 | **Chrome extension** | "Dugg This" — one-click from any browser tab |
 | **Email forwarding** | Self-describing `{key}@{host}.dugg.fyi` addresses |
@@ -98,7 +98,7 @@ For remote connections (HTTP/SSE), see [docs/HTTP.md](docs/HTTP.md).
 
 | Doc | Covers |
 |-----|--------|
-| [docs/TOOLS.md](docs/TOOLS.md) | Full MCP tool reference (44+ tools) |
+| [docs/TOOLS.md](docs/TOOLS.md) | Full MCP tool reference (51 tools) |
 | [docs/CLI.md](docs/CLI.md) | CLI commands, admin TUI, `/dugg` slash command |
 | [docs/HTTP.md](docs/HTTP.md) | HTTP/SSE server, endpoints, remote agent setup |
 | [docs/GOVERNANCE.md](docs/GOVERNANCE.md) | Invite trees, bans, appeals, rate limits, pruning, succession |

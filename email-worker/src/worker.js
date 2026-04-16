@@ -7,7 +7,7 @@ export default {
     if (!domain || !domain.endsWith(".dugg.fyi")) return;
 
     // Subdomain pattern: {key}@{host-with-dots-as-double-dashes}.dugg.fyi
-    // e.g. dugg_abc@chino--bandido--kadedworkin--com.dugg.fyi
+    // e.g. dugg_abc@chino-bandido--kadedworkin--com.dugg.fyi
     //   -> key=dugg_abc, host=chino-bandido.kadedworkin.com
     const hostSlug = domain.slice(0, -".dugg.fyi".length);
     const host = hostSlug.replace(/--/g, ".");

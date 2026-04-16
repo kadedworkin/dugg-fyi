@@ -2683,7 +2683,7 @@ class DuggDB:
             sig = hmac.new(hook["secret"].encode(), body, hashlib.sha256).hexdigest()
             req.add_header("X-Dugg-Signature", sig)
         try:
-            urllib.request.urlopen(req, timeout=10)
+            urllib.request.urlopen(req, timeout=15)
             self._update_webhook_status(hook["id"], success=True)
         except Exception:
             self._update_webhook_status(hook["id"], success=False)
