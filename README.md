@@ -63,10 +63,20 @@ For remote connections (HTTP/SSE), see [docs/HTTP.md](docs/HTTP.md).
 └─────────────────────────────────────────────┘
 ```
 
+## Design principles
+
+**Submit in ≤2 clicks, everywhere.** Every ingestion surface — share sheet, email, browser, CLI, Slack, extension, paste form — must let a user add a resource in two clicks or fewer from wherever they already are. If a new feature adds friction to the submit path, it's wrong. Adoption is bottlenecked by submit friction, not retrieval.
+
+**Progressive disclosure, not progressive complexity.** Power features (collections, tags, routing, federation, admin controls) exist for users who want them, but are **never required** to contribute. The default pool + the Default collection + zero-arg submit is the sacred baseline. The user who throws content into the pool must never get a functionally worse experience than the user tagging and curating a storm.
+
+**Zero LLM cost in the server.** All enrichment, summarization, and judgment runs in the agent layer on the user's tokens. Dugg stores, indexes, and retrieves — nothing more. This keeps the hosted server boring, predictable, and cheap.
+
+**Trust networks over open firehoses.** Invite-only growth with tracked lineage. No content goes to strangers by default; federation is an opt-in relationship between trusted instances.
+
 ## Key concepts
 
 - **Resources** — URLs with enriched metadata, transcripts, notes, and tags
-- **Collections** — Groups of resources (private or shared)
+- **Collections** — Access/publish boundaries (private, shared, or shared-default). *Not* topic buckets — topics are tags' job.
 - **Instances** — Hosted Dugg deployments with topics. Invite-only, growing through trust networks
 - **Publishing** — Push selected content to remote Dugg instances. Non-concentric circles
 - **Silent reactions** — Subscribers react; only the publisher sees counts. No social pressure
