@@ -658,7 +658,7 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
                 author_html = f' · {r["author"]}' if r.get("author") else ""
                 url = r["url"]
                 if url.startswith("dugg://content/"):
-                    url = f"/content/{api_key}/" + url.removeprefix("dugg://content/")
+                    url = "/r/" + url.removeprefix("dugg://content/")
                 items_html += f"""<div class="feed-item">
   <h3><a href="{url}" target="_blank" rel="noopener">{title}</a></h3>
   <p class="meta">{r['created_at'][:10]}{author_html}</p>
@@ -718,6 +718,123 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
 {tags_html}
 <div style="margin-top:1.5rem;line-height:1.6;font-size:0.9rem;color:#ccc;white-space:pre-wrap;word-break:break-word;">{content_html}</div>"""
         return HTMLResponse(_html_page(_xml_escape(title), body))
+
+    # --- Key Rotation ---
+
+    async def handle_rotate_key(request: Request):
+        """POST /rotate-key — issue a new API key for the caller, invalidating the old one.
+
+        Authenticates via the current X-Dugg-Key header. Returns {"api_key": "..."}.
+        Memberships, webhooks, and invites survive rotation (all keyed by user_id)."""
+        try:
+            user = resolve_user_from_request(request)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=401)
+        d = get_db()
+        new_key = d.rotate_api_key(user["id"])
+        return JSONResponse({"api_key": new_key, "user_id": user["id"]})
+
+    # --- Shareable Resource Viewer (/r/{resource_id}) ---
+    # Form-gated: unauthenticated visitors get a "paste your key" form; submitting
+    # sets a cookie so subsequent visits go straight to content. Membership is
+    # checked on every render, so leaking the URL does not grant access.
+
+    COOKIE_NAME = "dugg_key"
+
+    def _resolve_user_for_viewer(request: Request) -> Optional[dict]:
+        """Cookie > X-Dugg-Key header. Returns None if neither resolves to a user."""
+        d = get_db()
+        cookie_key = request.cookies.get(COOKIE_NAME, "")
+        if cookie_key:
+            user = d.get_user_by_api_key(cookie_key)
+            if user:
+                return user
+        header_key = request.headers.get("x-dugg-key", "")
+        if header_key:
+            user = d.get_user_by_api_key(header_key)
+            if user:
+                return user
+        return None
+
+    def _unlock_form_html(resource_id: str, error: str = "") -> str:
+        err_html = f'<p style="color:#f87171;margin-top:0.5rem;font-size:0.9rem;">{_xml_escape(error)}</p>' if error else ""
+        return _html_page(
+            "Unlock",
+            f"""<h1>Unlock</h1>
+<p style="margin-top:0.5rem;color:#aaa;">This content is only visible to Dugg members of this server. Paste your Dugg key to view.</p>
+<form method="POST" action="/r/{_xml_escape(resource_id)}/unlock" style="margin-top:1rem;">
+  <input type="password" name="key" placeholder="dugg_..." autofocus required
+         style="width:100%;padding:0.6rem;background:#1a1a1a;border:1px solid #333;color:#eee;border-radius:4px;font-family:monospace;">
+  <button type="submit" style="margin-top:0.5rem;padding:0.6rem 1rem;background:#2563eb;color:white;border:0;border-radius:4px;cursor:pointer;">Unlock</button>
+  {err_html}
+</form>""",
+        )
+
+    def _render_resource(resource: dict) -> str:
+        title = resource.get("title") or "Untitled"
+        transcript = resource.get("transcript") or ""
+        author = resource.get("author") or ""
+        created = (resource.get("created_at") or "")[:10]
+        note = resource.get("note") or ""
+        tags = resource.get("tags") or []
+        meta_parts = [created] + ([author] if author else [])
+        meta_html = " · ".join(meta_parts)
+        note_html = f'<p class="note" style="margin-top:1rem;font-style:italic;">{_xml_escape(note)}</p>' if note else ""
+        tags_html = f'<p style="margin-top:0.5rem;font-size:0.8rem;color:#666;">{", ".join(_xml_escape(t) for t in tags)}</p>' if tags else ""
+        content_html = _xml_escape(transcript).replace("\n", "<br>")
+        body = f"""<h1>{_xml_escape(title)}</h1>
+<p class="meta" style="margin-bottom:1rem;">{meta_html}</p>
+{note_html}
+{tags_html}
+<div style="margin-top:1.5rem;line-height:1.6;font-size:0.9rem;color:#ccc;white-space:pre-wrap;word-break:break-word;">{content_html}</div>"""
+        return _html_page(_xml_escape(title), body)
+
+    async def handle_resource_page(request: Request):
+        """GET /r/{resource_id} — render a resource if viewer has access.
+
+        Unauthenticated: show a form to paste a key (no key in URL ever).
+        Authenticated via cookie or header: render if viewer is a member of a
+        collection that contains the resource."""
+        resource_id = request.path_params["resource_id"]
+        d = get_db()
+        user = _resolve_user_for_viewer(request)
+        if not user:
+            return HTMLResponse(_unlock_form_html(resource_id), status_code=401)
+
+        d.touch_user(user["id"])
+        resource = d.get_resource(resource_id)
+        if not resource:
+            row = d.conn.execute(
+                "SELECT id FROM resources WHERE url = ?",
+                (f"dugg://content/{resource_id}",),
+            ).fetchone()
+            if row:
+                resource = d.get_resource(row["id"])
+        accessible = d._accessible_collection_ids(user["id"])
+        if not resource or resource.get("collection_id") not in accessible:
+            return HTMLResponse(_html_page("Not Found", "<h1>Not found</h1>"), status_code=404)
+
+        return HTMLResponse(_render_resource(resource))
+
+    async def handle_resource_unlock(request: Request):
+        """POST /r/{resource_id}/unlock — validate pasted key, set cookie, redirect back."""
+        resource_id = request.path_params["resource_id"]
+        form = await request.form()
+        key = (form.get("key") or "").strip()
+        d = get_db()
+        user = d.get_user_by_api_key(key) if key else None
+        if not user:
+            return HTMLResponse(_unlock_form_html(resource_id, error="Invalid key."), status_code=401)
+        from starlette.responses import RedirectResponse
+        resp = RedirectResponse(url=f"/r/{resource_id}", status_code=303)
+        is_https = request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
+        resp.set_cookie(
+            COOKIE_NAME, key,
+            httponly=True, secure=is_https, samesite="lax",
+            max_age=60 * 60 * 24 * 365,
+            path="/",
+        )
+        return resp
 
     # --- Ban Appeal Pages ---
 
@@ -1279,6 +1396,9 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
         Route("/appeal/{key}/submit", endpoint=handle_appeal_submit, methods=["POST"]),
         Route("/appeal/{key}/status", endpoint=handle_appeal_status),
         Route("/content/{key}/{resource_id}", endpoint=handle_content_page),
+        Route("/r/{resource_id}", endpoint=handle_resource_page),
+        Route("/r/{resource_id}/unlock", endpoint=handle_resource_unlock, methods=["POST"]),
+        Route("/rotate-key", endpoint=handle_rotate_key, methods=["POST"]),
         Route("/events/stream", endpoint=handle_events_stream),
         Route("/tools/{tool_name}", endpoint=handle_tools, methods=["POST"]),
         Route("/slack/command", endpoint=handle_slack_command, methods=["POST"]),

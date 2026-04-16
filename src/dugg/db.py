@@ -495,6 +495,17 @@ class DuggDB:
         ).fetchone()
         return dict(row) if row else None
 
+    def rotate_api_key(self, user_id: str) -> str:
+        """Issue a fresh API key for user_id, invalidating the old one.
+        Memberships, webhooks, invites, and resources are unaffected (all keyed by user_id)."""
+        user = self.get_user(user_id)
+        if not user:
+            raise ValueError(f"User {user_id} not found")
+        new_key = f"dugg_{uuid.uuid4().hex}"
+        self.conn.execute("UPDATE users SET api_key = ? WHERE id = ?", (new_key, user_id))
+        self.conn.commit()
+        return new_key
+
     # --- User Agents ---
 
     def create_agent_for_user(self, user_id: str, agent_name: Optional[str] = None) -> dict:

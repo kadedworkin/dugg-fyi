@@ -436,6 +436,99 @@ def _find_env_file():
     return Path(__file__).resolve().parent.parent.parent / ".dugg-env"
 
 
+def cmd_rotate_key(args):
+    """Rotate the API key you're authenticating with, invalidating the old one.
+
+    Works against a remote server (via --server) or the local DB. Updates
+    .dugg-env if the old key is stored there. Memberships, webhooks, and
+    invites survive rotation (all keyed by user_id)."""
+    from pathlib import Path
+    import urllib.request
+    import urllib.error
+
+    server = getattr(args, "server", None)
+    env_file = _find_env_file()
+    env_vars = {}
+    if env_file.exists():
+        try:
+            for line in env_file.read_text().splitlines():
+                if "=" in line and not line.startswith("#"):
+                    k, v = line.split("=", 1)
+                    env_vars[k.strip()] = v.strip()
+        except (OSError, PermissionError):
+            pass
+
+    old_key = getattr(args, "key", None) or env_vars.get("DUGG_API_KEY") or DEFAULT_API_KEY
+    if not old_key:
+        print("No key found. Pass --key or run `dugg login <key>` first.")
+        sys.exit(1)
+
+    target_is_remote = bool(server) or env_vars.get("DUGG_SERVER_URL")
+    server_url = server or env_vars.get("DUGG_SERVER_URL")
+
+    if target_is_remote and server_url:
+        req = urllib.request.Request(
+            f"{server_url.rstrip('/')}/rotate-key",
+            method="POST",
+            headers={"X-Dugg-Key": old_key, "Content-Type": "application/json"},
+            data=b"{}",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            print(f"Rotation failed: HTTP {e.code} — {e.read().decode()[:200]}")
+            sys.exit(1)
+        except urllib.error.URLError as e:
+            print(f"Rotation failed: {e}")
+            sys.exit(1)
+        new_key = data["api_key"]
+    else:
+        db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+        db = DuggDB(db_path)
+        user = db.get_user_by_api_key(old_key)
+        if not user:
+            print(f"Key not recognized in {db_path}.")
+            db.close()
+            sys.exit(1)
+        new_key = db.rotate_api_key(user["id"])
+        db.close()
+
+    if env_vars.get("DUGG_API_KEY") == old_key:
+        env_vars["DUGG_API_KEY"] = new_key
+        env_file.write_text("\n".join(f"{k}={v}" for k, v in env_vars.items()) + "\n")
+        print(f"Rotated. New key saved to {env_file}:")
+    else:
+        print("Rotated. New key:")
+    print(f"  {new_key}")
+    print("\nThe old key is now invalid. Update any other places it's stored.")
+
+
+def cmd_link(args):
+    """Print a shareable URL for a resource that doesn't include any API key."""
+    from pathlib import Path
+    env_file = _find_env_file()
+    env_vars = {}
+    if env_file.exists():
+        try:
+            for line in env_file.read_text().splitlines():
+                if "=" in line and not line.startswith("#"):
+                    k, v = line.split("=", 1)
+                    env_vars[k.strip()] = v.strip()
+        except (OSError, PermissionError):
+            pass
+    server_url = getattr(args, "server", None) or env_vars.get("DUGG_SERVER_URL")
+    if not server_url:
+        db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+        db = DuggDB(db_path)
+        server_url = db.get_config("server_url", "")
+        db.close()
+    if not server_url:
+        print("No server URL found. Pass --server or run `dugg set-url <url>`.")
+        sys.exit(1)
+    print(f"{server_url.rstrip('/')}/r/{args.resource_id}")
+
+
 def cmd_login(args):
     """Save your API key to .dugg-env so you don't need --key every time."""
     from pathlib import Path
@@ -1191,6 +1284,14 @@ def main():
     p_login = sub.add_parser("login", help="Save your API key so you don't need --key every time")
     p_login.add_argument("key", help="Your API key")
 
+    p_rotate = sub.add_parser("rotate-key", help="Rotate your API key, invalidating the old one")
+    p_rotate.add_argument("--key", default=None, help="The current key to rotate (defaults to .dugg-env)")
+    p_rotate.add_argument("--server", default=None, help="Remote server URL — rotates via HTTP instead of local DB")
+
+    p_link = sub.add_parser("link", help="Print a shareable URL for a resource (no key in URL)")
+    p_link.add_argument("resource_id", help="Resource ID to link to")
+    p_link.add_argument("--server", default=None, help="Override server URL")
+
     p_add = sub.add_parser("add", help="Add a URL to Dugg")
     p_add.add_argument("url", help="URL to add")
     p_add.add_argument("--note", default="", help="Why this resource matters")
@@ -1293,6 +1394,10 @@ def main():
         cmd_list_users(args)
     elif args.command == "login":
         cmd_login(args)
+    elif args.command == "rotate-key":
+        cmd_rotate_key(args)
+    elif args.command == "link":
+        cmd_link(args)
     elif args.command == "add":
         cmd_add(args)
     elif args.command == "paste":

@@ -1651,6 +1651,34 @@ def test_redeem_invite_auto_joins_shared_default(db):
     assert shared["id"] in agent_colls
 
 
+def test_rotate_api_key_returns_new_key(db):
+    user = db.create_user("Kade")
+    old = user["api_key"]
+    new = db.rotate_api_key(user["id"])
+    assert new != old
+    assert new.startswith("dugg_")
+
+
+def test_rotate_api_key_invalidates_old(db):
+    user = db.create_user("Kade")
+    old = user["api_key"]
+    db.rotate_api_key(user["id"])
+    assert db.get_user_by_api_key(old) is None
+
+
+def test_rotate_api_key_preserves_memberships(db):
+    kade = db.create_user("Kade")
+    coll = db.create_collection("Shared", kade["id"], visibility="shared")
+    db.rotate_api_key(kade["id"])
+    colls = [c["id"] for c in db.list_collections(kade["id"])]
+    assert coll["id"] in colls
+
+
+def test_rotate_api_key_unknown_user_raises(db):
+    with pytest.raises(ValueError):
+        db.rotate_api_key("nonexistent")
+
+
 def test_shared_default_disabled_when_collection_deleted(db):
     kade = db.create_user("Kade")
     shared = db.create_collection("Default", kade["id"], visibility="shared")

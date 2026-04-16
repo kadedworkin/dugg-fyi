@@ -504,3 +504,118 @@ def test_bootstrap_fails_when_users_exist(client):
     resp = c.post("/bootstrap", json={"name": "Intruder"})
     assert resp.status_code == 400
     assert "already has users" in resp.json()["error"]
+
+
+# --- Rotate Key ---
+
+def test_rotate_key_requires_auth(client):
+    c, user = client
+    resp = c.post("/rotate-key")
+    assert resp.status_code == 401
+
+
+def test_rotate_key_returns_new_key_and_invalidates_old(client):
+    c, user = client
+    old_key = user["api_key"]
+    resp = c.post("/rotate-key", headers={"X-Dugg-Key": old_key})
+    assert resp.status_code == 200
+    data = resp.json()
+    new_key = data["api_key"]
+    assert new_key.startswith("dugg_")
+    assert new_key != old_key
+    # Old key is dead
+    r2 = c.post("/rotate-key", headers={"X-Dugg-Key": old_key})
+    assert r2.status_code == 401
+    # New key works
+    r3 = c.post("/tools/dugg_feed", json={}, headers={"X-Dugg-Key": new_key})
+    assert r3.status_code == 200
+
+
+# --- Resource Viewer (/r/{id}) ---
+
+def _make_pasted_resource(db_path, user):
+    """Helper: insert a pasted content resource with collection_id set."""
+    from dugg.db import DuggDB, _uuid
+    d = DuggDB(db_path)
+    coll_id = d.ensure_default_collection(user["id"])
+    res_id = _uuid()
+    d.add_resource(
+        url=f"dugg://content/{res_id}",
+        collection_id=coll_id,
+        submitted_by=user["id"],
+        title="Secret Notes",
+        transcript="line one\nline two",
+        source_type="email",
+    )
+    # Retrieve actual stored id (add_resource generates its own)
+    row = d.conn.execute(
+        "SELECT id FROM resources WHERE url = ? AND submitted_by = ?",
+        (f"dugg://content/{res_id}", user["id"]),
+    ).fetchone()
+    d.close()
+    return row[0]
+
+
+def test_resource_page_unauth_returns_form(client, db_path, user):
+    c, _ = client
+    res_id = _make_pasted_resource(db_path, user)
+    resp = c.get(f"/r/{res_id}")
+    assert resp.status_code == 401
+    assert "<form" in resp.text
+    assert "/unlock" in resp.text
+    assert user["api_key"] not in resp.text  # no key leaked
+
+
+def test_resource_page_with_header_key_renders(client, db_path, user):
+    c, _ = client
+    res_id = _make_pasted_resource(db_path, user)
+    resp = c.get(f"/r/{res_id}", headers={"X-Dugg-Key": user["api_key"]})
+    assert resp.status_code == 200
+    assert "Secret Notes" in resp.text
+    assert "line one" in resp.text
+
+
+def test_resource_unlock_invalid_key(client, db_path, user):
+    c, _ = client
+    res_id = _make_pasted_resource(db_path, user)
+    resp = c.post(f"/r/{res_id}/unlock", data={"key": "dugg_wrong"})
+    assert resp.status_code == 401
+    assert "Invalid key" in resp.text
+
+
+def test_resource_unlock_sets_cookie_and_redirects(client, db_path, user):
+    c, _ = client
+    res_id = _make_pasted_resource(db_path, user)
+    resp = c.post(f"/r/{res_id}/unlock", data={"key": user["api_key"]}, follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == f"/r/{res_id}"
+    cookies = resp.cookies
+    assert cookies.get("dugg_key") == user["api_key"]
+    # Follow-up GET uses the cookie
+    r2 = c.get(f"/r/{res_id}")
+    assert r2.status_code == 200
+    assert "Secret Notes" in r2.text
+
+
+def test_resource_page_403_without_membership(client, db_path, user):
+    """Valid key, but resource lives in a collection the user isn't a member of."""
+    from dugg.db import DuggDB, _uuid
+    d = DuggDB(db_path)
+    other = d.create_user("Stranger")
+    other_coll = d.create_collection("Private", other["id"], visibility="private")
+    res_id = _uuid()
+    d.add_resource(
+        url=f"dugg://content/{res_id}",
+        collection_id=other_coll["id"],
+        submitted_by=other["id"],
+        title="Not yours",
+        transcript="nope",
+    )
+    row = d.conn.execute(
+        "SELECT id FROM resources WHERE url = ?", (f"dugg://content/{res_id}",)
+    ).fetchone()
+    actual_id = row[0]
+    d.close()
+    c, _ = client
+    resp = c.get(f"/r/{actual_id}", headers={"X-Dugg-Key": user["api_key"]})
+    assert resp.status_code == 404  # not found (we don't leak existence)
