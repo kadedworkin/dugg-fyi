@@ -7,3 +7,6 @@ build/
 *.db
 .dugg/
 .pytest_cache/
+.DS_Store
+.dugg-env
+agent/logs/
