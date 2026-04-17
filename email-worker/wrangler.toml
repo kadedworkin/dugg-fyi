@@ -1,4 +1,4 @@
-name = "dugg-email-worker"
+name = "dugg-primary"
 main = "src/worker.js"
 compatibility_date = "2024-09-01"
 
