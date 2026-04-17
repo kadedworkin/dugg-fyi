@@ -13,7 +13,9 @@ Added by Rocco · from chino-bandido
 _context note if you included one_
 ```
 
-The formatting is automatic — Dugg detects Slack webhook URLs and uses Slack-flavored payloads; other webhook targets get raw JSON instead.
+Each message includes **Tap / Star / Nice** buttons — click one to silently react. The resource's author gets a separate notification with aggregate counts.
+
+The formatting is automatic — Dugg detects Slack webhook URLs and uses Slack Block Kit payloads; other webhook targets get raw JSON instead.
 
 ## Step 1 — Create a Slack app
 
@@ -77,7 +79,24 @@ Events: all
 dugg webhook add https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXX
 ```
 
-## Step 5 — Test it
+## Step 5 — Enable reactions (interactive buttons)
+
+New resource messages include Tap / Star / Nice buttons. For these to work, you need to enable interactivity in your Slack app:
+
+1. In the app's sidebar, click **Interactivity & Shortcuts**.
+2. Toggle **Interactivity** to on.
+3. Set the **Request URL** to: `https://your-server/slack/actions`
+   (e.g. `https://chino-bandido.kadedworkin.com/slack/actions`)
+4. Click **Save Changes**.
+
+When someone clicks a reaction button:
+- The reactor sees an ephemeral confirmation (only visible to them)
+- The resource's author gets a webhook notification: ":star: Your resource *Title* got a star — 3 total reactions (1 star, 2 tap)"
+- Reaction counts are only visible to the author — no one else knows who reacted
+
+If you set a signing secret in Step 4 (slash command), the same secret is used to verify interactive payloads. No additional config needed.
+
+## Step 6 — Test it
 
 Add any resource to Dugg — via your agent, the Chrome extension, email, or paste. You should see a message show up in your Slack channel within a second or two.
 
@@ -98,7 +117,7 @@ By default your webhook fires on every event. If you want just the additions, pa
 }
 ```
 
-Common event types: `resource_added`, `resource_published`, `resource_reacted`, `user_banned`, `appeal_submitted`. Omit `event_types` or pass `[]` for all.
+Common event types: `resource_added`, `resource_published`, `resource_deleted`, `reaction_added`, `member_joined`, `member_banned`, `invite_created`, `invite_redeemed`, `publish_delivered`. Omit `event_types` or pass `[]` for all.
 
 ## Security note
 

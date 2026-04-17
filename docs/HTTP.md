@@ -66,6 +66,7 @@ Configure your MCP client with the SSE transport and your API key:
 | `/health` | GET | None | Liveness check |
 | `/bootstrap` | POST | None | Create first admin user (disabled once any user exists) |
 | `/slack/command` | POST | Slack | Slack slash command endpoint |
+| `/slack/actions` | POST | Slack | Block Kit interactive button handler (reactions) |
 | `/admin/{key}` | GET | Key-in-URL | Browser admin panel — collections, members, resources |
 | `/admin/{key}/ban` | POST | Key-in-URL | Ban a user (owner only) |
 | `/admin/{key}/unban` | POST | Key-in-URL | Unban a user (owner only) |
