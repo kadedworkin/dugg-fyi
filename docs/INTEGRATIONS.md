@@ -37,7 +37,7 @@ New resources posted to Slack via webhooks include Tap / Star / Nice buttons. Cl
 2. Enable interactivity and set the Request URL to: `https://your-server/slack/actions`
 3. The signing secret from the slash command setup is reused for verification
 
-Buttons appear automatically on `resource_added` webhook messages. No additional configuration needed.
+Buttons appear on webhook push messages, `/dugg` feed results, `/dugg <url>` confirmations, and `/dugg <query>` search results. No additional configuration beyond the interactivity URL.
 
 ## Email forwarding
 

@@ -79,7 +79,33 @@ Events: all
 dugg webhook add https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXX
 ```
 
-## Step 5 — Enable reactions (interactive buttons)
+## Step 5 — Add the `/dugg` slash command (optional)
+
+If you want to add, search, and browse your knowledge base from Slack:
+
+1. In the app's sidebar, click **Slash Commands** → **Create New Command**.
+2. **Command:** `/dugg`
+3. **Request URL:** `https://your-server/slack/command`
+   (e.g. `https://chino-bandido.kadedworkin.com/slack/command`)
+4. **Short Description:** "Add, search, or browse your Dugg knowledge base"
+5. Click **Save**.
+
+**Usage:**
+- `/dugg` — shows last 5 resources with reaction buttons
+- `/dugg https://example.com cool article` — adds the URL with "cool article" as the note
+- `/dugg search terms` — searches and shows results with reaction buttons
+
+## Step 6 — Set the signing secret (recommended)
+
+Protects both the slash command and interactive button endpoints from forgery:
+
+1. In the app's sidebar, click **Basic Information**.
+2. Under **App Credentials**, copy the **Signing Secret**.
+3. On your server: `dugg set-config slack_signing_secret <your-secret>`
+
+No restart needed — the server reads it from the database on each request.
+
+## Step 7 — Enable reactions (interactive buttons)
 
 New resource messages include Tap / Star / Nice buttons. For these to work, you need to enable interactivity in your Slack app:
 
@@ -94,9 +120,11 @@ When someone clicks a reaction button:
 - The resource's author gets a webhook notification: ":star: Your resource *Title* got a star — 3 total reactions (1 star, 2 tap)"
 - Reaction counts are only visible to the author — no one else knows who reacted
 
-If you set a signing secret in Step 4 (slash command), the same secret is used to verify interactive payloads. No additional config needed.
+Buttons appear on webhook push messages, `/dugg` feed results, `/dugg <url>` add confirmations, and `/dugg <query>` search results.
 
-## Step 6 — Test it
+The signing secret from Step 6 is reused for interactive payload verification. No additional config needed.
+
+## Step 8 — Test it
 
 Add any resource to Dugg — via your agent, the Chrome extension, email, or paste. You should see a message show up in your Slack channel within a second or two.
 
