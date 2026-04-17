@@ -179,7 +179,16 @@ def create_app(db_path: Optional[Path] = None, mode: str = "local") -> Starlette
         coll_id = _ensure_default_collection(d, user["id"])
 
         source_server = payload.get("source_server", "")
-        result = d.ingest_remote_publish(resource_data, source_instance_id, coll_id, source_server=source_server, submitted_by=user["id"])
+
+        # Resolve submitter: prefer matching user by name from source, fall back to authed user
+        submitter_id = user["id"]
+        submitter_name = resource_data.get("submitter_name", "")
+        if submitter_name:
+            match = d.conn.execute("SELECT id FROM users WHERE name = ?", (submitter_name,)).fetchone()
+            if match:
+                submitter_id = match["id"]
+
+        result = d.ingest_remote_publish(resource_data, source_instance_id, coll_id, source_server=source_server, submitted_by=submitter_id)
         if not result:
             return JSONResponse({"error": "Ingest failed"}, status_code=500)
 

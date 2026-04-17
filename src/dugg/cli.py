@@ -954,6 +954,12 @@ def cmd_remove(args):
         row = db.conn.execute(
             "SELECT id, url, title, collection_id, submitted_by FROM resources WHERE url = ?", (target,)
         ).fetchone()
+        # Fallback: URL may have been truncated by shell (unquoted & in query string)
+        if not row:
+            row = db.conn.execute(
+                "SELECT id, url, title, collection_id, submitted_by FROM resources WHERE url LIKE ?",
+                (target + "%",)
+            ).fetchone()
     else:
         row = db.conn.execute(
             "SELECT id, url, title, collection_id, submitted_by FROM resources WHERE id = ? OR id LIKE ?",
@@ -962,6 +968,7 @@ def cmd_remove(args):
 
     if not row:
         print(f"Resource not found: {target}")
+        print("  Tip: if the URL contains & characters, wrap it in quotes.")
         db.close()
         sys.exit(1)
 
