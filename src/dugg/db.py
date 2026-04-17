@@ -3097,6 +3097,16 @@ class DuggDB:
                 self._add_tag(res_id, label, "agent", now)
 
         self.conn.commit()
+
+        # Fire resource_added event so webhooks (Slack notifications etc.) trigger
+        self.emit_event("resource_added", actor_id=submitted_by, collection_id=target_collection_id,
+                        payload={"resource_id": res_id, "url": url,
+                                 "title": resource_data.get("title", ""),
+                                 "note": incoming_note,
+                                 "source_type": resource_data.get("source_type", "unknown"),
+                                 "submitted_by": submitted_by,
+                                 "source_server": source_server})
+
         return {"id": res_id, "status": "ingested", "url": url, "title": resource_data.get("title", "")}
 
     # --- Helpers ---
