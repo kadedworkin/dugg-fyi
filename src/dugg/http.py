@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Optional
 
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
+from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Route
@@ -61,11 +63,15 @@ def _resource_pub_date(resource: dict) -> str:
     return _short_date(raw.get("published_at") or raw.get("updated_at"))
 
 
-def create_app(db_path: Optional[Path] = None) -> Starlette:
-    """Create the Starlette ASGI app with MCP SSE transport and REST endpoints."""
+def create_app(db_path: Optional[Path] = None, mode: str = "local") -> Starlette:
+    """Create the Starlette ASGI app with MCP SSE transport and REST endpoints.
+
+    mode: "local" (LAN/dev — /setup available) or "public" (internet-facing — invite-only).
+    """
 
     # --- Shared state ---
     db: Optional[DuggDB] = None
+    server_mode: str = mode
 
     def get_db() -> DuggDB:
         nonlocal db
@@ -173,7 +179,7 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
         coll_id = _ensure_default_collection(d, user["id"])
 
         source_server = payload.get("source_server", "")
-        result = d.ingest_remote_publish(resource_data, source_instance_id, coll_id, source_server=source_server)
+        result = d.ingest_remote_publish(resource_data, source_instance_id, coll_id, source_server=source_server, submitted_by=user["id"])
         if not result:
             return JSONResponse({"error": "Ingest failed"}, status_code=500)
 
@@ -204,6 +210,7 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
             "status": "ok" if db_ok else "degraded",
             "db": "connected" if db_ok else "error",
             "transport": "http+sse",
+            "mode": server_mode,
         })
 
     async def handle_bootstrap(request: Request):
@@ -224,6 +231,103 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
             "user": {"id": user["id"], "name": user["name"], "api_key": user["api_key"]},
             "message": "First user created. Save this API key — it won't be shown again.",
         }, status_code=201)
+
+    async def handle_whoami(request: Request):
+        """GET /whoami — verify API key and return user info."""
+        try:
+            user = resolve_user_from_request(request)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=401)
+        return JSONResponse({
+            "status": "ok",
+            "user": {"id": user["id"], "name": user["name"]},
+        })
+
+    async def handle_setup_page(request: Request):
+        """GET /setup — self-service key generation (local mode only)."""
+        if server_mode != "local":
+            return JSONResponse({"error": "Setup is disabled in public mode"}, status_code=404)
+        d = get_db()
+        server_url = d.get_config("server_url") or ""
+        return HTMLResponse(f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>
+  * {{ margin:0; padding:0; box-sizing:border-box; }}
+  body {{ font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif; background:#0a0a0a; color:#e0e0e0; display:flex; justify-content:center; padding:40px; }}
+  .card {{ max-width:420px; width:100%; }}
+  h1 {{ font-size:20px; margin-bottom:8px; color:#fff; }}
+  p {{ font-size:13px; color:#aaa; margin-bottom:20px; }}
+  label {{ display:block; font-size:12px; color:#aaa; margin-bottom:4px; }}
+  input {{ width:100%; padding:8px; background:#111; border:1px solid #333; border-radius:6px; color:#fff; font-size:13px; margin-bottom:12px; font-family:monospace; }}
+  input:focus {{ outline:none; border-color:#6366f1; }}
+  button {{ width:100%; padding:10px; background:#6366f1; color:#fff; border:none; border-radius:6px; font-size:13px; font-weight:600; cursor:pointer; }}
+  button:hover {{ background:#5558e6; }}
+  .result {{ margin-top:16px; padding:12px; background:#052e16; border:1px solid #166534; border-radius:6px; display:none; }}
+  .result h3 {{ font-size:13px; color:#4ade80; margin-bottom:8px; }}
+  .key-box {{ font-family:monospace; font-size:13px; color:#fff; word-break:break-all; user-select:all; }}
+  .hint {{ font-size:11px; color:#888; margin-top:8px; }}
+</style>
+</head><body>
+<div class="card">
+  <h1>Dugg &mdash; Quick Setup</h1>
+  <p>Create a user and get an API key for this local server.</p>
+  <label for="name">Your name</label>
+  <input type="text" id="name" placeholder="Kade" value="">
+  <button id="goBtn" onclick="doSetup()">Create &amp; Get Key</button>
+  <div class="result" id="result">
+    <h3>Your API key:</h3>
+    <div class="key-box" id="keyDisplay"></div>
+    <p class="hint">Copy this key into the Chrome extension settings. It won't be shown again.</p>
+  </div>
+</div>
+<script>
+async function doSetup() {{
+  const name = document.getElementById('name').value.trim() || 'User';
+  const btn = document.getElementById('goBtn');
+  btn.disabled = true; btn.textContent = 'Creating...';
+  try {{
+    const res = await fetch('/setup', {{ method:'POST', headers:{{'Content-Type':'application/json'}}, body:JSON.stringify({{name}}) }});
+    const data = await res.json();
+    if (data.error) {{ alert(data.error); btn.disabled=false; btn.textContent='Create & Get Key'; return; }}
+    document.getElementById('keyDisplay').textContent = data.user.api_key;
+    document.getElementById('result').style.display = 'block';
+    btn.textContent = 'Done';
+  }} catch(e) {{ alert('Error: ' + e.message); btn.disabled=false; btn.textContent='Create & Get Key'; }}
+}}
+</script>
+</body></html>""")
+
+    async def handle_setup_submit(request: Request):
+        """POST /setup — create a user (local mode only)."""
+        if server_mode != "local":
+            return JSONResponse({"error": "Setup is disabled in public mode"}, status_code=404)
+        d = get_db()
+        try:
+            body = await request.body()
+            data = json.loads(body) if body else {}
+        except json.JSONDecodeError:
+            return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+        name = data.get("name", "User")
+        user = d.create_user(name)
+        return JSONResponse({
+            "status": "created",
+            "user": {"id": user["id"], "name": user["name"], "api_key": user["api_key"]},
+        }, status_code=201)
+
+    async def handle_instances(request: Request):
+        """GET /instances — list instances with endpoint_url for distribution UI."""
+        try:
+            user = resolve_user_from_request(request)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=401)
+        d = get_db()
+        instances = d.list_instances(user["id"])
+        targets = [
+            {"id": inst["id"], "name": inst["name"], "topic": inst.get("topic", "")}
+            for inst in instances
+            if inst.get("endpoint_url")
+        ]
+        return JSONResponse({"instances": targets})
 
     async def handle_tools(request: Request):
         """POST /tools/{tool_name} — HTTP dispatch for any MCP tool.
@@ -318,6 +422,18 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
   .feed-item .meta {{ font-size: 0.8rem; color: #666; }}
   .feed-item .note {{ font-size: 0.85rem; color: #aaa; margin-top: 0.3rem; }}
   .empty {{ color: #666; text-align: center; padding: 2rem 0; }}
+  .item-actions {{ margin-top: 0.4rem; display: flex; gap: 0.5rem; }}
+  .action-btn {{ width: auto; padding: 0.2rem 0.5rem; font-size: 0.75rem; background: transparent;
+                 color: #666; border: 1px solid #333; border-radius: 4px; cursor: pointer; font-weight: 400; }}
+  .action-btn:hover {{ color: #ccc; border-color: #555; background: #1a1a1a; }}
+  .delete-btn:hover {{ color: #f87171; border-color: #7f1d1d; }}
+  .save-btn {{ color: #4ade80; border-color: #166534; }}
+  .save-btn:hover {{ background: #052e16; }}
+  .edit-form {{ margin-top: 0.4rem; }}
+  .edit-input {{ width: 100%; padding: 0.5rem; background: #111; border: 1px solid #444; border-radius: 6px;
+                 color: #fff; font-size: 0.85rem; font-family: inherit; min-height: 60px; resize: vertical; }}
+  .edit-input:focus {{ outline: none; border-color: #6366f1; }}
+  .edit-buttons {{ display: flex; gap: 0.5rem; margin-top: 0.3rem; }}
   .step {{ display: flex; gap: 1rem; margin-bottom: 1.25rem; }}
   .step-num {{ flex-shrink: 0; width: 28px; height: 28px; background: #6366f1; color: #fff;
                border-radius: 50%; display: flex; align-items: center; justify-content: center;
@@ -645,10 +761,9 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
 
         feed = d.get_feed(user["id"], limit=50)
 
-        # Get instance context for the page title
-        instances = d.list_instances(user["id"])
-        page_title = instances[0]["name"] if instances else "Dugg"
-        page_topic = instances[0].get("topic", "") if instances else ""
+        # Page title: user's name feed
+        page_title = f"{user['name']}'s Dugg"
+        page_topic = ""
 
         if want_atom:
             # Simple Atom feed
@@ -709,17 +824,92 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
                 url = r["url"]
                 if url.startswith("dugg://content/"):
                     url = "/r/" + url.removeprefix("dugg://content/")
-                items_html += f"""<div class="feed-item">
+                note_escaped = _xml_escape(r.get("note") or "")
+                note_display = f'<p class="note" id="note-{r["id"]}">{note_escaped}</p>' if r.get("note") else f'<p class="note" id="note-{r["id"]}" style="display:none;"></p>'
+                coll_id = r.get("collection_id", "")
+                items_html += f"""<div class="feed-item" id="item-{r["id"]}" data-collection="{coll_id}">
   <h3><a href="{url}" target="_blank" rel="noopener">{title}</a></h3>
   <p class="meta">{added_date}{pub_html}{author_html}</p>
-  {note_html}
+  {note_display}
   {siblings_html}
+  <div class="item-actions">
+    <button class="action-btn edit-btn" onclick="editNote('{r["id"]}')">edit</button>
+    <button class="action-btn delete-btn" onclick="deleteItem('{r["id"]}')">delete</button>
+  </div>
 </div>\n"""
 
         topic_html = f'<p class="topic">{page_topic}</p>' if page_topic else ""
+        feed_js = """
+<script>
+const API_KEY = window.location.pathname.split('/feed/')[1];
+const BASE = window.location.origin;
+
+function editNote(id) {
+  const noteEl = document.getElementById('note-' + id);
+  const current = noteEl.textContent || '';
+  const actionsEl = noteEl.parentElement.querySelector('.item-actions');
+  // Replace note with textarea
+  const editor = document.createElement('div');
+  editor.className = 'edit-form';
+  editor.innerHTML = `<textarea class="edit-input" id="edit-${id}">${current}</textarea>
+    <div class="edit-buttons">
+      <button class="action-btn save-btn" onclick="saveNote('${id}')">save</button>
+      <button class="action-btn" onclick="cancelEdit('${id}', '${current.replace(/'/g, "\\\\'")}')">cancel</button>
+    </div>`;
+  noteEl.style.display = 'none';
+  actionsEl.style.display = 'none';
+  noteEl.parentElement.insertBefore(editor, actionsEl);
+}
+
+function cancelEdit(id, original) {
+  const form = document.querySelector('#item-' + id + ' .edit-form');
+  if (form) form.remove();
+  const noteEl = document.getElementById('note-' + id);
+  const actionsEl = document.querySelector('#item-' + id + ' .item-actions');
+  if (original) noteEl.style.display = '';
+  actionsEl.style.display = '';
+}
+
+async function saveNote(id) {
+  const textarea = document.getElementById('edit-' + id);
+  const newNote = textarea.value.trim();
+  try {
+    const res = await fetch(BASE + '/tools/dugg_edit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Dugg-Key': API_KEY },
+      body: JSON.stringify({ resource_id: id, note: newNote }),
+    });
+    if (!res.ok) { alert('Failed to save'); return; }
+    const noteEl = document.getElementById('note-' + id);
+    noteEl.textContent = newNote;
+    noteEl.style.display = newNote ? '' : 'none';
+    const form = document.querySelector('#item-' + id + ' .edit-form');
+    if (form) form.remove();
+    document.querySelector('#item-' + id + ' .item-actions').style.display = '';
+  } catch (e) { alert('Error: ' + e.message); }
+}
+
+async function deleteItem(id) {
+  if (!confirm('Delete this item?')) return;
+  try {
+    const collectionId = document.getElementById('item-' + id).dataset.collection;
+    const res = await fetch(BASE + '/tools/dugg_delete_resource', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Dugg-Key': API_KEY },
+      body: JSON.stringify({ resource_id: id, collection_id: collectionId }),
+    });
+    if (!res.ok) { alert('Failed to delete'); return; }
+    const item = document.getElementById('item-' + id);
+    item.style.opacity = '0.3';
+    item.style.pointerEvents = 'none';
+    setTimeout(() => item.remove(), 300);
+  } catch (e) { alert('Error: ' + e.message); }
+}
+</script>"""
         body = f"""<h1>{page_title}</h1>
 {topic_html}
-{items_html}"""
+{items_html}
+{feed_js}"""
         return HTMLResponse(_html_page(page_title, body))
 
     # --- Key Rotation ---
@@ -1554,7 +1744,11 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
         Route("/messages", endpoint=handle_messages, methods=["POST"]),
         Route("/ingest", endpoint=handle_ingest, methods=["POST"]),
         Route("/health", endpoint=handle_health),
+        Route("/whoami", endpoint=handle_whoami),
+        Route("/instances", endpoint=handle_instances),
         Route("/bootstrap", endpoint=handle_bootstrap, methods=["POST"]),
+        Route("/setup", endpoint=handle_setup_page),
+        Route("/setup", endpoint=handle_setup_submit, methods=["POST"]),
         Route("/invite/{token}", endpoint=handle_invite_page),
         Route("/invite/{token}/redeem", endpoint=handle_invite_redeem, methods=["POST"]),
         Route("/feed/{key}", endpoint=handle_feed),
@@ -1579,14 +1773,26 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
     app = Starlette(
         routes=routes,
         lifespan=lifespan,
+        middleware=[
+            Middleware(
+                CORSMiddleware,
+                allow_origins=["*"],
+                allow_methods=["GET", "POST", "OPTIONS"],
+                allow_headers=["Content-Type", "X-Dugg-Key", "X-Dugg-Format", "X-Dugg-Signature"],
+            ),
+        ],
     )
 
     return app
 
 
-def run_http(host: str = "0.0.0.0", port: int = 8411, db_path: Optional[Path] = None):
+def run_http(host: str = "0.0.0.0", port: int = 8411, db_path: Optional[Path] = None, mode: Optional[str] = None):
     """Run the Dugg HTTP server with uvicorn."""
     import uvicorn
+
+    # Resolve mode: explicit flag > env var > default "local"
+    if mode is None:
+        mode = os.environ.get("DUGG_MODE", "local")
 
     # Auto-detect server_url if not already configured
     _path = db_path or (Path(os.environ["DUGG_DB_PATH"]) if os.environ.get("DUGG_DB_PATH") else None)
@@ -1599,5 +1805,6 @@ def run_http(host: str = "0.0.0.0", port: int = 8411, db_path: Optional[Path] = 
             logger.info("Auto-set server_url to %s (override with 'dugg set-url')", inferred)
         _db.close()
 
-    app = create_app(db_path=db_path)
+    logger.info("Starting Dugg HTTP server in %s mode", mode)
+    app = create_app(db_path=db_path, mode=mode)
     uvicorn.run(app, host=host, port=port, log_level="info")

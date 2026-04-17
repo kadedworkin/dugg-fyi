@@ -18,7 +18,8 @@ def cmd_serve(args):
         db_path = Path(args.db) if args.db else None
         host = getattr(args, "host", "0.0.0.0")
         port = getattr(args, "port", 8411)
-        run_http(host=host, port=port, db_path=db_path)
+        mode = getattr(args, "mode", None)
+        run_http(host=host, port=port, db_path=db_path, mode=mode)
     else:
         from dugg.server import main
         main()
@@ -1324,6 +1325,8 @@ def main():
                          help="Transport mode: stdio (local agent) or http (remote HTTP/SSE)")
     p_serve.add_argument("--host", default="0.0.0.0", help="HTTP bind address (default: 0.0.0.0)")
     p_serve.add_argument("--port", type=int, default=8411, help="HTTP port (default: 8411)")
+    p_serve.add_argument("--mode", choices=["local", "public"], default=None,
+                         help="Server mode: local (LAN/dev, /setup enabled) or public (invite-only). Default: DUGG_MODE env or 'local'.")
     p_init = sub.add_parser("init", help="Initialize the database")
     p_init.add_argument("--server", default=None, help="Public URL of this server (e.g. https://my-dugg.example.com)")
 

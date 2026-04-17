@@ -38,6 +38,33 @@ document.addEventListener("DOMContentLoaded", async () => {
     selectionNote.style.display = "block";
   }
 
+  // Fetch distribution targets
+  const url = config.agentUrl.replace(/\/+$/, "");
+  let instances = [];
+  try {
+    const instRes = await fetch(`${url}/instances`, {
+      headers: { "X-Dugg-Key": config.apiKey },
+      signal: AbortSignal.timeout(3000),
+    });
+    if (instRes.ok) {
+      const data = await instRes.json();
+      instances = data.instances || [];
+    }
+  } catch (_) {}
+
+  if (instances.length > 0) {
+    const section = document.getElementById("distributeSection");
+    const list = document.getElementById("distributeList");
+    section.style.display = "block";
+    for (const inst of instances) {
+      const item = document.createElement("label");
+      item.className = "distribute-item";
+      item.innerHTML = `<input type="checkbox" value="${inst.name}" checked>
+        <span class="inst-name">${inst.name}</span>`;
+      list.appendChild(item);
+    }
+  }
+
   digBtn.addEventListener("click", async () => {
     digBtn.disabled = true;
     digBtn.textContent = "Sending...";
@@ -47,7 +74,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     const note = [noteInput.value.trim(), selectedText].filter(Boolean).join("\n\n---\n\n");
 
     try {
-      const url = config.agentUrl.replace(/\/+$/, "");
+      // Step 1: Save locally
       const res = await fetch(`${url}/tools/dugg_add`, {
         method: "POST",
         headers: {
@@ -60,17 +87,54 @@ document.addEventListener("DOMContentLoaded", async () => {
         }),
       });
 
-      if (res.ok) {
-        toast.textContent = "\u2713 Sent to agent";
-        toast.className = "toast success";
-        digBtn.textContent = "Dugg!";
-      } else {
+      if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         toast.textContent = "\u2717 " + (data.error || `Error ${res.status}`);
         toast.className = "toast error";
         digBtn.textContent = "Dugg it";
         digBtn.disabled = false;
+        return;
       }
+
+      // Step 2: Publish to checked targets
+      const checked = [...document.querySelectorAll('#distributeList input[type="checkbox"]:checked')]
+        .map(cb => cb.value);
+
+      if (checked.length > 0) {
+        // Get resource ID from the add response
+        const addData = await res.clone().json().catch(() => null);
+        let resourceId = null;
+        if (addData) {
+          // The tool response text contains the resource info — parse the ID
+          const text = typeof addData === "string" ? addData : (addData.text || addData.result || JSON.stringify(addData));
+          const idMatch = String(text).match(/id[=: ]+([a-f0-9]{12})/i);
+          if (idMatch) resourceId = idMatch[1];
+        }
+
+        if (resourceId) {
+          // Fire publish — don't block the success toast on it
+          fetch(`${url}/tools/dugg_publish`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-Dugg-Key": config.apiKey,
+            },
+            body: JSON.stringify({
+              resource_id: resourceId,
+              targets: checked,
+            }),
+          }).catch(() => {});
+        }
+      }
+
+      const targetCount = checked.length;
+      const msg = targetCount > 0
+        ? `\u2713 Dugg + distributing to ${targetCount} server${targetCount > 1 ? "s" : ""}`
+        : "\u2713 Dugg!";
+      toast.textContent = msg;
+      toast.className = "toast success";
+      digBtn.textContent = "Dugg!";
+      setTimeout(() => window.close(), 1200);
     } catch (err) {
       toast.textContent = "\u2717 Failed \u2014 check connection";
       toast.className = "toast error";

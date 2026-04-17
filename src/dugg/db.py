@@ -128,6 +128,7 @@ class DuggDB:
                 access_mode TEXT DEFAULT 'invite' CHECK(access_mode IN ('invite')),
                 auto_invite_endpoint TEXT DEFAULT NULL,
                 endpoint_url TEXT DEFAULT '',
+                ingest_api_key TEXT DEFAULT '',
                 rate_limit_initial INTEGER DEFAULT 5,
                 rate_limit_growth INTEGER DEFAULT 2,
                 read_horizon_base_days INTEGER DEFAULT 30,
@@ -2317,7 +2318,7 @@ class DuggDB:
         """Get publish queue entries ready for delivery (pending + next_retry_at <= now)."""
         now = _now()
         rows = self.conn.execute(
-            """SELECT pq.*, di.endpoint_url, di.name as instance_name
+            """SELECT pq.*, di.endpoint_url, di.name as instance_name, di.ingest_api_key
                FROM publish_queue pq
                JOIN dugg_instances di ON pq.target_instance_id = di.id
                WHERE pq.status IN ('pending', 'delivering')
@@ -2388,7 +2389,7 @@ class DuggDB:
     def get_failed_publishes(self, limit: int = 20) -> list[dict]:
         """Get failed publish queue entries for inspection."""
         rows = self.conn.execute(
-            """SELECT pq.*, di.name as instance_name, di.endpoint_url
+            """SELECT pq.*, di.name as instance_name, di.endpoint_url, di.ingest_api_key
                FROM publish_queue pq
                JOIN dugg_instances di ON pq.target_instance_id = di.id
                WHERE pq.status = 'failed'
@@ -2457,7 +2458,7 @@ class DuggDB:
         now = _now()
         # Get all pending items ordered by creation
         rows = self.conn.execute(
-            """SELECT pq.*, di.endpoint_url, di.name as instance_name
+            """SELECT pq.*, di.endpoint_url, di.name as instance_name, di.ingest_api_key
                FROM publish_queue pq
                JOIN dugg_instances di ON pq.target_instance_id = di.id
                WHERE pq.status IN ('pending', 'delivering')
@@ -3005,7 +3006,7 @@ class DuggDB:
 
     # --- Inbound Publish (receiving from remote) ---
 
-    def ingest_remote_publish(self, resource_data: dict, source_instance_id: str, target_collection_id: str, source_server: str = "") -> Optional[dict]:
+    def ingest_remote_publish(self, resource_data: dict, source_instance_id: str, target_collection_id: str, source_server: str = "", submitted_by: str = "") -> Optional[dict]:
         """Receive a published resource from a remote Dugg instance.
 
         Stores the resource in the target collection with the source tracked.
@@ -3047,10 +3048,12 @@ class DuggDB:
             return {"id": existing["id"], "status": "duplicate", "url": url,
                     "note_added": note_added}
 
-        # Get the collection owner as the submitter
-        coll = self.conn.execute("SELECT created_by FROM collections WHERE id = ?", (target_collection_id,)).fetchone()
-        if not coll:
-            return None
+        # Use explicitly provided submitter, or fall back to collection owner
+        if not submitted_by:
+            coll = self.conn.execute("SELECT created_by FROM collections WHERE id = ?", (target_collection_id,)).fetchone()
+            if not coll:
+                return None
+            submitted_by = coll["created_by"]
 
         res_id = _uuid()
         now = _now()
@@ -3074,7 +3077,7 @@ class DuggDB:
              resource_data.get("author", ""), resource_data.get("transcript", ""),
              meta_json, "",
              source_server,
-             coll["created_by"], target_collection_id, now, now,
+             submitted_by, target_collection_id, now, now,
              resource_data.get("enriched_at")),
         )
 

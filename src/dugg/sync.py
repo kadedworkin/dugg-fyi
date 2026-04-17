@@ -66,8 +66,12 @@ async def deliver_publish(db, queue_entry: dict) -> bool:
 
     try:
         ingest_url = urljoin(endpoint_url.rstrip("/") + "/", "ingest")
+        headers = {}
+        ingest_key = queue_entry.get("ingest_api_key", "")
+        if ingest_key:
+            headers["X-Dugg-Key"] = ingest_key
         async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(ingest_url, json=payload)
+            response = await client.post(ingest_url, json=payload, headers=headers)
             response.raise_for_status()
 
         db.mark_publish_delivered(queue_id)

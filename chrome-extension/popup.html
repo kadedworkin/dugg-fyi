@@ -46,6 +46,34 @@
   }
   .note-input::placeholder { color: #555; }
   .note-input:focus { outline: none; border-color: #6366f1; }
+  .distribute-section {
+    margin-bottom: 12px;
+  }
+  .distribute-label {
+    font-size: 11px;
+    color: #888;
+    margin-bottom: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  .distribute-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .distribute-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: #ccc;
+  }
+  .distribute-item input[type="checkbox"] {
+    accent-color: #6366f1;
+  }
+  .distribute-item .inst-name {
+    font-weight: 500;
+  }
   button {
     width: 100%;
     padding: 10px;
@@ -108,6 +136,10 @@
     <div class="page-title" id="pageTitle"></div>
     <div class="selection-note" id="selectionNote" style="display:none;">Selected text will be included as a note.</div>
     <textarea class="note-input" id="note" placeholder="Why this matters... (optional)" rows="2"></textarea>
+    <div class="distribute-section" id="distributeSection" style="display:none;">
+      <div class="distribute-label">Distribute to:</div>
+      <div class="distribute-list" id="distributeList"></div>
+    </div>
     <button id="digBtn">Dugg it</button>
     <div class="toast" id="toast"></div>
     <a href="#" class="setup-link" id="settingsLink">Settings</a>
