@@ -112,6 +112,7 @@ class DuggDB:
                 collection_id TEXT NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
                 user_id TEXT NOT NULL REFERENCES users(id),
                 role TEXT DEFAULT 'member' CHECK(role IN ('owner', 'member')),
+                member_type TEXT DEFAULT 'contributor' CHECK(member_type IN ('contributor', 'subscriber')),
                 invited_by TEXT REFERENCES users(id),
                 status TEXT DEFAULT 'active' CHECK(status IN ('active', 'banned', 'appealing')),
                 joined_at TEXT NOT NULL DEFAULT '2024-01-01T00:00:00Z',
@@ -252,6 +253,7 @@ class DuggDB:
                 created_by TEXT NOT NULL REFERENCES users(id),
                 redeemed_by TEXT REFERENCES users(id),
                 name_hint TEXT DEFAULT '',
+                role TEXT DEFAULT 'contributor' CHECK(role IN ('contributor', 'subscriber')),
                 expires_at TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 redeemed_at TEXT
@@ -404,8 +406,12 @@ class DuggDB:
         inv_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(invite_tokens)").fetchall()}
         if "onboarded_at" not in inv_cols:
             self.conn.execute("ALTER TABLE invite_tokens ADD COLUMN onboarded_at TEXT DEFAULT NULL")
+        if "role" not in inv_cols:
+            self.conn.execute("ALTER TABLE invite_tokens ADD COLUMN role TEXT DEFAULT 'contributor'")
 
         cm_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(collection_members)").fetchall()}
+        if "member_type" not in cm_cols:
+            self.conn.execute("ALTER TABLE collection_members ADD COLUMN member_type TEXT DEFAULT 'contributor'")
         if "ip_address" not in cm_cols:
             self.conn.execute("ALTER TABLE collection_members ADD COLUMN ip_address TEXT DEFAULT NULL")
         if "grace_expires_at" not in cm_cols:
@@ -748,12 +754,13 @@ class DuggDB:
         return [dict(r) for r in rows]
 
     def add_collection_member(self, collection_id: str, user_id: str, role: str = "member",
-                              invited_by: Optional[str] = None, ip_address: Optional[str] = None):
+                              invited_by: Optional[str] = None, ip_address: Optional[str] = None,
+                              member_type: str = "contributor"):
         now = _now()
         grace = (datetime.now(timezone.utc) + timedelta(days=GRACE_PERIOD_DAYS)).isoformat()
         self.conn.execute(
-            "INSERT OR IGNORE INTO collection_members (collection_id, user_id, role, invited_by, status, joined_at, ip_address, grace_expires_at) VALUES (?, ?, ?, ?, 'active', ?, ?, ?)",
-            (collection_id, user_id, role, invited_by, now, ip_address, grace),
+            "INSERT OR IGNORE INTO collection_members (collection_id, user_id, role, member_type, invited_by, status, joined_at, ip_address, grace_expires_at) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)",
+            (collection_id, user_id, role, member_type, invited_by, now, ip_address, grace),
         )
         self.conn.commit()
 
@@ -1913,21 +1920,26 @@ class DuggDB:
         parts = [''.join(secrets.choice(alphabet) for _ in range(4)) for _ in range(3)]
         return '-'.join(parts)
 
-    def create_invite_token(self, created_by: str, name_hint: str = "", expires_hours: int = 72) -> dict:
-        """Create an invite token for onboarding a new user."""
+    def create_invite_token(self, created_by: str, name_hint: str = "", expires_hours: int = 72, role: str = "contributor") -> dict:
+        """Create an invite token for onboarding a new user.
+
+        role: 'contributor' (can post, default) or 'subscriber' (read-only, no agent key).
+        """
+        if role not in ("contributor", "subscriber"):
+            role = "contributor"
         token_id = _uuid()
         token = self._generate_invite_token()
         now = _now()
         expires_at = (datetime.now(timezone.utc) + timedelta(hours=expires_hours)).isoformat()
         self.conn.execute(
-            "INSERT INTO invite_tokens (id, token, created_by, name_hint, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (token_id, token, created_by, name_hint, expires_at, now),
+            "INSERT INTO invite_tokens (id, token, created_by, name_hint, role, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (token_id, token, created_by, name_hint, role, expires_at, now),
         )
         self.conn.commit()
         self.emit_event("invite_created", actor_id=created_by,
-                        payload={"token_id": token_id, "name_hint": name_hint})
+                        payload={"token_id": token_id, "name_hint": name_hint, "role": role})
         return {"id": token_id, "token": token, "created_by": created_by,
-                "name_hint": name_hint, "expires_at": expires_at, "created_at": now}
+                "name_hint": name_hint, "role": role, "expires_at": expires_at, "created_at": now}
 
     def get_invite_token(self, token: str) -> Optional[dict]:
         """Look up an invite token by its slug."""
@@ -1965,6 +1977,7 @@ class DuggDB:
 
         Returns None if the token is invalid, expired, or already redeemed.
         Returns dict with user info and token details on success.
+        Subscriber invites create a user with no agent key (read-only feed access).
         """
         invite = self.get_invite_token(token)
         if not invite:
@@ -1974,8 +1987,11 @@ class DuggDB:
         if datetime.fromisoformat(invite["expires_at"]) < datetime.now(timezone.utc):
             return None
 
+        invite_role = invite.get("role", "contributor") or "contributor"
         user = self.create_user(name)
-        agent = self.create_agent_for_user(user["id"])
+        agent = None
+        if invite_role == "contributor":
+            agent = self.create_agent_for_user(user["id"])
         now = _now()
         self.conn.execute(
             "UPDATE invite_tokens SET redeemed_by = ?, redeemed_at = ? WHERE token = ?",
@@ -1984,11 +2000,16 @@ class DuggDB:
         self.conn.commit()
         shared_id = self.get_shared_default_id()
         if shared_id:
-            self.add_collection_member(shared_id, user["id"], role="member", invited_by=invite["created_by"])
-            self.add_collection_member(shared_id, agent["id"], role="member", invited_by=invite["created_by"])
+            self.add_collection_member(shared_id, user["id"], role="member",
+                                       invited_by=invite["created_by"], member_type=invite_role)
+            if agent:
+                self.add_collection_member(shared_id, agent["id"], role="member",
+                                           invited_by=invite["created_by"], member_type=invite_role)
         self.emit_event("invite_redeemed", actor_id=user["id"],
-                        payload={"token": token, "invited_by": invite["created_by"], "name": name})
-        return {"user": user, "agent": agent, "invite": {**invite, "redeemed_by": user["id"], "redeemed_at": now}}
+                        payload={"token": token, "invited_by": invite["created_by"],
+                                 "name": name, "role": invite_role})
+        return {"user": user, "agent": agent, "role": invite_role,
+                "invite": {**invite, "redeemed_by": user["id"], "redeemed_at": now}}
 
     def get_instance_for_owner(self, owner_id: str) -> Optional[dict]:
         """Get the first instance owned by a user (for invite page context)."""
@@ -2223,12 +2244,18 @@ class DuggDB:
 
         Returns dict with: allowed (bool), current (int), cap (int), days_member (int).
         Rate limit is derived from the instance that owns this collection's owner.
+        Subscribers (member_type='subscriber') always have a cap of 0 — they cannot post.
         If no instance is configured, submissions are unlimited.
         """
         # Get member tenure
         member = self.get_member_status(collection_id, user_id)
         if not member:
             return {"allowed": False, "current": 0, "cap": 0, "days_member": 0, "reason": "not a member"}
+
+        # Subscribers cannot post — zero cap forever
+        if member.get("member_type") == "subscriber":
+            return {"allowed": False, "current": 0, "cap": 0, "days_member": 0,
+                    "reason": "subscriber accounts are read-only"}
 
         # Find the instance owned by the collection owner
         coll = self.conn.execute("SELECT created_by FROM collections WHERE id = ?", (collection_id,)).fetchone()

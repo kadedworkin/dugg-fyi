@@ -160,7 +160,8 @@ def cmd_invite_user(args):
     user = _resolve_user(db, args)
 
     expires = getattr(args, "expires", 72)
-    result = db.create_invite_token(user["id"], name_hint=args.name, expires_hours=expires)
+    role = getattr(args, "role", "contributor")
+    result = db.create_invite_token(user["id"], name_hint=args.name, expires_hours=expires, role=role)
     token = result["token"]
 
     # Resolve server URL: explicit --server flag > db config > instance endpoint
@@ -1358,6 +1359,7 @@ def main():
     p_invite = sub.add_parser("invite-user", help="Create an invite token for a new user")
     p_invite.add_argument("name", help="Name of the person being invited")
     p_invite.add_argument("--key", default=None, help="Your API key (uses local user if omitted)")
+    p_invite.add_argument("--role", choices=["contributor", "subscriber"], default="contributor", help="contributor = can post (default). subscriber = read-only feed access, no agent key")
     p_invite.add_argument("--server", default=None, help="Server URL (e.g. https://chino-bandido.kadedworkin.com) — included in invite message")
     p_invite.add_argument("--expires", type=int, default=72, help="Hours until invite expires (default: 72)")
 

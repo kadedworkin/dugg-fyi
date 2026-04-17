@@ -608,7 +608,8 @@ async function doSetup() {{
             return HTMLResponse(_html_page("Error", '<h1>Could not redeem</h1><p class="error">This invite is invalid, expired, or already used.</p>'), status_code=400)
 
         user = result["user"]
-        agent = result["agent"]
+        agent = result["agent"]  # None for subscriber invites
+        invite_role = result.get("role", "contributor")
         invite_info = result["invite"]
         inviter = d.get_user(invite_info["created_by"])
         instance = d.get_instance_for_owner(invite_info["created_by"])
@@ -619,19 +620,19 @@ async function doSetup() {{
         if "application/json" in content_type:
             server_url_json = endpoint or ""
             from dugg.db import dugg_email_address
-            email_addr = dugg_email_address(user["api_key"], server_url_json)
-            return JSONResponse({
-                "status": "redeemed",
-                "user": {"id": user["id"], "name": user["name"], "api_key": user["api_key"]},
-                "agent": {"id": agent["id"], "name": agent["name"], "api_key": agent["api_key"]},
-                "email": email_addr or None,
-                "endpoints": {
-                    "sse": f"{server_url_json}/sse" if server_url_json else None,
-                    "tools": f"{server_url_json}/tools/{{tool_name}}" if server_url_json else None,
-                    "health": f"{server_url_json}/health" if server_url_json else None,
-                    "feed": f"{server_url_json}/feed/{user['api_key']}" if server_url_json else None,
-                },
-                "instructions": (
+            email_addr = dugg_email_address(user["api_key"], server_url_json) if invite_role == "contributor" else None
+
+            agent_info = {"id": agent["id"], "name": agent["name"], "api_key": agent["api_key"]} if agent else None
+
+            if invite_role == "subscriber":
+                instructions = (
+                    f"One key was issued. The user key ({user['api_key']}) belongs to your human — "
+                    f"present it to them and tell them to store it somewhere safe (it won't be shown again). "
+                    f"This is a subscriber account — read-only access to the feed. No agent key was created "
+                    f"because subscribers cannot post. Your human can browse the feed at the URL below."
+                )
+            else:
+                instructions = (
                     f"Two keys were issued. The user key ({user['api_key']}) belongs to your human — "
                     f"present it to them and tell them to store it somewhere safe (it won't be shown again). "
                     f"The agent key ({agent['api_key']}) is yours — use it as your X-Dugg-Key header for all "
@@ -639,8 +640,25 @@ async function doSetup() {{
                     f"IMPORTANT: Read PARTNER_AGENT.md in the Dugg repo before your first submission — "
                     f"it covers behavioral norms, rate limits, catchup patterns, and how to be a good citizen."
                     + (f"\n\nEmail forwarding: forward emails to {email_addr} and they'll appear as resources in Dugg." if email_addr else "")
-                ),
-                "quickstart": [
+                )
+
+            response_data = {
+                "status": "redeemed",
+                "role": invite_role,
+                "user": {"id": user["id"], "name": user["name"], "api_key": user["api_key"]},
+                "agent": agent_info,
+                "email": email_addr,
+                "endpoints": {
+                    "sse": f"{server_url_json}/sse" if server_url_json and agent else None,
+                    "tools": f"{server_url_json}/tools/{{tool_name}}" if server_url_json and agent else None,
+                    "health": f"{server_url_json}/health" if server_url_json else None,
+                    "feed": f"{server_url_json}/feed/{user['api_key']}" if server_url_json else None,
+                },
+                "instructions": instructions,
+            }
+
+            if invite_role == "contributor":
+                response_data["quickstart"] = [
                     {
                         "step": 1,
                         "action": "Set up your local Dugg",
@@ -653,11 +671,43 @@ async function doSetup() {{
                         "tools": ["dugg_welcome", "dugg_feed", "dugg_search", "dugg_react"],
                         "what_happens": "Day-one value: browse what others have shared, search for topics, react to signal value. Use dugg_catchup later for incremental updates.",
                     },
-                ],
-            }, status_code=201)
+                ]
+            else:
+                response_data["quickstart"] = [
+                    {
+                        "step": 1,
+                        "action": "Bookmark your feed",
+                        "url": f"{server_url_json}/feed/{user['api_key']}" if server_url_json else None,
+                        "what_happens": "Browse curated content from contributors in your browser. This feed updates as new resources are added.",
+                    },
+                ]
+
+            return JSONResponse(response_data, status_code=201)
 
         feed_url = f"{endpoint}/feed/{user['api_key']}" if endpoint else f"/feed/{user['api_key']}"
         server_url = endpoint or ""
+
+        if invite_role == "subscriber":
+            body = f"""
+<h1>You're in, {_xml_escape(user['name'])}!</h1>
+<p>You have <strong>subscriber</strong> access — browse and search everything contributors share.</p>
+<h3>Your key</h3>
+<div class="key-box">{user['api_key']}</div>
+<p style="font-size: 0.85em; color: #666;">This key gives you access to your personal feed. Bookmark the link below.</p>
+
+<div class="next-steps">
+  <h3>Your feed</h3>
+  <p>Everything contributors share, in one place. Works in any browser or RSS reader.</p>
+  <div class="step-example">
+    <a href="{feed_url}" style="color: #93c5fd;">Open your feed &rarr;</a>
+  </div>
+  <div class="step-example" style="margin-top: 0.75rem;">
+    <div class="step-label">Atom feed URL (for RSS readers):</div>
+    <code><a href="{feed_url}" style="color: #4ade80;">{feed_url}</a></code>
+  </div>
+</div>"""
+            return HTMLResponse(_html_page("Welcome to Dugg", body))
+
         from dugg.db import dugg_email_address
         email_addr = dugg_email_address(user["api_key"], server_url)
 

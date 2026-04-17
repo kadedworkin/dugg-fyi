@@ -99,6 +99,7 @@ For remote connections (HTTP/SSE), see [docs/HTTP.md](docs/HTTP.md).
 | Doc | Covers |
 |-----|--------|
 | [docs/GETTING-STARTED.md](docs/GETTING-STARTED.md) | Local vs shared setup, the three paths, why two accounts |
+| [docs/SCALING.md](docs/SCALING.md) | Contributor vs subscriber roles, large-audience deployment |
 | [docs/TOOLS.md](docs/TOOLS.md) | Full MCP tool reference (51 tools) |
 | [docs/CLI.md](docs/CLI.md) | CLI commands, admin TUI, `/dugg` slash command |
 | [docs/HTTP.md](docs/HTTP.md) | HTTP/SSE server, endpoints, remote agent setup |

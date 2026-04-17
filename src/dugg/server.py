@@ -173,11 +173,12 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="dugg_invite_user",
-            description="Create an invite token to onboard a new user. Returns copyable text with a redemption link they can open in a browser — no CLI or agent required on their end.",
+            description="Create an invite token to onboard a new user. Returns copyable text with a redemption link they can open in a browser — no CLI or agent required on their end. Use role='subscriber' for read-only users who get a feed URL but cannot post.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "name": {"type": "string", "description": "Name of the person being invited (shown on the redemption page)"},
+                    "role": {"type": "string", "enum": ["contributor", "subscriber"], "description": "contributor = can post and gets an agent key (default). subscriber = read-only feed access, no agent key, zero post cap.", "default": "contributor"},
                     "expires_hours": {"type": "integer", "description": "Hours until the invite expires (default: 72)", "default": 72},
                     "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
                 },
@@ -1366,8 +1367,9 @@ def _handle_create_user(d: DuggDB, args: dict) -> list[TextContent]:
 
 def _handle_invite_user(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
     name = args["name"]
+    role = args.get("role", "contributor")
     expires_hours = args.get("expires_hours", 72)
-    result = d.create_invite_token(user_id, name_hint=name, expires_hours=expires_hours)
+    result = d.create_invite_token(user_id, name_hint=name, expires_hours=expires_hours, role=role)
     token = result["token"]
 
     # Build the invite URL from the instance's endpoint, if set
