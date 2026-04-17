@@ -1307,9 +1307,20 @@ async function deleteItem(id) {
         if not user:
             return JSONResponse({"response_type": "ephemeral", "text": "No users on this Dugg server yet."})
 
-        # /dugg with no args → show feed
-        if not text:
-            feed = d.get_feed(user["id"], limit=5)
+        # /dugg with no args or /dugg feed [--limit N] → show feed
+        feed_limit = 5
+        show_feed = not text
+        if text.startswith("feed"):
+            show_feed = True
+            # Parse --limit N from the rest
+            rest = text[4:].strip()
+            if rest:
+                import re
+                m = re.search(r'--limit\s+(\d+)', rest)
+                if m:
+                    feed_limit = min(int(m.group(1)), 25)
+        if show_feed:
+            feed = d.get_feed(user["id"], limit=feed_limit)
             if not feed:
                 return JSONResponse({"response_type": "ephemeral", "text": "Feed is empty. Add something with `/dugg https://...`"})
             names = {r["id"]: r["name"] for r in d.conn.execute("SELECT id, name FROM users").fetchall()}
@@ -1414,13 +1425,21 @@ async function deleteItem(id) {
                 })
             return JSONResponse({"response_type": "in_channel", "text": text_fallback, "blocks": blocks})
 
-        # /dugg <search query> → search
-        results = d.search(text, user["id"], limit=5)
+        # /dugg <search query> or /dugg search <query> → search
+        search_text = text
+        if text.startswith("search "):
+            search_text = text[7:].strip()
+        if not search_text:
+            return JSONResponse({"response_type": "ephemeral", "text": "Usage: `/dugg <search terms>` or `/dugg search <terms>`"})
+        try:
+            results = d.search(search_text, user["id"], limit=5)
+        except Exception:
+            return JSONResponse({"response_type": "ephemeral", "text": f'Search error — try simpler terms.'})
         if not results:
-            return JSONResponse({"response_type": "ephemeral", "text": f'No results for "{_xml_escape(text)}"'})
+            return JSONResponse({"response_type": "ephemeral", "text": f'No results for "{_xml_escape(search_text)}"'})
         names = {r["id"]: r["name"] for r in d.conn.execute("SELECT id, name FROM users").fetchall()}
-        blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": f'*{len(results)} result(s) for "{_xml_escape(text)}":*'}}]
-        text_lines = [f'*{len(results)} result(s) for "{_xml_escape(text)}":*\n']
+        blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": f'*{len(results)} result(s) for "{_xml_escape(search_text)}":*'}}]
+        text_lines = [f'*{len(results)} result(s) for "{_xml_escape(search_text)}":*\n']
         for r in results:
             title = r.get("title") or r["url"]
             added_by = names.get(r.get("submitted_by", ""), "")
