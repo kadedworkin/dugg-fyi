@@ -1064,15 +1064,16 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
             if not feed:
                 return JSONResponse({"response_type": "ephemeral", "text": "Feed is empty. Add something with `/dugg https://...`"})
             names = {r["id"]: r["name"] for r in d.conn.execute("SELECT id, name FROM users").fetchall()}
-            lines = [f"*Latest {len(feed)} resource(s):*\n"]
+            blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": f"*Latest {len(feed)} resource(s):*"}}]
+            text_lines = [f"*Latest {len(feed)} resource(s):*\n"]
             for r in feed:
                 title = r.get("title") or r["url"]
                 added_by = names.get(r.get("submitted_by", ""), "")
                 source = r.get("source_server", "")
                 added_date = _short_date(r.get("created_at"))
                 pub_date = _resource_pub_date(r)
-                lines.append(f"*{_xml_escape(title)}*")
-                lines.append(f"<{r['url']}>")
+                res_lines = [f"*{_xml_escape(title)}*"]
+                res_lines.append(f"<{r['url']}>")
                 attrib = ""
                 if added_by and added_date:
                     attrib = f"by {added_by} on {added_date}"
@@ -1088,11 +1089,27 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
                 if source:
                     meta.append(f"from {source}")
                 if meta:
-                    lines.append(" · ".join(meta))
+                    res_lines.append(" · ".join(meta))
                 if r.get("note"):
-                    lines.append(f"_{_xml_escape(r['note'])}_")
-                lines.append("")
-            return JSONResponse({"response_type": "in_channel", "text": "\n".join(lines)})
+                    res_lines.append(f"_{_xml_escape(r['note'])}_")
+                res_text = "\n".join(res_lines)
+                text_lines.extend(res_lines + [""])
+                blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": res_text}})
+                resource_id = r.get("id", "")
+                if resource_id:
+                    blocks.append({
+                        "type": "actions",
+                        "elements": [
+                            {"type": "button", "text": {"type": "plain_text", "text": ":point_right: Tap", "emoji": True},
+                             "action_id": "dugg_react_tap", "value": resource_id},
+                            {"type": "button", "text": {"type": "plain_text", "text": ":star: Star", "emoji": True},
+                             "action_id": "dugg_react_star", "value": resource_id},
+                            {"type": "button", "text": {"type": "plain_text", "text": ":thumbsup: Nice", "emoji": True},
+                             "action_id": "dugg_react_thumbsup", "value": resource_id},
+                        ],
+                    })
+                blocks.append({"type": "divider"})
+            return JSONResponse({"response_type": "in_channel", "text": "\n".join(text_lines), "blocks": blocks})
 
         # /dugg <url> [--note ...] → add resource
         url = text.split()[0].strip("<>")
@@ -1131,21 +1148,37 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
             resp_lines = [f"Added *{_xml_escape(title)}*", f"<{url}>"]
             if note:
                 resp_lines.append(f"_{_xml_escape(note)}_")
-            return JSONResponse({"response_type": "in_channel", "text": "\n".join(resp_lines)})
+            text_fallback = "\n".join(resp_lines)
+            resource_id = resource.get("id", "")
+            blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": text_fallback}}]
+            if resource_id:
+                blocks.append({
+                    "type": "actions",
+                    "elements": [
+                        {"type": "button", "text": {"type": "plain_text", "text": ":point_right: Tap", "emoji": True},
+                         "action_id": "dugg_react_tap", "value": resource_id},
+                        {"type": "button", "text": {"type": "plain_text", "text": ":star: Star", "emoji": True},
+                         "action_id": "dugg_react_star", "value": resource_id},
+                        {"type": "button", "text": {"type": "plain_text", "text": ":thumbsup: Nice", "emoji": True},
+                         "action_id": "dugg_react_thumbsup", "value": resource_id},
+                    ],
+                })
+            return JSONResponse({"response_type": "in_channel", "text": text_fallback, "blocks": blocks})
 
         # /dugg <search query> → search
         results = d.search(text, user["id"], limit=5)
         if not results:
             return JSONResponse({"response_type": "ephemeral", "text": f'No results for "{_xml_escape(text)}"'})
         names = {r["id"]: r["name"] for r in d.conn.execute("SELECT id, name FROM users").fetchall()}
-        lines = [f'*{len(results)} result(s) for "{_xml_escape(text)}":*\n']
+        blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": f'*{len(results)} result(s) for "{_xml_escape(text)}":*'}}]
+        text_lines = [f'*{len(results)} result(s) for "{_xml_escape(text)}":*\n']
         for r in results:
             title = r.get("title") or r["url"]
             added_by = names.get(r.get("submitted_by", ""), "")
             added_date = _short_date(r.get("created_at"))
             pub_date = _resource_pub_date(r)
-            lines.append(f"*{_xml_escape(title)}*")
-            lines.append(f"<{r['url']}>")
+            res_lines = [f"*{_xml_escape(title)}*"]
+            res_lines.append(f"<{r['url']}>")
             attrib = ""
             if added_by and added_date:
                 attrib = f"by {added_by} on {added_date}"
@@ -1156,11 +1189,27 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
             if attrib and pub_date and pub_date != added_date:
                 attrib += f" (published {pub_date})"
             if attrib:
-                lines.append(attrib)
+                res_lines.append(attrib)
             if r.get("note"):
-                lines.append(f"_{_xml_escape(r['note'])}_")
-            lines.append("")
-        return JSONResponse({"response_type": "in_channel", "text": "\n".join(lines)})
+                res_lines.append(f"_{_xml_escape(r['note'])}_")
+            res_text = "\n".join(res_lines)
+            text_lines.extend(res_lines + [""])
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": res_text}})
+            resource_id = r.get("id", "")
+            if resource_id:
+                blocks.append({
+                    "type": "actions",
+                    "elements": [
+                        {"type": "button", "text": {"type": "plain_text", "text": ":point_right: Tap", "emoji": True},
+                         "action_id": "dugg_react_tap", "value": resource_id},
+                        {"type": "button", "text": {"type": "plain_text", "text": ":star: Star", "emoji": True},
+                         "action_id": "dugg_react_star", "value": resource_id},
+                        {"type": "button", "text": {"type": "plain_text", "text": ":thumbsup: Nice", "emoji": True},
+                         "action_id": "dugg_react_thumbsup", "value": resource_id},
+                    ],
+                })
+            blocks.append({"type": "divider"})
+        return JSONResponse({"response_type": "in_channel", "text": "\n".join(text_lines), "blocks": blocks})
 
     # --- Slack interactive actions (Block Kit buttons) ---
 
