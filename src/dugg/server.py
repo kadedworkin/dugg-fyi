@@ -1259,7 +1259,7 @@ def _handle_search(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
             lines.append(f"  Tags: {tags_str}")
         if r.get("note"):
             lines.append(f"  Note: {r['note'][:200]}")
-        lines.append(f"  URL: {r['url']}")
+        lines.append(f"  URL: <{r['url']}>")
         lines.append("")
     return [TextContent(type="text", text="\n".join(lines))]
 
@@ -1286,7 +1286,7 @@ def _handle_feed(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
             lines.append(f"  Tags: {tags_str}")
         if r.get("note"):
             lines.append(f"  Note: {r['note'][:200]}")
-        lines.append(f"  URL: {r['url']}")
+        lines.append(f"  URL: <{r['url']}>")
         lines.append(f"  Added: {r['created_at']}")
         lines.append("")
     return [TextContent(type="text", text="\n".join(lines))]
