@@ -11,16 +11,21 @@ Dugg ships a full management CLI alongside the MCP server.
 | `dugg add-user <name>` | Create a user and get an API key |
 | `dugg login <key>` | Save your API key so you don't need `--key` on every command |
 | `dugg add <url> [--note ...]` | Add a resource (URL auto-detected — `dugg https://...` works too) |
-| `dugg feed` | Show recent resources with server health footer |
-| `dugg search <query>` | Full-text search |
+| `dugg feed [--limit N]` | Show recent resources with server health footer |
+| `dugg search <query> [--limit N] [--tags ...] [--collection ...] [--submitted-by ...]` | Full-text search with optional filters |
+| `dugg get <id-or-url>` | Show full details for a resource (title, description, author, tags, reactions, transcript preview) |
+| `dugg related <id-or-url> [--limit N]` | Show linked/related resources from the knowledge graph |
+| `dugg collections` | List all collections you have access to with resource counts and visibility |
 | `dugg paste <title> [--body ... \| --file ...] [--published-at ...]` | Add raw content (no URL) — emails, newsletter excerpts, notes |
 | `dugg link <resource-id>` | Print the shareable `/r/{id}` viewer URL for a resource |
 | `dugg status` | Dashboard: user, DB path, server, collections, resources, webhooks, health |
 | `dugg health` | Ping the configured server and show status + timestamp |
 | `dugg servers` | List this server, subscribed instances, and publish targets |
 | `dugg remove <id-or-url>` | Delete a resource (submitter or owner) |
-| `dugg edit <id-or-url> [--title ...] [--note ...]` | Edit a resource's title or note (submitter only) |
+| `dugg edit <id-or-url> [--title ...] [--note ...] [--description ...] [--author ...] [--source-type ...] [--tags ...]` | Edit a resource's metadata (submitter only) |
+| `dugg tag <id-or-url> --tags "tag1,tag2"` | Add tags to an existing resource |
 | `dugg react <id-or-url> [--type tap\|star\|thumbsup]` | Silently react to a resource (default: tap) |
+| `dugg reactions <id-or-url>` | Show reaction breakdown per type on a resource |
 | `dugg email` | Show your Dugg email forwarding address |
 | `dugg rss subscribe <url> [--collection ...] [--tag ...] [--interval 1h] [--now]` | Subscribe a collection to an RSS/Atom feed |
 | `dugg rss list` | List your RSS subscriptions with state (active/paused) and last-poll timestamp |
