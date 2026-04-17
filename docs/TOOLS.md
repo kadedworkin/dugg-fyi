@@ -1,6 +1,6 @@
 # MCP Tools
 
-Dugg exposes 51 tools via MCP. Your agent calls these directly — no REST API wrapper needed.
+Dugg exposes 56 tools via MCP. Your agent calls these directly — no REST API wrapper needed.
 
 ## Tool reference
 
@@ -58,6 +58,11 @@ Dugg exposes 51 tools via MCP. Your agent calls these directly — no REST API w
 | `dugg_rss_list` | List the authenticated user's RSS subscriptions. |
 | `dugg_rss_remove` | Remove an RSS subscription (ingested resources are kept). |
 | `dugg_rss_poll` | Manually poll one subscription (or all) right now, bypassing the schedule. |
+| `dugg_rss_pause` | Pause polling for an RSS subscription. |
+| `dugg_rss_resume` | Resume a paused RSS subscription. |
+| `dugg_webhook_test` | Fire a test event to all active webhooks. |
+| `dugg_share_link` | Generate a shareable `/r/{id}` URL for a resource (no key in URL). |
+| `dugg_email` | Show your email forwarding addresses for connected instances. |
 
 ## Enrichment
 
