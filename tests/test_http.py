@@ -648,3 +648,41 @@ def test_resource_page_403_without_membership(client, db_path, user):
     c, _ = client
     resp = c.get(f"/r/{actual_id}", headers={"X-Dugg-Key": user["api_key"]})
     assert resp.status_code == 404  # not found (we don't leak existence)
+
+
+# --- Slack actions ---
+
+
+def test_slack_actions_react(client, db_path):
+    """Slack Block Kit button click fires a reaction."""
+    c, user = client
+    d = DuggDB(db_path)
+    coll_id = d.ensure_default_collection(user["id"])
+    res = d.add_resource(
+        url="https://example.com/slack-react",
+        collection_id=coll_id,
+        submitted_by=user["id"],
+        title="Slack React Test",
+    )
+    d.close()
+
+    payload = json.dumps({
+        "type": "block_actions",
+        "user": {"username": user["name"]},
+        "actions": [{
+            "action_id": "dugg_react_star",
+            "value": res["id"],
+        }],
+    })
+    resp = c.post("/slack/actions", data={"payload": payload})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "star" in body.get("text", "")
+
+    # Verify reaction was stored
+    d = DuggDB(db_path)
+    reactions = d.get_reactions(res["id"], user["id"])
+    assert reactions is not None
+    assert reactions["total"] == 1
+    assert reactions["breakdown"]["star"] == 1
+    d.close()

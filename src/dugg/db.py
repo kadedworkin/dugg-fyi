@@ -2625,6 +2625,35 @@ class DuggDB:
         )
         if not hooks:
             return
+
+        # Reaction events are author-only: only notify the resource's submitter
+        payload = event.get("payload", {})
+        if event["event_type"] == "reaction_added":
+            owner_id = payload.get("resource_owner_id")
+            if owner_id:
+                hooks = [h for h in hooks if h["user_id"] == owner_id]
+            if not hooks:
+                return
+            # Enrich payload with resource details and aggregate counts
+            resource_id = payload.get("resource_id")
+            if resource_id:
+                res = self.get_resource(resource_id)
+                if res:
+                    payload = dict(payload)
+                    payload["resource_title"] = res.get("title") or res.get("url", "")
+                    payload["resource_url"] = res.get("url", "")
+                    # Get total reaction count for this resource (bypass permission check)
+                    counts = self.conn.execute(
+                        "SELECT reaction_type, COUNT(*) as count FROM reactions WHERE resource_id = ? GROUP BY reaction_type",
+                        (resource_id,),
+                    ).fetchall()
+                    total = sum(dict(r)["count"] for r in counts)
+                    breakdown = {dict(r)["reaction_type"]: dict(r)["count"] for r in counts}
+                    payload["reaction_total"] = total
+                    payload["reaction_breakdown"] = breakdown
+                    event = dict(event)
+                    event["payload"] = payload
+
         actor_name = ""
         if event.get("actor_id"):
             row = self.conn.execute("SELECT name FROM users WHERE id = ?", (event["actor_id"],)).fetchone()
@@ -2656,19 +2685,68 @@ class DuggDB:
 
         # Slack-formatted payload
         if "hooks.slack.com" in hook["callback_url"]:
-            lines = [f"*{title}*"]
-            if url:
-                lines.append(f"<{url}>")
-            meta = []
-            if actor_name:
-                meta.append(f"Added by {actor_name}")
-            if source:
-                meta.append(f"from {source}")
-            if meta:
-                lines.append(" · ".join(meta))
-            if note:
-                lines.append(f"_{note}_")
-            body = json.dumps({"text": "\n".join(lines)}).encode()
+            # For reaction_added events, look up the resource to get title/url
+            if event_type == "reaction_added":
+                reaction_type = payload.get("reaction_type", "tap")
+                emoji = {"tap": "point_right", "star": "star", "thumbsup": "thumbsup"}.get(reaction_type, "sparkles")
+                res_title = payload.get("resource_title", "a resource")
+                res_url = payload.get("resource_url", "")
+                total = payload.get("reaction_total", 0)
+                breakdown = payload.get("reaction_breakdown", {})
+                lines = [f":{emoji}: Your resource *{res_title}* got a {reaction_type}"]
+                if res_url and not res_url.startswith("dugg://"):
+                    lines.append(f"<{res_url}>")
+                # Aggregate summary
+                parts = [f"{v} {k}" for k, v in sorted(breakdown.items())]
+                if total > 1:
+                    lines.append(f"{total} total reactions ({', '.join(parts)})")
+                body = json.dumps({"text": "\n".join(lines)}).encode()
+            elif event_type == "resource_added":
+                resource_id = payload.get("resource_id", "")
+                lines = [f"*{title}*"]
+                if url:
+                    lines.append(f"<{url}>")
+                meta = []
+                if actor_name:
+                    meta.append(f"Added by {actor_name}")
+                if source:
+                    meta.append(f"from {source}")
+                if meta:
+                    lines.append(" · ".join(meta))
+                if note:
+                    lines.append(f"_{note}_")
+                text_fallback = "\n".join(lines)
+                # Block Kit with reaction buttons
+                blocks = [
+                    {"type": "section", "text": {"type": "mrkdwn", "text": text_fallback}},
+                ]
+                if resource_id:
+                    blocks.append({
+                        "type": "actions",
+                        "elements": [
+                            {"type": "button", "text": {"type": "plain_text", "text": ":point_right: Tap", "emoji": True},
+                             "action_id": "dugg_react_tap", "value": resource_id},
+                            {"type": "button", "text": {"type": "plain_text", "text": ":star: Star", "emoji": True},
+                             "action_id": "dugg_react_star", "value": resource_id},
+                            {"type": "button", "text": {"type": "plain_text", "text": ":thumbsup: Nice", "emoji": True},
+                             "action_id": "dugg_react_thumbsup", "value": resource_id},
+                        ],
+                    })
+                body = json.dumps({"text": text_fallback, "blocks": blocks}).encode()
+            else:
+                lines = [f"*{title}*"]
+                if url:
+                    lines.append(f"<{url}>")
+                meta = []
+                if actor_name:
+                    meta.append(f"Added by {actor_name}")
+                if source:
+                    meta.append(f"from {source}")
+                if meta:
+                    lines.append(" · ".join(meta))
+                if note:
+                    lines.append(f"_{note}_")
+                body = json.dumps({"text": "\n".join(lines)}).encode()
         else:
             body = json.dumps({"event": event, "actor_name": actor_name, "server_url": server_url}).encode()
 

@@ -1040,6 +1040,39 @@ def cmd_edit(args):
         print("Update failed.")
 
 
+def cmd_react(args):
+    """React to a resource (tap, star, or thumbsup)."""
+    from pathlib import Path
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+    user = _resolve_user(db, args)
+
+    target = args.target
+    if target.startswith("http://") or target.startswith("https://") or target.startswith("dugg://"):
+        row = db.conn.execute(
+            "SELECT id, title, url FROM resources WHERE url = ?", (target,)
+        ).fetchone()
+    else:
+        row = db.conn.execute(
+            "SELECT id, title, url FROM resources WHERE id = ? OR id LIKE ?",
+            (target, target + "%"),
+        ).fetchone()
+
+    if not row:
+        print(f"Resource not found: {target}")
+        db.close()
+        sys.exit(1)
+
+    reaction_type = getattr(args, "type", "tap") or "tap"
+    emoji = {"tap": ">>", "star": "*", "thumbsup": "+1"}.get(reaction_type, ">>")
+
+    db.react_to_resource(row["id"], user["id"], reaction_type)
+    title = row["title"] or row["url"]
+    print(f"  {emoji} {title}")
+    db.wait_for_webhooks()
+    db.close()
+
+
 def cmd_webhook(args):
     """Manage webhook subscriptions."""
     from pathlib import Path
@@ -1380,6 +1413,12 @@ def main():
     p_edit.add_argument("--note", default=None, help="New note")
     p_edit.add_argument("--key", default=None, help="Your API key")
 
+    p_react = sub.add_parser("react", help="React to a resource (tap, star, thumbsup)")
+    p_react.add_argument("target", help="Resource ID (or prefix) or URL")
+    p_react.add_argument("--type", choices=["tap", "star", "thumbsup"], default="tap",
+                         help="Reaction type (default: tap)")
+    p_react.add_argument("--key", default=None, help="Your API key")
+
     sub.add_parser("health", help="Check server health")
 
     p_webhook = sub.add_parser("webhook", help="Manage webhook notifications (e.g. Slack)")
@@ -1508,6 +1547,8 @@ def main():
         cmd_remove(args)
     elif args.command == "edit":
         cmd_edit(args)
+    elif args.command == "react":
+        cmd_react(args)
     elif args.command == "health":
         cmd_health(args)
     elif args.command == "webhook":

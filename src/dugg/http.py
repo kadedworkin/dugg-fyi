@@ -902,7 +902,7 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
                 score = d.get_member_credit_score(coll_id, user["id"])
                 items_html += f"""<div class="feed-item">
   <h3>{coll_name}</h3>
-  <p class="meta">Your credit score: {score['total']} ({score['submissions']} submissions, {score['reactions_received']} reactions)</p>
+  <p class="meta">Your credit score: {score['total']} ({score['submissions']} submissions, {score['distinct_human_reactors']} reactions)</p>
   <form method="POST" action="/appeal/{api_key}/submit" style="margin-top: 0.5rem;">
     <input type="hidden" name="collection_id" value="{coll_id}">
     <button type="submit">Submit Appeal</button>
@@ -1161,6 +1161,82 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
                 lines.append(f"_{_xml_escape(r['note'])}_")
             lines.append("")
         return JSONResponse({"response_type": "in_channel", "text": "\n".join(lines)})
+
+    # --- Slack interactive actions (Block Kit buttons) ---
+
+    async def handle_slack_actions(request: Request):
+        """Handle Slack Block Kit interactive payloads (button clicks)."""
+        d = get_db()
+        form = await request.form()
+        raw_payload = form.get("payload", "")
+        if not raw_payload:
+            return JSONResponse({"text": "Missing payload."}, status_code=400)
+
+        try:
+            data = json.loads(raw_payload)
+        except json.JSONDecodeError:
+            return JSONResponse({"text": "Invalid payload."}, status_code=400)
+
+        # Verify signing secret if configured
+        signing_secret = d.get_config("slack_signing_secret", "")
+        if signing_secret:
+            import time
+            timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
+            slack_sig = request.headers.get("X-Slack-Signature", "")
+            if abs(time.time() - int(timestamp or 0)) > 300:
+                return JSONResponse({"text": "Request too old."}, status_code=403)
+            body_bytes = await request.body()
+            sig_basestring = f"v0:{timestamp}:{body_bytes.decode()}"
+            my_sig = "v0=" + hmac.new(signing_secret.encode(), sig_basestring.encode(), hashlib.sha256).hexdigest()
+            if not hmac.compare_digest(my_sig, slack_sig):
+                return JSONResponse({"text": "Invalid signature."}, status_code=403)
+
+        actions = data.get("actions", [])
+        if not actions:
+            return JSONResponse({"text": ""})
+
+        action = actions[0]
+        action_id = action.get("action_id", "")
+        resource_id = action.get("value", "")
+
+        # Map action_id to reaction type
+        reaction_map = {
+            "dugg_react_tap": "tap",
+            "dugg_react_star": "star",
+            "dugg_react_thumbsup": "thumbsup",
+        }
+        reaction_type = reaction_map.get(action_id)
+        if not reaction_type or not resource_id:
+            return JSONResponse({"text": ""})
+
+        # Resolve Slack user to Dugg user
+        slack_user = data.get("user", {}).get("username", "")
+        rows = d.conn.execute("SELECT id, name FROM users").fetchall()
+        user = None
+        for r in rows:
+            if r["name"].lower() == slack_user.lower():
+                user = dict(r)
+                break
+        if not user and rows:
+            user = dict(rows[0])
+        if not user:
+            return JSONResponse({"text": "No Dugg user found."})
+
+        # Verify resource exists
+        resource = d.get_resource(resource_id)
+        if not resource:
+            return JSONResponse({"text": "Resource not found."})
+
+        emoji = {"tap": ":point_right:", "star": ":star:", "thumbsup": ":thumbsup:"}.get(reaction_type, "")
+        d.react_to_resource(resource_id, user["id"], reaction_type)
+        d.wait_for_webhooks()
+
+        title = resource.get("title") or resource.get("url", "")
+        return JSONResponse({
+            "response_type": "ephemeral",
+            "replace_original": False,
+            "text": f"{emoji} You reacted {reaction_type} to *{title}*",
+        })
 
     # --- Browser admin panel ---
 
@@ -1444,6 +1520,7 @@ def create_app(db_path: Optional[Path] = None) -> Starlette:
         Route("/events/stream", endpoint=handle_events_stream),
         Route("/tools/{tool_name}", endpoint=handle_tools, methods=["POST"]),
         Route("/slack/command", endpoint=handle_slack_command, methods=["POST"]),
+        Route("/slack/actions", endpoint=handle_slack_actions, methods=["POST"]),
         Route("/admin/{key}", endpoint=handle_admin_page),
         Route("/admin/{key}/ban", endpoint=handle_admin_ban, methods=["POST"]),
         Route("/admin/{key}/unban", endpoint=handle_admin_unban, methods=["POST"]),

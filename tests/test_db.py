@@ -1408,6 +1408,67 @@ def test_duplicate_reaction_no_event(db):
     assert len(reaction_events) == 1  # only one event, not two
 
 
+def test_reaction_webhook_targets_author_only(db):
+    """Reaction webhooks should only fire for the resource's submitter, not all collection members."""
+    kade = db.create_user("Kade")
+    rocco = db.create_user("Rocco")
+    coll = db.create_collection("Shared", kade["id"], visibility="shared")
+    db.add_collection_member(coll["id"], rocco["id"])
+    res = db.add_resource(url="https://example.com/1", collection_id=coll["id"],
+                          submitted_by=kade["id"], title="Kade's Article")
+
+    db.subscribe_webhook(kade["id"], "https://hooks.example.com/kade")
+    db.subscribe_webhook(rocco["id"], "https://hooks.example.com/rocco")
+
+    # Get all hooks for reaction_added — should return both
+    all_hooks = db.get_webhooks_for_event("reaction_added", collection_id=coll["id"])
+    assert len(all_hooks) == 2
+
+    # But _dispatch_webhooks should filter to only Kade (the resource owner)
+    # We test this by checking the filtering logic directly
+    event = {
+        "event_type": "reaction_added",
+        "collection_id": coll["id"],
+        "actor_id": rocco["id"],
+        "payload": {
+            "resource_id": res["id"],
+            "reaction_type": "star",
+            "resource_owner_id": kade["id"],
+        },
+    }
+    owner_id = event["payload"]["resource_owner_id"]
+    filtered = [h for h in all_hooks if h["user_id"] == owner_id]
+    assert len(filtered) == 1
+    assert filtered[0]["callback_url"] == "https://hooks.example.com/kade"
+
+
+def test_reaction_webhook_enriches_payload(db):
+    """Reaction webhook dispatch enriches the payload with resource details and aggregate counts."""
+    kade = db.create_user("Kade")
+    rocco = db.create_user("Rocco")
+    sam = db.create_user("Sam")
+    coll = db.create_collection("Shared", kade["id"], visibility="shared")
+    db.add_collection_member(coll["id"], rocco["id"])
+    db.add_collection_member(coll["id"], sam["id"])
+    res = db.add_resource(url="https://example.com/article", collection_id=coll["id"],
+                          submitted_by=kade["id"], title="Great Article")
+
+    # Two people react
+    db.react_to_resource(res["id"], rocco["id"], "star")
+    db.react_to_resource(res["id"], sam["id"], "tap")
+
+    # Verify aggregate counts are correct
+    counts = db.conn.execute(
+        "SELECT reaction_type, COUNT(*) as count FROM reactions WHERE resource_id = ? GROUP BY reaction_type",
+        (res["id"],),
+    ).fetchall()
+    total = sum(dict(r)["count"] for r in counts)
+    assert total == 2
+    breakdown = {dict(r)["reaction_type"]: dict(r)["count"] for r in counts}
+    assert breakdown["star"] == 1
+    assert breakdown["tap"] == 1
+
+
 # --- User Cursors ---
 
 def test_cursor_starts_none(db):

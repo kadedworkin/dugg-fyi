@@ -28,6 +28,17 @@ Set up a Slack app with a slash command pointing to your server:
 - `/dugg https://...` — adds the URL (rest of text is the note)
 - `/dugg search terms` — searches and shows results
 
+### Reactions via Slack buttons
+
+New resources posted to Slack via webhooks include Tap / Star / Nice buttons. Clicking a button fires a reaction back to the Dugg server, and the resource's author is quietly notified with aggregate counts.
+
+**Setup:**
+1. In your Slack app settings, go to **Interactivity & Shortcuts**
+2. Enable interactivity and set the Request URL to: `https://your-server/slack/actions`
+3. The signing secret from the slash command setup is reused for verification
+
+Buttons appear automatically on `resource_added` webhook messages. No additional configuration needed.
+
 ## Email forwarding
 
 Forward emails directly into Dugg using self-describing email addresses. No email stored on the server — no PII, no registration, no lookup tables.

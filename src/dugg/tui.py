@@ -303,7 +303,7 @@ class DuggAdmin(App):
                 a["name"],
                 str(a["total"]),
                 str(a["submissions"]),
-                str(a["reactions_received"]),
+                str(a["distinct_human_reactors"]),
                 a["joined_at"][:10] if a.get("joined_at") else "",
                 a["user_id"],
                 key=a["user_id"],

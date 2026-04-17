@@ -20,6 +20,7 @@ Dugg ships a full management CLI alongside the MCP server.
 | `dugg servers` | List this server, subscribed instances, and publish targets |
 | `dugg remove <id-or-url>` | Delete a resource (submitter or owner) |
 | `dugg edit <id-or-url> [--title ...] [--note ...]` | Edit a resource's title or note (submitter only) |
+| `dugg react <id-or-url> [--type tap\|star\|thumbsup]` | Silently react to a resource (default: tap) |
 | `dugg email` | Show your Dugg email forwarding address |
 | `dugg rss subscribe <url> [--collection ...] [--tag ...] [--interval 1h] [--now]` | Subscribe a collection to an RSS/Atom feed |
 | `dugg rss list` | List your RSS subscriptions with state (active/paused) and last-poll timestamp |
