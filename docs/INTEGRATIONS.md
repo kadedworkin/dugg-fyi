@@ -150,6 +150,64 @@ Run `python agent/dugg_rss_agent.py --once` to poll every feed once, or `--watch
 
 See `agent/dugg_rss_example.yaml` for a commented starter template.
 
+## Zapier, Make, and other automation platforms
+
+Dugg's webhook system and HTTP API work with any automation platform that supports webhooks — no custom app required.
+
+### Triggers (Dugg → external)
+
+Use Dugg's webhook system to push events into Zapier, Make, n8n, Pipedream, or any platform with a "catch hook" trigger:
+
+1. In your automation platform, create a new webhook/catch hook trigger and copy the URL
+2. Register it with Dugg:
+
+```bash
+dugg webhook add https://hooks.zapier.com/hooks/catch/12345/abcdef/
+```
+
+Or via your agent: tell it to call `dugg_webhook_subscribe` with the catch hook URL.
+
+Every `resource_added`, `reaction_added`, and other event fires to your automation platform as a JSON payload containing the full event details — resource URL, title, description, author, tags, submitter, and timestamps.
+
+**Example automations:**
+- New resource → add row to Google Sheet or Notion database
+- New resource tagged "newsletter" → forward to email list
+- Reaction received → log to Airtable
+- Resource added → post to Discord channel
+
+**Filter by event type** to avoid noise:
+
+```bash
+curl -X POST https://your-server/tools/dugg_webhook_subscribe \
+  -H "X-Dugg-Key: YOUR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"callback_url": "https://hooks.zapier.com/...", "event_types": ["resource_added"]}'
+```
+
+### Actions (external → Dugg)
+
+Push content into Dugg from any platform that can make HTTP requests:
+
+```bash
+# Add a URL
+curl -X POST https://your-server/tools/dugg_add \
+  -H "X-Dugg-Key: YOUR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com/article", "note": "From Zapier"}'
+
+# Paste raw content
+curl -X POST https://your-server/tools/dugg_paste \
+  -H "X-Dugg-Key: YOUR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"title": "Meeting Notes", "body": "...", "source_type": "note"}'
+```
+
+This works with Zapier's "Webhooks by Zapier" action, Make's HTTP module, n8n's HTTP Request node, or any similar tool. The full MCP tool surface is available at `POST /tools/{tool_name}` with `X-Dugg-Key` authentication.
+
+### Why not a native Zapier/Make app?
+
+Dugg's API surface is still evolving rapidly. A published app requires a stable contract, a review process, and ongoing maintenance for platform changes. The webhook + HTTP approach gives the same functionality today with zero lock-in. When the API stabilizes and user count warrants it, a native app is a natural next step.
+
 ## Browser feed
 
 Every user gets a read-only feed at `/feed/{key}`:
