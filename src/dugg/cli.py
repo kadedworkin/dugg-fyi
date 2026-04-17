@@ -731,6 +731,206 @@ def _format_attribution(added_by: str, added_date: str, pub_date: str, source: s
     return " · ".join(parts)
 
 
+def cmd_get(args):
+    """Display full details for a single resource."""
+    from pathlib import Path
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+    user = _resolve_user(db, args)
+    names = _user_name_cache(db)
+
+    resource_id = _resolve_resource(db, args.target)
+    if not resource_id:
+        print(f"Resource not found: {args.target}")
+        db.close()
+        sys.exit(1)
+
+    r = db.get_resource(resource_id)
+    if not r:
+        print(f"Resource not found: {args.target}")
+        db.close()
+        sys.exit(1)
+
+    title = r.get("title") or r["url"]
+    print(f"  Title: {title}")
+    print(f"  ID: {r['id']}")
+    print(f"  URL: {r['url']}")
+    if r.get("description"):
+        print(f"  Description: {r['description']}")
+    if r.get("author"):
+        print(f"  Author: {r['author']}")
+    if r.get("source_type"):
+        print(f"  Source type: {r['source_type']}")
+    if r.get("note"):
+        print(f"  Note: {r['note']}")
+    tags = r.get("tags", [])
+    if tags:
+        labels = [t["label"] if isinstance(t, dict) else t for t in tags]
+        print(f"  Tags: {', '.join(labels)}")
+    submitted_by = names.get(r.get("submitted_by", ""), r.get("submitted_by", ""))
+    print(f"  Submitted by: {submitted_by}")
+    if r.get("created_at"):
+        print(f"  Created: {r['created_at']}")
+    transcript = r.get("transcript") or ""
+    if transcript:
+        display = transcript[:500] + "..." if len(transcript) > 500 else transcript
+        print(f"  Transcript: {display}")
+
+    reactions = db.get_reactions(resource_id, user["id"])
+    if reactions:
+        print(f"  Reactions: {reactions['total']} total", end="")
+        if reactions.get("breakdown"):
+            parts = [f"{k}={v}" for k, v in reactions["breakdown"].items()]
+            print(f" ({', '.join(parts)})", end="")
+        print()
+
+    db.close()
+
+
+def cmd_tag(args):
+    """Tag an existing resource."""
+    from pathlib import Path
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+    user = _resolve_user(db, args)
+
+    resource_id = _resolve_resource(db, args.target)
+    if not resource_id:
+        print(f"Resource not found: {args.target}")
+        db.close()
+        sys.exit(1)
+
+    tags = [t.strip() for t in (getattr(args, "tags", "") or "").split(",") if t.strip()]
+    if not tags:
+        print("No tags provided. Use --tags \"tag1,tag2\".")
+        db.close()
+        sys.exit(1)
+
+    result_tags = db.tag_resource(resource_id, tags, source="human")
+    labels = [t["label"] if isinstance(t, dict) else t for t in result_tags]
+    r = db.get_resource(resource_id)
+    title = (r.get("title") or r["url"]) if r else resource_id
+    print(f"  Tagged: {title}")
+    print(f"  Tags: {', '.join(labels)}")
+    db.close()
+
+
+def cmd_reactions(args):
+    """Show reactions on a resource."""
+    from pathlib import Path
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+    user = _resolve_user(db, args)
+
+    resource_id = _resolve_resource(db, args.target)
+    if not resource_id:
+        print(f"Resource not found: {args.target}")
+        db.close()
+        sys.exit(1)
+
+    reactions = db.get_reactions(resource_id, user["id"])
+    if not reactions:
+        r = db.get_resource(resource_id)
+        title = (r.get("title") or r["url"]) if r else args.target
+        print(f"  {title}")
+        print("  No reactions (or you're not the submitter).")
+        db.close()
+        return
+
+    r = db.get_resource(resource_id)
+    title = (r.get("title") or r["url"]) if r else args.target
+    print(f"  {title}")
+    print(f"  Total: {reactions['total']}")
+    for rtype, count in reactions.get("breakdown", {}).items():
+        emoji = {"tap": ">>", "star": "*", "thumbsup": "+1"}.get(rtype, rtype)
+        print(f"    {emoji} {rtype}: {count}")
+    db.close()
+
+
+def cmd_related(args):
+    """Show related/linked resources."""
+    from pathlib import Path
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+    user = _resolve_user(db, args)
+
+    resource_id = _resolve_resource(db, args.target)
+    if not resource_id:
+        print(f"Resource not found: {args.target}")
+        db.close()
+        sys.exit(1)
+
+    limit = getattr(args, "limit", 5)
+    edges = db.get_related(resource_id, user_id=user["id"], limit=limit)
+
+    r = db.get_resource(resource_id)
+    title = (r.get("title") or r["url"]) if r else args.target
+    print(f"  Related to: {title}\n")
+
+    if not edges:
+        print("  No related resources found.")
+        db.close()
+        return
+
+    for e in edges:
+        other_id = e["resource_b"] if e["resource_a"] == resource_id else e["resource_a"]
+        other = db.get_resource(other_id)
+        if other:
+            other_title = other.get("title") or other["url"]
+            print(f"  {other_title}")
+            print(f"    {other['url']}")
+            if e.get("relation_type"):
+                print(f"    Relation: {e['relation_type']} (confidence: {e.get('confidence', '')})")
+        else:
+            print(f"  {other_id} (deleted)")
+    db.close()
+
+
+def cmd_collections(args):
+    """List all collections the user has access to."""
+    from pathlib import Path
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+    user = _resolve_user(db, args)
+
+    collections = db.list_collections(user["id"])
+
+    if not collections:
+        print("No collections.")
+        db.close()
+        return
+
+    print(f"{len(collections)} collection(s):\n")
+    for c in collections:
+        count = db.conn.execute(
+            "SELECT COUNT(*) FROM resources WHERE collection_id = ?", (c["id"],)
+        ).fetchone()[0]
+        visibility = c.get("visibility", "private")
+        print(f"  {c['name']} ({visibility})")
+        print(f"    ID: {c['id']}")
+        print(f"    Resources: {count}")
+        print()
+    db.close()
+
+
+def _resolve_resource(db, target):
+    """Resolve a resource target (ID, prefix, or URL) to a resource ID."""
+    if target.startswith("http://") or target.startswith("https://") or target.startswith("dugg://"):
+        row = db.conn.execute(
+            "SELECT id FROM resources WHERE url = ?", (target,)
+        ).fetchone()
+        if not row:
+            row = db.conn.execute(
+                "SELECT id FROM resources WHERE url LIKE ?", (target + "%",)
+            ).fetchone()
+    else:
+        row = db.conn.execute(
+            "SELECT id FROM resources WHERE id = ? OR id LIKE ?",
+            (target, target + "%"),
+        ).fetchone()
+    return row["id"] if row else None
+
+
 def cmd_search(args):
     """Search Dugg for resources."""
     from pathlib import Path
@@ -739,7 +939,34 @@ def cmd_search(args):
     user = _resolve_user(db, args)
     names = _user_name_cache(db)
 
-    results = db.search(args.query, user["id"], limit=getattr(args, "limit", 20))
+    # Resolve optional filters
+    search_tags = None
+    tags_arg = getattr(args, "tags", None)
+    if tags_arg:
+        search_tags = [t.strip() for t in tags_arg.split(",") if t.strip()]
+
+    collection_id = None
+    collection_arg = getattr(args, "collection", None)
+    if collection_arg:
+        collection_id = _resolve_collection(db, user["id"], collection_arg)
+        if not collection_id:
+            print(f"Collection not found: {collection_arg}")
+            db.close()
+            sys.exit(1)
+
+    submitted_by = None
+    submitter_arg = getattr(args, "submitted_by", None)
+    if submitter_arg:
+        # Resolve name to user ID
+        reverse_names = {v.lower(): k for k, v in names.items()}
+        if submitter_arg.lower() in reverse_names:
+            submitted_by = reverse_names[submitter_arg.lower()]
+        else:
+            submitted_by = submitter_arg  # Assume it's already a user ID
+
+    results = db.search(args.query, user["id"], collection_id=collection_id,
+                        tags=search_tags, submitted_by=submitted_by,
+                        limit=getattr(args, "limit", 20))
     db.close()
 
     if not results:
@@ -1030,13 +1257,32 @@ def cmd_edit(args):
         updates["title"] = args.title
     if getattr(args, "note", None):
         updates["note"] = args.note
+    if getattr(args, "description", None):
+        updates["description"] = args.description
+    if getattr(args, "author", None):
+        updates["author"] = args.author
+    if getattr(args, "source_type", None):
+        updates["source_type"] = args.source_type
 
-    if not updates:
-        print("Nothing to change. Use --title or --note.")
+    edit_tags = getattr(args, "tags", None)
+
+    if not updates and not edit_tags:
+        print("Nothing to change. Use --title, --note, --description, --author, --source-type, or --tags.")
         db.close()
         sys.exit(1)
 
-    result = db.update_resource(resource_id, **updates)
+    if updates:
+        result = db.update_resource(resource_id, **updates)
+    else:
+        result = db.get_resource(resource_id)
+
+    if edit_tags:
+        tag_list = [t.strip() for t in edit_tags.split(",") if t.strip()]
+        # Clear existing tags and replace
+        db.conn.execute("DELETE FROM tags WHERE resource_id = ?", (resource_id,))
+        db.conn.commit()
+        db.tag_resource(resource_id, tag_list, source="human")
+
     db.close()
 
     if result:
@@ -1045,6 +1291,14 @@ def cmd_edit(args):
             print(f"  Title: {updates['title']}")
         if "note" in updates:
             print(f"  Note: {updates['note']}")
+        if "description" in updates:
+            print(f"  Description: {updates['description']}")
+        if "author" in updates:
+            print(f"  Author: {updates['author']}")
+        if "source_type" in updates:
+            print(f"  Source type: {updates['source_type']}")
+        if edit_tags:
+            print(f"  Tags: {edit_tags}")
     else:
         print("Update failed.")
 
@@ -1403,11 +1657,23 @@ def main():
     p_search = sub.add_parser("search", help="Search Dugg for resources")
     p_search.add_argument("query", help="Search query")
     p_search.add_argument("--limit", type=int, default=20, help="Max results (default: 20)")
+    p_search.add_argument("--tags", default=None, help="Filter by tags (comma-separated)")
+    p_search.add_argument("--collection", default=None, help="Filter by collection name or ID")
+    p_search.add_argument("--submitted-by", default=None, help="Filter by submitter name or ID")
     p_search.add_argument("--key", default=None, help="Your API key (uses local user if omitted)")
+
+    p_get = sub.add_parser("get", help="Show full details for a resource")
+    p_get.add_argument("target", help="Resource ID (or prefix) or URL")
+    p_get.add_argument("--key", default=None, help="Your API key (uses local user if omitted)")
 
     p_feed = sub.add_parser("feed", help="Show recent resources")
     p_feed.add_argument("--limit", type=int, default=20, help="Max results (default: 20)")
     p_feed.add_argument("--key", default=None, help="Your API key (uses local user if omitted)")
+
+    p_related = sub.add_parser("related", help="Show related/linked resources")
+    p_related.add_argument("target", help="Resource ID (or prefix) or URL")
+    p_related.add_argument("--limit", type=int, default=5, help="Max results (default: 5)")
+    p_related.add_argument("--key", default=None, help="Your API key (uses local user if omitted)")
 
     p_status = sub.add_parser("status", help="Show your identity, connections, and resource count")
     p_status.add_argument("--key", default=None, help="Your API key")
@@ -1419,17 +1685,33 @@ def main():
     p_remove.add_argument("target", help="Resource ID (or prefix) or URL")
     p_remove.add_argument("--key", default=None, help="Your API key")
 
-    p_edit = sub.add_parser("edit", help="Edit a resource's title or note")
+    p_edit = sub.add_parser("edit", help="Edit a resource's title, note, description, author, source type, or tags")
     p_edit.add_argument("target", help="Resource ID (or prefix) or URL")
     p_edit.add_argument("--title", default=None, help="New title")
     p_edit.add_argument("--note", default=None, help="New note")
+    p_edit.add_argument("--description", default=None, help="New description")
+    p_edit.add_argument("--author", default=None, help="New author")
+    p_edit.add_argument("--source-type", default=None, help="New source type")
+    p_edit.add_argument("--tags", default=None, help="Replace tags (comma-separated)")
     p_edit.add_argument("--key", default=None, help="Your API key")
+
+    p_tag = sub.add_parser("tag", help="Add tags to a resource")
+    p_tag.add_argument("target", help="Resource ID (or prefix) or URL")
+    p_tag.add_argument("--tags", default="", help="Comma-separated tags to add")
+    p_tag.add_argument("--key", default=None, help="Your API key")
 
     p_react = sub.add_parser("react", help="React to a resource (tap, star, thumbsup)")
     p_react.add_argument("target", help="Resource ID (or prefix) or URL")
     p_react.add_argument("--type", choices=["tap", "star", "thumbsup"], default="tap",
                          help="Reaction type (default: tap)")
     p_react.add_argument("--key", default=None, help="Your API key")
+
+    p_reactions = sub.add_parser("reactions", help="Show reactions on a resource")
+    p_reactions.add_argument("target", help="Resource ID (or prefix) or URL")
+    p_reactions.add_argument("--key", default=None, help="Your API key")
+
+    p_collections = sub.add_parser("collections", help="List all collections you have access to")
+    p_collections.add_argument("--key", default=None, help="Your API key")
 
     sub.add_parser("health", help="Check server health")
 
@@ -1549,6 +1831,8 @@ def main():
         cmd_paste(args)
     elif args.command == "search":
         cmd_search(args)
+    elif args.command == "get":
+        cmd_get(args)
     elif args.command == "feed":
         cmd_feed(args)
     elif args.command == "status":
@@ -1559,8 +1843,16 @@ def main():
         cmd_remove(args)
     elif args.command == "edit":
         cmd_edit(args)
+    elif args.command == "tag":
+        cmd_tag(args)
     elif args.command == "react":
         cmd_react(args)
+    elif args.command == "reactions":
+        cmd_reactions(args)
+    elif args.command == "related":
+        cmd_related(args)
+    elif args.command == "collections":
+        cmd_collections(args)
     elif args.command == "health":
         cmd_health(args)
     elif args.command == "webhook":

@@ -748,6 +748,62 @@ async def list_tools() -> list[Tool]:
                 },
             },
         ),
+        Tool(
+            name="dugg_rss_pause",
+            description="Pause an RSS subscription. Polling stops until resumed.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "subscription_id": {"type": "string", "description": "ID of the subscription to pause"},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+                "required": ["subscription_id"],
+            },
+        ),
+        Tool(
+            name="dugg_rss_resume",
+            description="Resume a paused RSS subscription.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "subscription_id": {"type": "string", "description": "ID of the subscription to resume"},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+                "required": ["subscription_id"],
+            },
+        ),
+        Tool(
+            name="dugg_webhook_test",
+            description="Fire a test event to all your active webhooks. Use to verify webhook delivery is working.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+            },
+        ),
+        Tool(
+            name="dugg_share_link",
+            description="Generate a shareable URL for a resource. The link doesn't contain any API key — viewers access it through a form-gated page.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "resource_id": {"type": "string", "description": "ID of the resource to generate a link for"},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+                "required": ["resource_id"],
+            },
+        ),
+        Tool(
+            name="dugg_email",
+            description="Show email forwarding addresses for all connected instances. Forward emails to these addresses to add them as resources.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+            },
+        ),
     ]
 
 
@@ -867,6 +923,16 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = _handle_rss_remove(d, user_id, arguments)
         elif name == "dugg_rss_poll":
             result = await _handle_rss_poll(d, user_id, arguments)
+        elif name == "dugg_rss_pause":
+            result = _handle_rss_pause(d, user_id, arguments)
+        elif name == "dugg_rss_resume":
+            result = _handle_rss_resume(d, user_id, arguments)
+        elif name == "dugg_webhook_test":
+            result = _handle_webhook_test(d, user_id)
+        elif name == "dugg_share_link":
+            result = _handle_share_link(d, arguments)
+        elif name == "dugg_email":
+            result = _handle_email(d, user_id, user)
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
@@ -1217,6 +1283,74 @@ async def _handle_rss_poll(d: DuggDB, user_id: str, args: dict) -> list[TextCont
             lines.append(f"  {sub['feed_url']}: +{result['new']} new, {result['skipped']} skipped (HTTP {result['status']})")
         except Exception as e:
             lines.append(f"  {sub['feed_url']}: ERROR {e}")
+    return [TextContent(type="text", text="\n".join(lines))]
+
+
+def _handle_rss_pause(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    sub_id = args["subscription_id"]
+    sub = d.get_rss_subscription(sub_id)
+    if not sub or sub.get("user_id") != user_id:
+        return [TextContent(type="text", text="Subscription not found.")]
+    ok = d.set_rss_subscription_enabled(sub_id, False)
+    if not ok:
+        return [TextContent(type="text", text="Subscription not found.")]
+    return [TextContent(type="text", text=f"Paused subscription {sub_id}.")]
+
+
+def _handle_rss_resume(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    sub_id = args["subscription_id"]
+    sub = d.get_rss_subscription(sub_id)
+    if not sub or sub.get("user_id") != user_id:
+        return [TextContent(type="text", text="Subscription not found.")]
+    ok = d.set_rss_subscription_enabled(sub_id, True)
+    if not ok:
+        return [TextContent(type="text", text="Subscription not found.")]
+    return [TextContent(type="text", text=f"Resumed subscription {sub_id}.")]
+
+
+def _handle_webhook_test(d: DuggDB, user_id: str) -> list[TextContent]:
+    hooks = d.list_webhooks(user_id)
+    if not hooks:
+        return [TextContent(type="text", text="No webhooks to test. Add one with dugg_webhook_subscribe.")]
+    server_name = d.get_config("server_url", "Dugg")
+    d.emit_event("resource_added", actor_id=user_id,
+                 payload={"url": "https://dugg.fyi", "title": f"{server_name} Webhook Test", "note": "This is a test notification from Dugg"})
+    d.wait_for_webhooks()
+    return [TextContent(type="text", text=f"Test event fired to {len(hooks)} webhook(s). Check your channel.")]
+
+
+def _handle_share_link(d: DuggDB, args: dict) -> list[TextContent]:
+    resource_id = args["resource_id"]
+    server_url = d.get_config("server_url", "")
+    if not server_url:
+        return [TextContent(type="text", text="No server URL configured. Set server_url in config first.")]
+    url = f"{server_url.rstrip('/')}/r/{resource_id}"
+    return [TextContent(type="text", text=url)]
+
+
+def _handle_email(d: DuggDB, user_id: str, user: dict) -> list[TextContent]:
+    from dugg.db import dugg_email_address
+    server_url = d.get_config("server_url", "")
+    lines = []
+
+    if server_url:
+        email_addr = dugg_email_address(user["api_key"], server_url)
+        if email_addr:
+            lines.append(f"This server: {email_addr}")
+
+    instances = d.list_instances(user_id)
+    for inst in instances:
+        endpoint = inst.get("endpoint_url", "")
+        if endpoint:
+            email_addr = dugg_email_address(user["api_key"], endpoint)
+            if email_addr:
+                lines.append(f"{inst['name']}: {email_addr}")
+
+    if not lines:
+        return [TextContent(type="text", text="No server URL configured. Set server_url in config first.")]
+
+    lines.append("")
+    lines.append("Forward emails to any of these addresses to add them as resources.")
     return [TextContent(type="text", text="\n".join(lines))]
 
 
