@@ -38,6 +38,8 @@ Dugg ships a full management CLI alongside the MCP server.
 | `dugg invites` | List invite tokens (pending, redeemed, expired) |
 | `dugg redeem <token>` | Redeem an invite token (both keys auto-saved to `.dugg-env`) |
 | `dugg admin` | Launch the terminal admin UI |
+| `dugg export <file> [--collection ...] [--tag ...] [--since ...] [--pretty]` | Export resources to a portable `.dugg.json` file |
+| `dugg import <file> [--collection ...] [--tag ...] [--on-conflict skip\|update] [--dry-run]` | Import resources from a `.dugg.json` file |
 
 ## Feed & search output
 
@@ -68,6 +70,42 @@ dugg rss poll <sub-id>
 **Intervals:** `1h` / `30m` / `6h` / `1d` or bare seconds (minimum 60s).
 
 For a client-side / single-player watcher that pushes into one or more Dugg servers without touching the server's polling daemon, see `agent/dugg_rss_agent.py`.
+
+## Export & import
+
+Move resources between Dugg servers or create offline backups using the portable `.dugg.json` format.
+
+```bash
+# Export everything
+dugg export backup.dugg.json --pretty
+
+# Export one collection, filtered by tag
+dugg export ai-agents.dugg.json --collection "AI Research" --tag agents
+
+# Export resources added since a date
+dugg export recent.dugg.json --since 2026-04-01
+
+# Pipe between servers (stdout/stdin)
+dugg export - --key $SOURCE_KEY | dugg import - --key $DEST_KEY
+
+# Import into a specific collection
+dugg import backup.dugg.json --collection "Imported"
+
+# Preview what would be imported
+dugg import backup.dugg.json --dry-run
+
+# Import and update existing resources on URL collision
+dugg import backup.dugg.json --on-conflict update
+
+# Tag everything on import
+dugg import backup.dugg.json --tag imported --tag archive
+```
+
+**Format:** `.dugg.json` files contain a `dugg_version`, `exported_at` timestamp, `source_server`, and a `resources` array. Each resource includes URL, title, description, source type, author, transcript, note, summary, thumbnail, raw metadata, and tags.
+
+**What's excluded:** Sibling notes (quarantined enrichment), reactions, edges, user accounts, and collection structure. These are server-local state, not portable content.
+
+**Collision handling:** On import, if a URL already exists in the target collection, `--on-conflict skip` (default) leaves the existing resource untouched. `--on-conflict update` merges metadata (incoming values overwrite) and unions tags.
 
 ## URL auto-routing
 

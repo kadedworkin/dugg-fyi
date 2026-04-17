@@ -3063,3 +3063,145 @@ class DuggDB:
             params.extend([coll_id, cutoff])
 
         return f" AND ({' OR '.join(conditions)})", params
+
+    # --- Export / Import ---
+
+    def export_resources(
+        self,
+        user_id: str,
+        collection_id: Optional[str] = None,
+        tags: Optional[list[str]] = None,
+        since: Optional[str] = None,
+    ) -> list[dict]:
+        """Export resources the user can access, with optional filters.
+
+        Returns a list of dicts suitable for JSON serialization in the
+        .dugg.json portable format.  Excludes sibling notes (quarantined),
+        reactions, edges, and server-local state.
+        """
+        # Build accessible collection list
+        if collection_id:
+            coll_ids = [collection_id]
+        else:
+            coll_ids = [c["id"] for c in self.list_collections(user_id)]
+        if not coll_ids:
+            return []
+
+        placeholders = ",".join("?" for _ in coll_ids)
+        sql = f"SELECT * FROM resources WHERE collection_id IN ({placeholders})"
+        params: list = list(coll_ids)
+
+        if since:
+            sql += " AND created_at >= ?"
+            params.append(since)
+
+        sql += " ORDER BY created_at ASC"
+        rows = self.conn.execute(sql, params).fetchall()
+
+        results = []
+        for row in rows:
+            r = dict(row)
+            tag_rows = self._get_tags(r["id"])
+            tag_labels = [t["label"] for t in tag_rows]
+
+            # Tag filter: resource must have ALL requested tags
+            if tags:
+                if not all(t in tag_labels for t in tags):
+                    continue
+
+            raw_meta = r.get("raw_metadata", "{}")
+            if isinstance(raw_meta, str):
+                try:
+                    raw_meta = json.loads(raw_meta)
+                except (json.JSONDecodeError, TypeError):
+                    raw_meta = {}
+
+            results.append({
+                "url": r["url"],
+                "title": r.get("title", ""),
+                "description": r.get("description", ""),
+                "source_type": r.get("source_type", "unknown"),
+                "author": r.get("author", ""),
+                "transcript": r.get("transcript", ""),
+                "note": r.get("note", ""),
+                "summary": r.get("summary", ""),
+                "thumbnail": r.get("thumbnail", ""),
+                "raw_metadata": raw_meta,
+                "tags": tag_labels,
+                "created_at": r.get("created_at", ""),
+                "enriched_at": r.get("enriched_at", ""),
+            })
+        return results
+
+    def import_resource(
+        self,
+        resource_data: dict,
+        collection_id: str,
+        submitted_by: str,
+        on_conflict: str = "skip",
+        extra_tags: Optional[list[str]] = None,
+    ) -> dict:
+        """Import a single resource from a .dugg.json payload.
+
+        Returns a dict with ``status`` of ``imported``, ``skipped``, or
+        ``updated`` plus resource fields.
+        """
+        url = resource_data["url"]
+        tags = list(resource_data.get("tags") or [])
+        if extra_tags:
+            tags = list(set(tags + extra_tags))
+
+        existing = self.conn.execute(
+            "SELECT id FROM resources WHERE url = ? AND collection_id = ?",
+            (url, collection_id),
+        ).fetchone()
+
+        if existing:
+            if on_conflict == "skip":
+                res = self.get_resource(existing["id"]) or {}
+                res["status"] = "skipped"
+                return res
+            elif on_conflict == "update":
+                updates = {}
+                for field in ("title", "description", "source_type", "author",
+                              "transcript", "note", "summary", "thumbnail",
+                              "raw_metadata"):
+                    val = resource_data.get(field)
+                    if val:
+                        updates[field] = val
+                if updates:
+                    self.update_resource(existing["id"], **updates)
+                if tags:
+                    now = _now()
+                    for tag in tags:
+                        self._add_tag(existing["id"], tag, "human", now)
+                    self.conn.commit()
+                res = self.get_resource(existing["id"]) or {}
+                res["status"] = "updated"
+                return res
+
+        raw_meta = resource_data.get("raw_metadata")
+        if isinstance(raw_meta, str):
+            try:
+                raw_meta = json.loads(raw_meta)
+            except (json.JSONDecodeError, TypeError):
+                raw_meta = {}
+
+        result = self.add_resource(
+            url=url,
+            collection_id=collection_id,
+            submitted_by=submitted_by,
+            note=resource_data.get("note", ""),
+            title=resource_data.get("title", ""),
+            description=resource_data.get("description", ""),
+            thumbnail=resource_data.get("thumbnail", ""),
+            source_type=resource_data.get("source_type", "unknown"),
+            author=resource_data.get("author", ""),
+            transcript=resource_data.get("transcript", ""),
+            raw_metadata=raw_meta,
+            tags=tags,
+            tag_source="human",
+            summary=resource_data.get("summary", ""),
+        )
+        result["status"] = "imported"
+        return result

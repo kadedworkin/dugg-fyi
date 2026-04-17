@@ -1976,3 +1976,141 @@ def test_shared_default_disabled_when_collection_deleted(db):
     assert coll_id != shared["id"]
     row = db.conn.execute("SELECT name FROM collections WHERE id = ?", (coll_id,)).fetchone()
     assert row[0] == "Default"
+
+
+# --- Export / Import ---
+
+
+def test_export_resources(db):
+    user = db.create_user("Kade")
+    coll = db.create_collection("AI", user["id"])
+    db.add_resource(
+        url="https://example.com/1",
+        collection_id=coll["id"],
+        submitted_by=user["id"],
+        title="Article One",
+        note="good stuff",
+        source_type="link",
+        tags=["ai", "agents"],
+    )
+    db.add_resource(
+        url="https://example.com/2",
+        collection_id=coll["id"],
+        submitted_by=user["id"],
+        title="Article Two",
+        source_type="youtube",
+        tags=["video"],
+    )
+    exported = db.export_resources(user["id"])
+    assert len(exported) == 2
+    assert exported[0]["url"] == "https://example.com/1"
+    assert exported[0]["title"] == "Article One"
+    assert "ai" in exported[0]["tags"]
+    assert exported[1]["url"] == "https://example.com/2"
+
+
+def test_export_filter_by_tag(db):
+    user = db.create_user("Kade")
+    coll = db.create_collection("AI", user["id"])
+    db.add_resource(
+        url="https://example.com/1",
+        collection_id=coll["id"],
+        submitted_by=user["id"],
+        title="Tagged",
+        tags=["ai"],
+    )
+    db.add_resource(
+        url="https://example.com/2",
+        collection_id=coll["id"],
+        submitted_by=user["id"],
+        title="Untagged",
+    )
+    exported = db.export_resources(user["id"], tags=["ai"])
+    assert len(exported) == 1
+    assert exported[0]["title"] == "Tagged"
+
+
+def test_export_filter_by_collection(db):
+    user = db.create_user("Kade")
+    c1 = db.create_collection("AI", user["id"])
+    c2 = db.create_collection("Marketing", user["id"])
+    db.add_resource(url="https://example.com/1", collection_id=c1["id"],
+                    submitted_by=user["id"], title="In AI")
+    db.add_resource(url="https://example.com/2", collection_id=c2["id"],
+                    submitted_by=user["id"], title="In Marketing")
+    exported = db.export_resources(user["id"], collection_id=c1["id"])
+    assert len(exported) == 1
+    assert exported[0]["title"] == "In AI"
+
+
+def test_import_resource_new(db):
+    user = db.create_user("Kade")
+    coll = db.create_collection("AI", user["id"])
+    data = {
+        "url": "https://example.com/imported",
+        "title": "Imported Article",
+        "source_type": "link",
+        "note": "from another server",
+        "tags": ["imported"],
+    }
+    result = db.import_resource(data, coll["id"], user["id"])
+    assert result["status"] == "imported"
+    assert result["title"] == "Imported Article"
+
+
+def test_import_resource_skip_collision(db):
+    user = db.create_user("Kade")
+    coll = db.create_collection("AI", user["id"])
+    db.add_resource(url="https://example.com/1", collection_id=coll["id"],
+                    submitted_by=user["id"], title="Original")
+    data = {"url": "https://example.com/1", "title": "Duplicate"}
+    result = db.import_resource(data, coll["id"], user["id"], on_conflict="skip")
+    assert result["status"] == "skipped"
+
+
+def test_import_resource_update_collision(db):
+    user = db.create_user("Kade")
+    coll = db.create_collection("AI", user["id"])
+    db.add_resource(url="https://example.com/1", collection_id=coll["id"],
+                    submitted_by=user["id"], title="Original", note="old note")
+    data = {"url": "https://example.com/1", "title": "Updated Title", "note": "new note"}
+    result = db.import_resource(data, coll["id"], user["id"], on_conflict="update")
+    assert result["status"] == "updated"
+    assert result["title"] == "Updated Title"
+
+
+def test_export_import_round_trip(db):
+    """Full round-trip: export from one collection, import into another."""
+    user = db.create_user("Kade")
+    src = db.create_collection("Source", user["id"])
+    dst = db.create_collection("Destination", user["id"])
+
+    db.add_resource(
+        url="https://example.com/round-trip",
+        collection_id=src["id"],
+        submitted_by=user["id"],
+        title="Round Trip Article",
+        description="Testing export/import",
+        source_type="link",
+        author="Test Author",
+        note="important context",
+        tags=["test", "roundtrip"],
+    )
+
+    exported = db.export_resources(user["id"], collection_id=src["id"])
+    assert len(exported) == 1
+
+    for res_data in exported:
+        result = db.import_resource(res_data, dst["id"], user["id"])
+        assert result["status"] == "imported"
+
+    # Verify the imported resource matches
+    dst_resources = db.list_resources(dst["id"])
+    assert len(dst_resources) == 1
+    imported = dst_resources[0]
+    assert imported["title"] == "Round Trip Article"
+    assert imported["author"] == "Test Author"
+    assert imported["note"] == "important context"
+    tag_labels = [t["label"] for t in imported["tags"]]
+    assert "test" in tag_labels
+    assert "roundtrip" in tag_labels

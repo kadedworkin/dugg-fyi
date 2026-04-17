@@ -88,7 +88,7 @@ For remote connections (HTTP/SSE), see [docs/HTTP.md](docs/HTTP.md).
 | Surface | Description |
 |---------|-------------|
 | **MCP tools** | 51 tools for agents — add, search, publish, moderate |
-| **CLI** | `dugg add`, `dugg search`, `dugg feed`, `dugg admin` |
+| **CLI** | `dugg add`, `dugg search`, `dugg feed`, `dugg export`, `dugg import`, `dugg admin` |
 | **Chrome extension** | "Dugg This" — one-click from any browser tab |
 | **Email forwarding** | Self-describing `{key}@{host}.dugg.fyi` addresses |
 | **Slack** | `/dugg` slash command + webhook notifications |
@@ -111,7 +111,7 @@ For remote connections (HTTP/SSE), see [docs/HTTP.md](docs/HTTP.md).
 
 ```bash
 uv sync --all-extras
-uv run pytest           # 152 tests
+uv run pytest           # 208 tests
 ```
 
 ## License

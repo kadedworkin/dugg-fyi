@@ -1440,6 +1440,23 @@ def main():
     pr_poll.add_argument("sub_id", nargs="?", default=None, help="Optional subscription id")
     pr_poll.add_argument("--key", default=None, help="Your API key")
 
+    p_export = sub.add_parser("export", help="Export resources to a portable .dugg.json file")
+    p_export.add_argument("output", help="Output file path (use - for stdout)")
+    p_export.add_argument("--collection", default=None, help="Export only this collection (name or id)")
+    p_export.add_argument("--tag", action="append", help="Filter to resources with this tag (repeatable)")
+    p_export.add_argument("--since", default=None, help="Only resources created after this date (ISO 8601)")
+    p_export.add_argument("--pretty", action="store_true", help="Indent JSON for readability")
+    p_export.add_argument("--key", default=None, help="Your API key")
+
+    p_import = sub.add_parser("import", help="Import resources from a .dugg.json file")
+    p_import.add_argument("input", help="Input file path (use - for stdin)")
+    p_import.add_argument("--collection", default=None, help="Import into this collection (name or id)")
+    p_import.add_argument("--tag", action="append", help="Apply this tag to all imported resources (repeatable)")
+    p_import.add_argument("--on-conflict", choices=["skip", "update"], default="skip",
+                          help="URL collision behavior (default: skip)")
+    p_import.add_argument("--dry-run", action="store_true", help="Show what would be imported without writing")
+    p_import.add_argument("--key", default=None, help="Your API key")
+
     # If the first arg looks like a URL, treat it as `dugg add <url> ...`
     if len(sys.argv) > 1 and sys.argv[1].startswith(("http://", "https://")):
         sys.argv.insert(1, "add")
@@ -1505,6 +1522,10 @@ def main():
         cmd_email(args)
     elif args.command == "rss":
         cmd_rss(args)
+    elif args.command == "export":
+        cmd_export(args)
+    elif args.command == "import":
+        cmd_import(args)
 
 
 def _resolve_collection(db, user_id: str, name_or_id: str) -> Optional[str]:
@@ -1732,6 +1753,148 @@ def cmd_email(args):
     db.close()
     print()
     print("Forward emails to any of these addresses to add them as resources.")
+
+
+def cmd_export(args):
+    """Export resources to a portable .dugg.json file."""
+    from pathlib import Path
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+    user = _resolve_user(db, args)
+
+    collection_id = None
+    if getattr(args, "collection", None):
+        collection_id = _resolve_collection(db, user["id"], args.collection)
+        if not collection_id:
+            print(f"Collection not found: {args.collection}")
+            db.close()
+            sys.exit(1)
+
+    tags = [t.strip() for t in (getattr(args, "tag", None) or [])]
+    since = getattr(args, "since", None) or None
+
+    resources = db.export_resources(
+        user_id=user["id"],
+        collection_id=collection_id,
+        tags=tags if tags else None,
+        since=since,
+    )
+
+    server_url = db.get_config("server_url", "")
+    db.close()
+
+    payload = {
+        "dugg_version": "1.0",
+        "exported_at": __import__("datetime").datetime.now(
+            __import__("datetime").timezone.utc
+        ).isoformat(),
+        "source_server": server_url,
+        "resource_count": len(resources),
+        "resources": resources,
+    }
+
+    pretty = getattr(args, "pretty", False)
+    indent = 2 if pretty else None
+    output_json = json.dumps(payload, indent=indent, ensure_ascii=False)
+
+    output_file = args.output
+    if output_file == "-":
+        sys.stdout.write(output_json + "\n")
+    else:
+        Path(output_file).write_text(output_json, encoding="utf-8")
+        print(f"Exported {len(resources)} resources to {output_file}")
+
+
+def cmd_import(args):
+    """Import resources from a .dugg.json file."""
+    from pathlib import Path
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+    user = _resolve_user(db, args)
+
+    input_file = args.input
+    if input_file == "-":
+        raw = sys.stdin.read()
+    else:
+        raw = Path(input_file).read_text(encoding="utf-8")
+
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as e:
+        print(f"Invalid JSON: {e}")
+        db.close()
+        sys.exit(1)
+
+    version = payload.get("dugg_version", "")
+    if not version:
+        print("Missing dugg_version — is this a .dugg.json file?")
+        db.close()
+        sys.exit(1)
+
+    resources = payload.get("resources", [])
+    if not resources:
+        print("No resources in file.")
+        db.close()
+        sys.exit(0)
+
+    # Resolve target collection
+    coll_name = getattr(args, "collection", None)
+    if coll_name:
+        coll_id = _resolve_collection(db, user["id"], coll_name)
+        if not coll_id:
+            print(f"Collection not found: {coll_name}")
+            db.close()
+            sys.exit(1)
+    else:
+        coll_id = _ensure_default_collection(db, user["id"])
+
+    extra_tags = [t.strip() for t in (getattr(args, "tag", None) or [])]
+    on_conflict = getattr(args, "on_conflict", "skip")
+    dry_run = getattr(args, "dry_run", False)
+
+    imported = 0
+    skipped = 0
+    updated = 0
+
+    for res_data in resources:
+        if dry_run:
+            url = res_data.get("url", "?")
+            title = res_data.get("title", "") or url
+            existing = db.conn.execute(
+                "SELECT id FROM resources WHERE url = ? AND collection_id = ?",
+                (url, coll_id),
+            ).fetchone()
+            if existing:
+                action = on_conflict
+                if on_conflict == "skip":
+                    skipped += 1
+                else:
+                    updated += 1
+            else:
+                action = "import"
+                imported += 1
+            print(f"  [{action}] {title[:60]}")
+            continue
+
+        result = db.import_resource(
+            resource_data=res_data,
+            collection_id=coll_id,
+            submitted_by=user["id"],
+            on_conflict=on_conflict,
+            extra_tags=extra_tags if extra_tags else None,
+        )
+        status = result.get("status", "imported")
+        if status == "imported":
+            imported += 1
+        elif status == "skipped":
+            skipped += 1
+        elif status == "updated":
+            updated += 1
+
+    db.close()
+
+    prefix = "[dry run] " if dry_run else ""
+    print(f"\n{prefix}Import complete: {imported} imported, {skipped} skipped, {updated} updated")
 
 
 if __name__ == "__main__":
