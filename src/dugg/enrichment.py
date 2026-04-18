@@ -71,6 +71,39 @@ def validate_url(url: str) -> tuple[bool, str]:
     return True, "ok"
 
 
+# ---------------------------------------------------------------------------
+# Canonical URL extractors for pasted content (email forwards, etc.)
+#
+# Each extractor is a (compiled_regex, group_index) tuple.  The regex runs
+# against the transcript body; the first match wins.  Add new platforms by
+# appending to the list — same extensibility model as the blocklist.
+# ---------------------------------------------------------------------------
+_CANONICAL_URL_EXTRACTORS: list[tuple[re.Pattern, int]] = [
+    # Substack — open.substack.com/pub/{slug}/p/{post-slug}
+    (re.compile(r"https?://open\.substack\.com/pub/[a-z0-9_-]+/p/[a-z0-9_-]+"), 0),
+    # Substack — www.{publication}.com/p/{post-slug} (custom domain posts)
+    (re.compile(r"https?://(?:www\.)?[a-z0-9-]+\.(?:substack\.com|com)/p/[a-z0-9_-]+"), 0),
+    # Beehiiv — links in email bodies
+    (re.compile(r"https?://(?:www\.)?[a-z0-9-]+\.beehiiv\.com/p/[a-z0-9_-]+"), 0),
+    # Ghost — /{slug}/ pattern on known Ghost hosts
+    (re.compile(r"https?://(?:www\.)?[a-z0-9-]+\.ghost\.io/[a-z0-9_-]+/?"), 0),
+]
+
+
+def extract_canonical_url(body: str) -> Optional[str]:
+    """Scan pasted body for a canonical article URL.
+
+    Returns the first match from _CANONICAL_URL_EXTRACTORS, cleaned of
+    tracking parameters, or None if nothing matches.
+    """
+    for pattern, group in _CANONICAL_URL_EXTRACTORS:
+        m = pattern.search(body)
+        if m:
+            url = m.group(group)
+            return sanitize_url(url)
+    return None
+
+
 def sanitize_url(url: str) -> str:
     """Strip tracking parameters from a URL to normalize for dedup."""
     try:

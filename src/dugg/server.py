@@ -1121,10 +1121,19 @@ def _handle_paste(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
         tag_source="human" if tags else "agent",
     )
 
+    # Try to extract a canonical URL from the body (e.g. Substack post link)
+    from dugg.enrichment import extract_canonical_url
+    canonical = extract_canonical_url(body)
+    if canonical:
+        d.update_resource(resource["id"], url=canonical)
+        resource["url"] = canonical
+
     word_count = len(body.split())
     summary = f"Pasted: {title}\n"
     summary += f"ID: {resource['id']}\n"
     summary += f"Type: {source_type}\n"
+    if canonical:
+        summary += f"URL: {canonical}\n"
     if source_label:
         summary += f"Source: {source_label}\n"
     summary += f"Content: {word_count} words\n"

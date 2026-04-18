@@ -869,7 +869,7 @@ class DuggDB:
         return result
 
     def update_resource(self, resource_id: str, **fields) -> Optional[dict]:
-        allowed = {"title", "description", "thumbnail", "source_type", "author", "transcript", "raw_metadata", "note", "enriched_at", "summary", "content_evicted"}
+        allowed = {"url", "title", "description", "thumbnail", "source_type", "author", "transcript", "raw_metadata", "note", "enriched_at", "summary", "content_evicted"}
         updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
         if not updates:
             return self.get_resource(resource_id)
