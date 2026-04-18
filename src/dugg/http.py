@@ -557,7 +557,14 @@ async function doSetup() {{
   .card .author {{ color: #a78bfa; }}
   .card-desc {{ font-size: 0.85rem; color: #999; margin: 0.5rem 0; line-height: 1.5;
                 display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }}
-  .card .note {{ font-size: 0.85rem; color: #aaa; margin-top: 0.3rem; }}
+  .card .note {{ font-size: 0.85rem; color: #aaa; margin-top: 0.5rem; padding: 0.6rem 0.8rem;
+                border-radius: 6px; border-left: 3px solid #333; background: #111; }}
+  .card .note-local-mine {{ border-left-color: #6366f1; background: rgba(99, 102, 241, 0.08); color: #c7c8ff; }}
+  .card .note-remote-mine {{ border-left-color: #3b82f6; background: rgba(59, 130, 246, 0.08); color: #93c5fd; }}
+  .card .note-other {{ border-left-color: #f59e0b; background: rgba(245, 158, 11, 0.06); color: #fcd34d; }}
+  .card .note.sibling {{ margin-top: 0.3rem; }}
+  .card .sib-who {{ font-weight: 600; margin-right: 0.3rem; }}
+  .card .sib-origin {{ font-size: 0.75rem; color: #666; }}
   .card-tags {{ display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.5rem; }}
   .tag {{ font-size: 0.7rem; color: #888; background: #222; border: 1px solid #333;
           border-radius: 3px; padding: 0.1rem 0.4rem; }}
@@ -565,11 +572,15 @@ async function doSetup() {{
                  font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }}
   .type-badge.yt {{ background: #dc2626; }}
   .type-badge.article {{ background: #2563eb; }}
-  .search-bar {{ margin-bottom: 1.5rem; display: flex; gap: 0.5rem; }}
-  .search-bar input {{ flex: 1; padding: 0.6rem 0.8rem; background: #111; border: 1px solid #333;
+  .search-bar {{ margin-bottom: 1.5rem; display: flex; gap: 0.5rem; position: relative; }}
+  .search-bar input {{ flex: 1; padding: 0.6rem 2.2rem 0.6rem 0.8rem; background: #111; border: 1px solid #333;
                        border-radius: 8px; color: #fff; font-size: 0.9rem; }}
   .search-bar input:focus {{ outline: none; border-color: #6366f1; }}
   .search-bar input::placeholder {{ color: #555; }}
+  .search-clear {{ position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+                   background: none; border: none; color: #555; font-size: 1.1rem; cursor: pointer;
+                   padding: 0 4px; line-height: 1; display: none; width: auto; }}
+  .search-clear:hover {{ color: #ccc; background: none; }}
   .empty {{ color: #666; text-align: center; padding: 2rem 0; }}
   .item-actions {{ margin-top: 0.4rem; display: flex; gap: 0.5rem; }}
   .action-btn {{ width: auto; padding: 0.2rem 0.5rem; font-size: 0.75rem; background: transparent;
@@ -1061,8 +1072,10 @@ async function doSetup() {{
                         who = _xml_escape(sn.get("submitter_name") or "someone")
                         origin = sn.get("source_server") or ""
                         origin_label = f' <span class="sib-origin">via {_xml_escape(origin)}</span>' if origin else ""
+                        sib_is_mine = sn.get("submitted_by") == user["id"]
+                        sib_class = "note sibling note-remote-mine" if sib_is_mine else "note sibling note-other"
                         sib_parts.append(
-                            f'<p class="note sibling"><span class="sib-who">{who}{origin_label}:</span> {_xml_escape(sn["note"])}</p>'
+                            f'<p class="{sib_class}"><span class="sib-who">{who}{origin_label}:</span> {_xml_escape(sn["note"])}</p>'
                         )
                     siblings_html = "".join(sib_parts)
                 # Submitter name
@@ -1080,10 +1093,17 @@ async function doSetup() {{
                 url = r["url"]
                 if url.startswith("dugg://content/"):
                     url = "/r/" + url.removeprefix("dugg://content/")
-                note_escaped = _xml_escape(r.get("note") or "")
-                note_display = f'<p class="note" id="note-{r["id"]}">{note_escaped}</p>' if r.get("note") else f'<p class="note" id="note-{r["id"]}" style="display:none;"></p>'
                 coll_id = r.get("collection_id", "")
                 source_srv = r.get("source_server") or ""
+                note_escaped = _xml_escape(r.get("note") or "")
+                # Note color: local-mine (indigo), remote-mine (blue), others (neutral)
+                is_mine = sub_id == user["id"]
+                is_local = not source_srv
+                if r.get("note"):
+                    note_class = "note note-local-mine" if is_mine and is_local else ("note note-remote-mine" if is_mine else "note note-other")
+                    note_display = f'<p class="{note_class}" id="note-{r["id"]}">{note_escaped}</p>'
+                else:
+                    note_display = f'<p class="note" id="note-{r["id"]}" style="display:none;"></p>'
                 # Thumbnail
                 thumb = r.get("thumbnail") or ""
                 thumb_html = f'<img src="{_xml_escape(thumb)}" alt="" class="card-thumb" loading="lazy">' if thumb else ""
@@ -1141,8 +1161,9 @@ async function doSetup() {{
         topic_html = f'<p class="topic">{page_topic}</p>' if page_topic else ""
         search_bar = """<div class="search-bar">
   <input type="text" id="feedSearch" placeholder="Search this feed... (searches full article text)" autocomplete="off">
-  <div id="searchStatus" style="font-size:0.75rem;color:#666;margin-top:0.3rem;display:none;"></div>
-</div>"""
+  <button class="search-clear" id="searchClear" title="Clear search">&times;</button>
+</div>
+<div id="searchStatus" style="font-size:0.75rem;color:#666;margin-top:-1rem;margin-bottom:1rem;display:none;"></div>"""
         feed_js = """
 <script>
 const API_KEY = window.location.pathname.split('/feed/')[1];
@@ -1150,14 +1171,26 @@ const BASE = window.location.origin;
 
 // Debounced server-side search for full-text queries
 let searchTimeout = null;
-document.getElementById('feedSearch').addEventListener('input', function() {
+const searchInput = document.getElementById('feedSearch');
+const clearBtn = document.getElementById('searchClear');
+
+function resetSearch() {
+  searchInput.value = '';
+  clearBtn.style.display = 'none';
+  clearTimeout(searchTimeout);
+  document.querySelectorAll('.card[data-url]').forEach(c => c.style.display = '');
+  document.getElementById('searchStatus').style.display = 'none';
+}
+
+clearBtn.addEventListener('click', resetSearch);
+
+searchInput.addEventListener('input', function() {
   const q = this.value.trim();
+  clearBtn.style.display = q ? 'block' : 'none';
   clearTimeout(searchTimeout);
 
   if (!q) {
-    // Reset: show all cards, hide status
-    document.querySelectorAll('.card[data-url]').forEach(c => c.style.display = '');
-    document.getElementById('searchStatus').style.display = 'none';
+    resetSearch();
     return;
   }
 
