@@ -10,6 +10,7 @@ Uses Starlette (already a transitive dep of mcp[sse]) and uvicorn.
 
 import asyncio
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 import json
@@ -32,6 +33,39 @@ from dugg.sync import start_sync_daemon
 from dugg.rss import start_rss_daemon
 
 logger = logging.getLogger("dugg.http")
+
+
+def _problem_response(status: int, detail: str, headers: dict | None = None, **extra) -> JSONResponse:
+    """Return an RFC 7807 Problem Details JSON response.
+
+    See https://www.rfc-editor.org/rfc/rfc7807
+    """
+    status_titles = {
+        400: "Bad Request",
+        401: "Unauthorized",
+        403: "Forbidden",
+        404: "Not Found",
+        410: "Gone",
+        429: "Too Many Requests",
+        500: "Internal Server Error",
+    }
+    body = {
+        "type": "about:blank",
+        "title": status_titles.get(status, "Error"),
+        "status": status,
+        "detail": detail,
+        **extra,
+    }
+    return JSONResponse(body, status_code=status, headers=headers,
+                        media_type="application/problem+json")
+
+
+def _seconds_until_utc_midnight() -> int:
+    """Seconds remaining until the next UTC midnight (rate limit reset)."""
+    now = datetime.now(timezone.utc)
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    midnight += timedelta(days=1)
+    return max(1, int((midnight - now).total_seconds()))
 
 
 def _xml_escape(s: str) -> str:
@@ -121,11 +155,11 @@ def create_app(db_path: Optional[Path] = None, mode: str = "local") -> Starlette
         """SSE connection endpoint — clients connect here to receive server events."""
         api_key = request.headers.get("x-dugg-key", "")
         if not api_key:
-            return JSONResponse({"error": "Missing X-Dugg-Key header"}, status_code=401)
+            return _problem_response(401, "Missing X-Dugg-Key header")
         d = get_db()
         user = d.get_user_by_api_key(api_key)
         if not user:
-            return JSONResponse({"error": "Invalid API key"}, status_code=401)
+            return _problem_response(401, "Invalid API key")
         d.mark_invite_onboarded(user["id"])
         async with sse_transport.connect_sse(
             request.scope, request.receive, request._send
@@ -166,22 +200,22 @@ def create_app(db_path: Optional[Path] = None, mode: str = "local") -> Starlette
         try:
             user = resolve_user_from_request(request)
         except ValueError as e:
-            return JSONResponse({"error": str(e)}, status_code=401)
+            return _problem_response(401, str(e))
 
         try:
             body = await request.body()
             payload = json.loads(body)
         except (json.JSONDecodeError, Exception):
-            return JSONResponse({"error": "Invalid JSON payload"}, status_code=400)
+            return _problem_response(400, "Invalid JSON payload")
 
         resource_data = payload.get("resource", {})
         source_instance_id = payload.get("source_instance_id", "")
         target = payload.get("target", "")
 
         if not resource_data.get("url"):
-            return JSONResponse({"error": "Missing resource.url"}, status_code=400)
+            return _problem_response(400, "Missing resource.url")
         if not source_instance_id:
-            return JSONResponse({"error": "Missing source_instance_id"}, status_code=400)
+            return _problem_response(400, "Missing source_instance_id")
 
         d = get_db()
 
@@ -200,7 +234,7 @@ def create_app(db_path: Optional[Path] = None, mode: str = "local") -> Starlette
 
         result = d.ingest_remote_publish(resource_data, source_instance_id, coll_id, source_server=source_server, submitted_by=submitter_id)
         if not result:
-            return JSONResponse({"error": "Ingest failed"}, status_code=500)
+            return _problem_response(500, "Ingest failed")
 
         if result["status"] == "duplicate":
             return JSONResponse({
@@ -232,24 +266,24 @@ def create_app(db_path: Optional[Path] = None, mode: str = "local") -> Starlette
         try:
             user = resolve_user_from_request(request)
         except ValueError as e:
-            return JSONResponse({"error": str(e)}, status_code=401)
+            return _problem_response(401, str(e))
 
         try:
             body = await request.body()
             payload = json.loads(body)
         except (json.JSONDecodeError, Exception):
-            return JSONResponse({"error": "Invalid JSON payload"}, status_code=400)
+            return _problem_response(400, "Invalid JSON payload")
 
         url = (payload.get("url") or "").strip()
         if not url:
-            return JSONResponse({"error": "Missing url"}, status_code=400)
+            return _problem_response(400, "Missing url")
 
         d = get_db()
 
         # Find the resource by URL across collections the user has access to
         accessible = d._accessible_collection_ids(user["id"])
         if not accessible:
-            return JSONResponse({"error": "No accessible collections"}, status_code=403)
+            return _problem_response(403, "No accessible collections")
 
         placeholders = ",".join("?" for _ in accessible)
         row = d.conn.execute(
@@ -258,7 +292,7 @@ def create_app(db_path: Optional[Path] = None, mode: str = "local") -> Starlette
         ).fetchone()
 
         if not row:
-            return JSONResponse({"error": "Resource not found"}, status_code=404)
+            return _problem_response(404, "Resource not found")
 
         resource = dict(row)
 
@@ -267,11 +301,11 @@ def create_app(db_path: Optional[Path] = None, mode: str = "local") -> Starlette
         is_owner = member and member["role"] == "owner"
         is_submitter = resource["submitted_by"] == user["id"]
         if not is_owner and not is_submitter:
-            return JSONResponse({"error": "Only the submitter or collection owner can delete"}, status_code=403)
+            return _problem_response(403, "Only the submitter or collection owner can delete")
 
         result = d.delete_resource(resource["id"], resource["collection_id"], user["id"])
         if result.get("error"):
-            return JSONResponse({"error": result["error"]}, status_code=500)
+            return _problem_response(500, result["error"])
 
         return JSONResponse({
             "status": "deleted",
@@ -301,12 +335,12 @@ def create_app(db_path: Optional[Path] = None, mode: str = "local") -> Starlette
         d = get_db()
         count = d.conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         if count > 0:
-            return JSONResponse({"error": "Database already has users — bootstrap is disabled"}, status_code=400)
+            return _problem_response(400, "Database already has users — bootstrap is disabled")
         try:
             body = await request.body()
             data = json.loads(body) if body else {}
         except json.JSONDecodeError:
-            return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+            return _problem_response(400, "Invalid JSON")
         name = data.get("name", "Admin")
         user = d.create_user(name)
         return JSONResponse({
@@ -320,7 +354,7 @@ def create_app(db_path: Optional[Path] = None, mode: str = "local") -> Starlette
         try:
             user = resolve_user_from_request(request)
         except ValueError as e:
-            return JSONResponse({"error": str(e)}, status_code=401)
+            return _problem_response(401, str(e))
         return JSONResponse({
             "status": "ok",
             "user": {"id": user["id"], "name": user["name"]},
@@ -329,7 +363,7 @@ def create_app(db_path: Optional[Path] = None, mode: str = "local") -> Starlette
     async def handle_setup_page(request: Request):
         """GET /setup — self-service key generation (local mode only)."""
         if server_mode != "local":
-            return JSONResponse({"error": "Setup is disabled in public mode"}, status_code=404)
+            return _problem_response(404, "Setup is disabled in public mode")
         d = get_db()
         server_url = d.get_config("server_url") or ""
         return HTMLResponse(f"""<!DOCTYPE html>
@@ -383,13 +417,13 @@ async function doSetup() {{
     async def handle_setup_submit(request: Request):
         """POST /setup — create a user (local mode only)."""
         if server_mode != "local":
-            return JSONResponse({"error": "Setup is disabled in public mode"}, status_code=404)
+            return _problem_response(404, "Setup is disabled in public mode")
         d = get_db()
         try:
             body = await request.body()
             data = json.loads(body) if body else {}
         except json.JSONDecodeError:
-            return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+            return _problem_response(400, "Invalid JSON")
         name = data.get("name", "User")
         user = d.create_user(name)
         return JSONResponse({
@@ -402,7 +436,7 @@ async function doSetup() {{
         try:
             user = resolve_user_from_request(request)
         except ValueError as e:
-            return JSONResponse({"error": str(e)}, status_code=401)
+            return _problem_response(401, str(e))
         d = get_db()
         instances = d.list_instances(user["id"])
         targets = [
@@ -428,7 +462,7 @@ async function doSetup() {{
         try:
             user = resolve_user_from_request(request)
         except ValueError as e:
-            return JSONResponse({"error": str(e)}, status_code=401)
+            return _problem_response(401, str(e))
 
         get_db().mark_invite_onboarded(user["id"])
 
@@ -436,7 +470,7 @@ async function doSetup() {{
             body = await request.body()
             args = json.loads(body) if body else {}
         except json.JSONDecodeError:
-            return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+            return _problem_response(400, "Invalid JSON")
 
         # Inject the API key so the tool handler resolves the same user
         args["api_key"] = request.headers.get("x-dugg-key", "")
@@ -448,6 +482,14 @@ async function doSetup() {{
             results = await call_tool(tool_name, args)
             texts = [r.text for r in results if hasattr(r, "text")]
             full_result = "\n".join(texts)
+
+            # RFC 6585: return 429 with Retry-After when rate-limited
+            if full_result.startswith("Rate limit exceeded"):
+                retry_after = _seconds_until_utc_midnight()
+                return _problem_response(
+                    429, full_result,
+                    headers={"Retry-After": str(retry_after)},
+                )
 
             # Compact mode: strip blank lines, truncate long fields
             format_mode = request.headers.get("x-dugg-format", "rich").lower()
@@ -461,7 +503,7 @@ async function doSetup() {{
                 "format": format_mode,
             })
         except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+            return _problem_response(500, str(e))
 
     # --- Invite & Feed (unauthenticated) ---
 
@@ -517,6 +559,11 @@ async function doSetup() {{
                  color: #fff; font-size: 0.85rem; font-family: inherit; min-height: 60px; resize: vertical; }}
   .edit-input:focus {{ outline: none; border-color: #6366f1; }}
   .edit-buttons {{ display: flex; gap: 0.5rem; margin-top: 0.3rem; }}
+  .sync-status {{ margin-bottom: 1rem; font-size: 0.85rem; color: #888; }}
+  .sync-status summary {{ cursor: pointer; display: flex; align-items: center; gap: 0.5rem; }}
+  .sync-status ul {{ margin: 0.5rem 0 0 1rem; padding: 0; list-style: none; }}
+  .sync-status li {{ color: #666; margin-bottom: 0.25rem; }}
+  .sync-btn {{ font-size: 0.7rem; padding: 0.15rem 0.4rem; }}
   .step {{ display: flex; gap: 1rem; margin-bottom: 1.25rem; }}
   .step-num {{ flex-shrink: 0; width: 28px; height: 28px; background: #6366f1; color: #fff;
                border-radius: 50%; display: flex; align-items: center; justify-content: center;
@@ -542,14 +589,14 @@ async function doSetup() {{
         if not invite:
             accept = request.headers.get("accept", "")
             if "application/json" in accept:
-                return JSONResponse({"error": "Invalid invite token"}, status_code=404)
+                return _problem_response(404, "Invalid invite token")
             return HTMLResponse(_html_page("Invalid Invite", "<h1>Invalid invite</h1><p>This invite link is not valid.</p>"), status_code=404)
 
         if invite.get("redeemed_by"):
             if invite.get("onboarded_at"):
                 accept = request.headers.get("accept", "")
                 if "application/json" in accept:
-                    return JSONResponse({"error": "This invite has already been redeemed"}, status_code=410)
+                    return _problem_response(410, "This invite has already been redeemed")
                 return HTMLResponse(_html_page("Already Redeemed", "<h1>Already redeemed</h1><p>This invite has already been used.</p>"), status_code=410)
             # Not yet onboarded — show welcome page with keys so they can retrieve them
             user = d.get_user(invite["redeemed_by"])
@@ -558,7 +605,7 @@ async function doSetup() {{
             if not user or not agent:
                 accept = request.headers.get("accept", "")
                 if "application/json" in accept:
-                    return JSONResponse({"error": "This invite has already been redeemed"}, status_code=410)
+                    return _problem_response(410, "This invite has already been redeemed")
                 return HTMLResponse(_html_page("Already Redeemed", "<h1>Already redeemed</h1><p>This invite has already been used.</p>"), status_code=410)
             inviter = d.get_user(invite["created_by"])
             instance = d.get_instance_for_owner(invite["created_by"])
@@ -598,7 +645,7 @@ async function doSetup() {{
         if datetime.fromisoformat(invite["expires_at"]) < datetime.now(timezone.utc):
             accept = request.headers.get("accept", "")
             if "application/json" in accept:
-                return JSONResponse({"error": "This invite has expired"}, status_code=410)
+                return _problem_response(410, "This invite has expired")
             return HTMLResponse(_html_page("Expired Invite", "<h1>Invite expired</h1><p>This invite link has expired. Ask for a new one.</p>"), status_code=410)
 
         inviter = d.get_user(invite["created_by"])
@@ -678,7 +725,7 @@ async function doSetup() {{
 
         if not result:
             if "application/json" in content_type:
-                return JSONResponse({"error": "Invalid, expired, or already-redeemed invite token"}, status_code=400)
+                return _problem_response(400, "Invalid, expired, or already-redeemed invite token")
             return HTMLResponse(_html_page("Error", '<h1>Could not redeem</h1><p class="error">This invite is invalid, expired, or already used.</p>'), status_code=400)
 
         user = result["user"]
@@ -956,12 +1003,21 @@ async function doSetup() {{
   <updated>{r['created_at']}</updated>{published_xml}{author_xml}{categories_xml}
   <summary>{_xml_escape(content)}</summary>
 </entry>\n"""
+            # RFC 8288: self-referencing Link header + Atom <link rel="self">
+            feed_path = f"/feed/{api_key}"
+            self_url = f"{srv_url.rstrip('/')}{feed_path}" if srv_url else feed_path
             atom = f"""<?xml version="1.0" encoding="utf-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom" xmlns:at="http://purl.org/atompub/tombstones/1.0">
   <title>{_xml_escape(page_title)}</title>
+  <link rel="self" type="application/atom+xml" href="{_xml_escape(self_url)}"/>
   <updated>{feed[0]['created_at'] if feed else ''}</updated>
 {tombstones_xml}{entries}</feed>"""
-            return HTMLResponse(atom, media_type="application/atom+xml")
+            link_header = f'<{self_url}>; rel="self"; type="application/atom+xml"'
+            return HTMLResponse(
+                atom,
+                media_type="application/atom+xml",
+                headers={"Link": link_header},
+            )
 
         # HTML feed view
         if not feed:
@@ -1003,6 +1059,25 @@ async function doSetup() {{
     <button class="action-btn delete-btn" onclick="deleteItem('{r["id"]}')">delete</button>
   </div>
 </div>\n"""
+
+        # RSS subscription status
+        subs = d.list_rss_subscriptions(user["id"])
+        sync_html = ""
+        if subs:
+            sync_items = ""
+            for s in subs:
+                feed_title = s.get("feed_title") or s["feed_url"]
+                last_polled = s.get("last_polled_at") or "never"
+                if last_polled != "never":
+                    last_polled = _short_date(last_polled)
+                enabled = "active" if s.get("enabled") else "paused"
+                sync_items += f'<li>{_xml_escape(feed_title)} · last synced: {last_polled} · {enabled}</li>'
+            sync_html = f"""<div class="sync-status">
+  <details>
+    <summary>Subscriptions ({len(subs)}) <button class="action-btn sync-btn" onclick="syncNow(event)">Sync now</button></summary>
+    <ul>{sync_items}</ul>
+  </details>
+</div>"""
 
         topic_html = f'<p class="topic">{page_topic}</p>' if page_topic else ""
         feed_js = """
@@ -1071,12 +1146,45 @@ async function deleteItem(id) {
     setTimeout(() => item.remove(), 300);
   } catch (e) { alert('Error: ' + e.message); }
 }
+
+async function syncNow(e) {
+  e.preventDefault();
+  e.stopPropagation();
+  const btn = e.target;
+  btn.textContent = 'syncing...';
+  btn.disabled = true;
+  try {
+    const res = await fetch(BASE + '/tools/dugg_rss_poll', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Dugg-Key': API_KEY },
+      body: JSON.stringify({}),
+    });
+    if (res.ok) {
+      btn.textContent = 'done!';
+      setTimeout(() => window.location.reload(), 1000);
+    } else {
+      btn.textContent = 'failed';
+      setTimeout(() => { btn.textContent = 'Sync now'; btn.disabled = false; }, 2000);
+    }
+  } catch (err) {
+    btn.textContent = 'error';
+    setTimeout(() => { btn.textContent = 'Sync now'; btn.disabled = false; }, 2000);
+  }
+}
 </script>"""
         body = f"""<h1>{page_title}</h1>
+{sync_html}
 {topic_html}
 {items_html}
 {feed_js}"""
-        return HTMLResponse(_html_page(page_title, body))
+        # RFC 8288: Link header pointing to Atom alternate
+        srv_url = d.get_config("server_url", "")
+        feed_path = f"/feed/{api_key}"
+        atom_url = f"{srv_url.rstrip('/')}{feed_path}" if srv_url else feed_path
+        return HTMLResponse(
+            _html_page(page_title, body),
+            headers={"Link": f'<{atom_url}>; rel="alternate"; type="application/atom+xml"'},
+        )
 
     # --- Key Rotation ---
 
@@ -1088,7 +1196,7 @@ async function deleteItem(id) {
         try:
             user = resolve_user_from_request(request)
         except ValueError as e:
-            return JSONResponse({"error": str(e)}, status_code=401)
+            return _problem_response(401, str(e))
         d = get_db()
         new_key = d.rotate_api_key(user["id"])
         return JSONResponse({"api_key": new_key, "user_id": user["id"]})
@@ -1295,7 +1403,7 @@ async function deleteItem(id) {
 
         if not result:
             if "application/json" in content_type:
-                return JSONResponse({"error": "Cannot appeal — you may not be banned in this collection"}, status_code=400)
+                return _problem_response(400, "Cannot appeal — you may not be banned in this collection")
             return HTMLResponse(_html_page("Cannot Appeal", '<h1>Cannot appeal</h1><p class="error">You can only appeal if you are currently banned.</p>'), status_code=400)
 
         if "application/json" in content_type:
@@ -1313,7 +1421,7 @@ async function deleteItem(id) {
         user = d.get_user_by_api_key(api_key)
 
         if not user:
-            return JSONResponse({"error": "Invalid key"}, status_code=404)
+            return _problem_response(404, "Invalid key")
 
         rows = d.conn.execute(
             """SELECT cm.collection_id, cm.status, c.name
@@ -1339,7 +1447,7 @@ async function deleteItem(id) {
         try:
             user = resolve_user_from_request(request)
         except ValueError as e:
-            return JSONResponse({"error": str(e)}, status_code=401)
+            return _problem_response(401, str(e))
 
         from starlette.responses import StreamingResponse
 
