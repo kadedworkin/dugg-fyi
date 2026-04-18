@@ -3,6 +3,8 @@
 import json
 import logging
 import re
+import shutil
+import sys
 from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
@@ -11,6 +13,17 @@ import httpx
 from bs4 import BeautifulSoup
 
 logger = logging.getLogger("dugg.enrichment")
+
+
+def _yt_dlp_path() -> str:
+    """Resolve yt-dlp binary path, preferring the current venv's bin/."""
+    venv_bin = Path(sys.executable).parent / "yt-dlp"
+    if venv_bin.is_file():
+        return str(venv_bin)
+    system = shutil.which("yt-dlp")
+    if system:
+        return system
+    raise FileNotFoundError("yt-dlp not found in venv or on PATH")
 
 # Tracking parameters to strip during URL sanitization
 _TRACKING_PARAMS = {
@@ -343,10 +356,16 @@ async def fetch_youtube_transcript(video_id: str) -> str:
     import tempfile
     from pathlib import Path
 
+    try:
+        ytdlp = _yt_dlp_path()
+    except FileNotFoundError:
+        logger.warning("yt-dlp not found — skipping transcript for %s", video_id)
+        return ""
+
     with tempfile.TemporaryDirectory() as tmpdir:
         output_path = Path(tmpdir) / "subs"
         cmd = [
-            "yt-dlp",
+            ytdlp,
             "--skip-download",
             "--write-auto-sub",
             "--sub-lang", "en",
@@ -361,7 +380,8 @@ async def fetch_youtube_transcript(video_id: str) -> str:
                 stderr=asyncio.subprocess.PIPE,
             )
             await asyncio.wait_for(proc.communicate(), timeout=60)
-        except (asyncio.TimeoutError, FileNotFoundError):
+        except asyncio.TimeoutError:
+            logger.warning("yt-dlp transcript timed out for %s", video_id)
             return ""
 
         # Find the generated subtitle file
@@ -400,8 +420,14 @@ async def fetch_youtube_description(video_id: str) -> str:
     """Fetch YouTube video description using yt-dlp."""
     import asyncio
 
+    try:
+        ytdlp = _yt_dlp_path()
+    except FileNotFoundError:
+        logger.warning("yt-dlp not found — skipping description for %s", video_id)
+        return ""
+
     cmd = [
-        "yt-dlp",
+        ytdlp,
         "--skip-download",
         "--print", "description",
         f"https://www.youtube.com/watch?v={video_id}",
@@ -414,7 +440,8 @@ async def fetch_youtube_description(video_id: str) -> str:
         )
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
         return stdout.decode("utf-8", errors="replace").strip()
-    except (asyncio.TimeoutError, FileNotFoundError):
+    except asyncio.TimeoutError:
+        logger.warning("yt-dlp description timed out for %s", video_id)
         return ""
 
 
