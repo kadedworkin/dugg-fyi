@@ -252,6 +252,7 @@ def ingest_entry(
     submitted_by: str,
     source_label: str = "",
     tag_label: str = "rss",
+    source_server: str = "",
 ) -> dict:
     """Add a single feed entry to Dugg as a resource."""
     raw_metadata = {
@@ -270,7 +271,7 @@ def ingest_entry(
         if cat.lower() not in {t.lower() for t in tags}:
             tags.append(cat)
 
-    return db.add_resource(
+    result = db.add_resource(
         url=entry.url,
         collection_id=collection_id,
         submitted_by=submitted_by,
@@ -283,6 +284,14 @@ def ingest_entry(
         tag_source="agent",
         created_at=entry.updated_at,
     )
+    # Track where this resource was synced from
+    if source_server and result.get("status") != "sibling_note_added":
+        db.conn.execute(
+            "UPDATE resources SET source_server = ? WHERE id = ?",
+            (source_server, result["id"]),
+        )
+        db.conn.commit()
+    return result
 
 
 async def sync_feed(
@@ -326,6 +335,11 @@ async def sync_feed(
             logger.info(f"RSS tombstone: removed {tomb.url} (ref={tomb.ref})")
 
     tag_label = subscription.get("tag_label") or "rss"
+    # Derive source server URL from feed URL (e.g. https://server.com/feed/key → https://server.com)
+    from urllib.parse import urlparse as _urlparse
+    _parsed_feed = _urlparse(subscription["feed_url"])
+    _source_server = f"{_parsed_feed.scheme}://{_parsed_feed.netloc}" if _parsed_feed.scheme else ""
+
     new_count = 0
     skipped = 0
     for entry in entries:
@@ -339,6 +353,7 @@ async def sync_feed(
             submitted_by=subscription["user_id"],
             source_label=source_label or meta.get("feed_title", ""),
             tag_label=tag_label,
+            source_server=_source_server,
         )
         seen.append(entry.entry_id)
         seen_set.add(entry.entry_id)

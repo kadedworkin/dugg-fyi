@@ -18,6 +18,9 @@ import logging
 import os
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
+
+import httpx
 
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
@@ -554,6 +557,8 @@ async function doSetup() {{
   .delete-btn:hover {{ color: #f87171; border-color: #7f1d1d; }}
   .save-btn {{ color: #4ade80; border-color: #166534; }}
   .save-btn:hover {{ background: #052e16; }}
+  .publish-btn {{ color: #60a5fa; border-color: #1e3a5f; }}
+  .publish-btn:hover {{ background: #0c1f3a; }}
   .edit-form {{ margin-top: 0.4rem; }}
   .edit-input {{ width: 100%; padding: 0.5rem; background: #111; border: 1px solid #444; border-radius: 6px;
                  color: #fff; font-size: 0.85rem; font-family: inherit; min-height: 60px; resize: vertical; }}
@@ -1049,7 +1054,8 @@ async function doSetup() {{
                 note_escaped = _xml_escape(r.get("note") or "")
                 note_display = f'<p class="note" id="note-{r["id"]}">{note_escaped}</p>' if r.get("note") else f'<p class="note" id="note-{r["id"]}" style="display:none;"></p>'
                 coll_id = r.get("collection_id", "")
-                items_html += f"""<div class="feed-item" id="item-{r["id"]}" data-collection="{coll_id}">
+                source_srv = r.get("source_server") or ""
+                items_html += f"""<div class="feed-item" id="item-{r["id"]}" data-collection="{coll_id}" data-source-server="{_xml_escape(source_srv)}">
   <h3><a href="{url}" target="_blank" rel="noopener">{title}</a></h3>
   <p class="meta">{added_date}{pub_html}{author_html}</p>
   {note_display}
@@ -1089,12 +1095,17 @@ function editNote(id) {
   const noteEl = document.getElementById('note-' + id);
   const current = noteEl.textContent || '';
   const actionsEl = noteEl.parentElement.querySelector('.item-actions');
+  const sourceServer = document.getElementById('item-' + id).dataset.sourceServer || '';
   // Replace note with textarea
   const editor = document.createElement('div');
   editor.className = 'edit-form';
+  const publishBtn = sourceServer
+    ? `<button class="action-btn publish-btn" onclick="publishNote('${id}')">publish</button>`
+    : '';
   editor.innerHTML = `<textarea class="edit-input" id="edit-${id}">${current}</textarea>
     <div class="edit-buttons">
       <button class="action-btn save-btn" onclick="saveNote('${id}')">save</button>
+      ${publishBtn}
       <button class="action-btn" onclick="cancelEdit('${id}', '${current.replace(/'/g, "\\\\'")}')">cancel</button>
     </div>`;
   noteEl.style.display = 'none';
@@ -1128,6 +1139,34 @@ async function saveNote(id) {
     if (form) form.remove();
     document.querySelector('#item-' + id + ' .item-actions').style.display = '';
   } catch (e) { alert('Error: ' + e.message); }
+}
+
+async function publishNote(id) {
+  const textarea = document.getElementById('edit-' + id);
+  const note = textarea.value.trim();
+  if (!note) { alert('Write a note before publishing'); return; }
+  // Save locally first, then publish upstream
+  await saveNote(id);
+  const btn = document.querySelector('#item-' + id + ' .publish-btn');
+  if (btn) { btn.textContent = 'publishing...'; btn.disabled = true; }
+  try {
+    const res = await fetch(BASE + '/publish-note/' + API_KEY, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ resource_id: id, note: note }),
+    });
+    if (res.ok) {
+      if (btn) btn.textContent = 'published!';
+      setTimeout(() => { if (btn) { btn.textContent = 'publish'; btn.disabled = false; } }, 2000);
+    } else {
+      const data = await res.json().catch(() => ({}));
+      alert('Publish failed: ' + (data.error || res.status));
+      if (btn) { btn.textContent = 'publish'; btn.disabled = false; }
+    }
+  } catch (e) {
+    alert('Publish error: ' + e.message);
+    if (btn) { btn.textContent = 'publish'; btn.disabled = false; }
+  }
 }
 
 async function deleteItem(id) {
@@ -1185,6 +1224,89 @@ async function syncNow(e) {
             _html_page(page_title, body),
             headers={"Link": f'<{atom_url}>; rel="alternate"; type="application/atom+xml"'},
         )
+
+    # --- Note Publishing (upstream federation) ---
+
+    async def handle_publish_note(request: Request):
+        """POST /publish-note/{key} — push a local note upstream to its source server.
+
+        Body: {"resource_id": "...", "note": "..."}
+        The resource must have a source_server set (i.e. it came from an RSS sync).
+        The user's API key for that server is extracted from their RSS subscription
+        feed URL. The note is POSTed to the source server's /tools/dugg_add endpoint,
+        which will attach it as a sibling note via the URL collision path.
+        """
+        api_key = request.path_params["key"]
+        d = get_db()
+        user = d.get_user_by_api_key(api_key)
+        if not user:
+            return JSONResponse({"error": "Invalid key"}, status_code=401)
+
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+        resource_id = (body.get("resource_id") or "").strip()
+        note = (body.get("note") or "").strip()
+        if not resource_id or not note:
+            return JSONResponse({"error": "resource_id and note are required"}, status_code=400)
+
+        resource = d.get_resource(resource_id)
+        if not resource:
+            return JSONResponse({"error": "Resource not found"}, status_code=404)
+
+        source_server = (resource.get("source_server") or "").strip()
+        if not source_server:
+            return JSONResponse({"error": "Resource has no source server — cannot publish upstream"}, status_code=400)
+
+        # Find the user's RSS subscription for this source server to extract their remote API key
+        subs = d.list_rss_subscriptions(user["id"])
+        remote_key = ""
+        for sub in subs:
+            feed_url = sub.get("feed_url", "")
+            parsed = urlparse(feed_url)
+            sub_origin = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme else ""
+            if sub_origin == source_server:
+                # Extract API key from feed URL path: /feed/{key}
+                path_parts = parsed.path.strip("/").split("/")
+                if len(path_parts) >= 2 and path_parts[0] == "feed":
+                    remote_key = path_parts[1]
+                    break
+
+        if not remote_key:
+            return JSONResponse({"error": f"No subscription found for {source_server} — cannot authenticate"}, status_code=400)
+
+        # Resolve the resource URL for the upstream server
+        url = resource["url"]
+        if url.startswith("dugg://content/"):
+            # Local-only content can't be published by URL match — skip
+            return JSONResponse({"error": "Cannot publish notes on local-only content (no external URL)"}, status_code=400)
+
+        # POST to the source server's dugg_add — the collision path will attach the note as a sibling
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post(
+                    f"{source_server.rstrip('/')}/tools/dugg_add",
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-Dugg-Key": remote_key,
+                    },
+                    json={
+                        "url": url,
+                        "note": note,
+                        "title": resource.get("title", ""),
+                    },
+                )
+            if resp.status_code >= 400:
+                logger.warning(f"Publish note failed: {source_server} returned {resp.status_code}")
+                return JSONResponse({"error": f"Upstream server returned {resp.status_code}"}, status_code=502)
+        except (httpx.HTTPError, httpx.TimeoutException) as e:
+            logger.warning(f"Publish note failed: {e}")
+            return JSONResponse({"error": f"Could not reach {source_server}"}, status_code=502)
+
+        logger.info(f"Published note upstream to {source_server} for resource {resource_id}")
+        return JSONResponse({"status": "published", "source_server": source_server})
 
     # --- Key Rotation ---
 
@@ -2069,6 +2191,7 @@ async function syncNow(e) {
         Route("/appeal/{key}/status", endpoint=handle_appeal_status),
         Route("/r/{resource_id}", endpoint=handle_resource_page),
         Route("/r/{resource_id}/unlock", endpoint=handle_resource_unlock, methods=["POST"]),
+        Route("/publish-note/{key}", endpoint=handle_publish_note, methods=["POST"]),
         Route("/rotate-key", endpoint=handle_rotate_key, methods=["POST"]),
         Route("/events/stream", endpoint=handle_events_stream),
         Route("/tools/{tool_name}", endpoint=handle_tools, methods=["POST"]),

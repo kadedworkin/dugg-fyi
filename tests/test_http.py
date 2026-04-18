@@ -86,7 +86,7 @@ def test_ingest_missing_url(client):
         "source_instance_id": "remote1",
     }, headers={"X-Dugg-Key": user["api_key"]})
     assert resp.status_code == 400
-    assert "url" in resp.json()["error"].lower()
+    assert "url" in resp.json()["detail"].lower()
 
 
 def test_ingest_missing_source_instance(client):
@@ -95,7 +95,7 @@ def test_ingest_missing_source_instance(client):
         "resource": {"url": "https://example.com/article"},
     }, headers={"X-Dugg-Key": user["api_key"]})
     assert resp.status_code == 400
-    assert "source_instance_id" in resp.json()["error"]
+    assert "source_instance_id" in resp.json()["detail"]
 
 
 def test_ingest_success(client):
@@ -337,7 +337,7 @@ def test_invite_page_invalid_token_json(client):
     resp = c.get("/invite/nonexistent-token", headers={"Accept": "application/json"})
     assert resp.status_code == 404
     data = resp.json()
-    assert data["error"] == "Invalid invite token"
+    assert data["detail"] == "Invalid invite token"
 
 
 def test_invite_page_html(client):
@@ -436,7 +436,7 @@ def test_invite_redeem_already_used_json(client):
                   headers={"Content-Type": "application/json"})
     assert resp.status_code == 400
     data = resp.json()
-    assert "error" in data
+    assert "detail" in data
 
 
 def test_invite_expired_token(client):
@@ -582,7 +582,7 @@ def test_bootstrap_fails_when_users_exist(client):
     c, user = client
     resp = c.post("/bootstrap", json={"name": "Intruder"})
     assert resp.status_code == 400
-    assert "already has users" in resp.json()["error"]
+    assert "already has users" in resp.json()["detail"]
 
 
 # --- Rotate Key ---

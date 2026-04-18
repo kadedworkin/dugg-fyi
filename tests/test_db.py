@@ -1865,6 +1865,99 @@ def test_prune_inactive_members(db):
     assert status["status"] == "banned"
 
 
+def test_subscribers_excluded_from_inactive_pruning(db):
+    """Subscribers should never be flagged as inactive — they can't post or react by design."""
+    from datetime import datetime, timezone, timedelta
+    kade = db.create_user("Kade")
+    sub = db.create_user("Subscriber")
+    coll = db.create_collection("Shared", kade["id"], visibility="shared")
+    db.invite_member(coll["id"], kade["id"], sub["id"])
+    # Mark as subscriber and expire grace period
+    expired = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    db.conn.execute(
+        "UPDATE collection_members SET member_type = 'subscriber', grace_expires_at = ? WHERE collection_id = ? AND user_id = ?",
+        (expired, coll["id"], sub["id"]),
+    )
+    db.conn.commit()
+    # Subscriber has zero submissions and zero reactions — but should NOT appear
+    inactive = db.get_inactive_members(coll["id"])
+    assert all(m["user_id"] != sub["id"] for m in inactive)
+
+
+def test_subscribers_excluded_from_stale_pruning(db):
+    """Subscribers should never be flagged as stale even with old last_seen_at."""
+    from datetime import datetime, timezone, timedelta
+    kade = db.create_user("Kade")
+    sub = db.create_user("Subscriber")
+    coll = db.create_collection("Shared", kade["id"], visibility="shared")
+    db.invite_member(coll["id"], kade["id"], sub["id"])
+    # Mark as subscriber with very old last_seen_at
+    old_date = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
+    db.conn.execute(
+        "UPDATE collection_members SET member_type = 'subscriber', last_seen_at = ? WHERE collection_id = ? AND user_id = ?",
+        (old_date, coll["id"], sub["id"]),
+    )
+    db.conn.commit()
+    stale = db.get_stale_members()
+    stale_ids = [m["user_id"] for m in stale]
+    assert sub["id"] not in stale_ids
+
+
+def test_stale_members_respects_instance_stale_days(db):
+    """get_stale_members should use the instance's pruning_stale_days instead of the hardcoded 60."""
+    from datetime import datetime, timezone, timedelta
+    kade = db.create_user("Kade")
+    rocco = db.create_user("Rocco")
+    coll = db.create_collection("Shared", kade["id"], visibility="shared")
+    db.invite_member(coll["id"], kade["id"], rocco["id"])
+    inst = db.create_instance("TestInst", kade["id"])
+    # Set stale timeout to 180 days
+    db.update_instance(inst["id"], kade["id"], pruning_stale_days=180)
+    # Rocco last seen 90 days ago — stale under default 60, but NOT under 180
+    old_date = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
+    db.conn.execute(
+        "UPDATE collection_members SET last_seen_at = ? WHERE collection_id = ? AND user_id = ?",
+        (old_date, coll["id"], rocco["id"]),
+    )
+    db.conn.commit()
+    stale = db.get_stale_members()
+    stale_ids = [m["user_id"] for m in stale]
+    assert rocco["id"] not in stale_ids
+
+
+def test_stale_members_minus_one_disables(db):
+    """pruning_stale_days=-1 should prevent any stale pruning for that instance."""
+    from datetime import datetime, timezone, timedelta
+    kade = db.create_user("Kade")
+    rocco = db.create_user("Rocco")
+    coll = db.create_collection("Shared", kade["id"], visibility="shared")
+    db.invite_member(coll["id"], kade["id"], rocco["id"])
+    inst = db.create_instance("TestInst", kade["id"])
+    db.update_instance(inst["id"], kade["id"], pruning_stale_days=-1)
+    # Rocco last seen 365 days ago — should still NOT be flagged
+    old_date = (datetime.now(timezone.utc) - timedelta(days=365)).isoformat()
+    db.conn.execute(
+        "UPDATE collection_members SET last_seen_at = ? WHERE collection_id = ? AND user_id = ?",
+        (old_date, coll["id"], rocco["id"]),
+    )
+    db.conn.commit()
+    stale = db.get_stale_members()
+    stale_ids = [m["user_id"] for m in stale]
+    assert rocco["id"] not in stale_ids
+
+
+def test_instance_policy_includes_stale_days(db):
+    """get_instance_policy should include pruning_stale_days."""
+    kade = db.create_user("Kade")
+    inst = db.create_instance("TestInst", kade["id"])
+    policy = db.get_instance_policy(inst["id"])
+    assert "pruning_stale_days" in policy
+    assert policy["pruning_stale_days"] == 60  # default
+    db.update_instance(inst["id"], kade["id"], pruning_stale_days=-1)
+    policy = db.get_instance_policy(inst["id"])
+    assert policy["pruning_stale_days"] == -1
+
+
 def test_ban_with_purge(db):
     """Ban with purge=True deletes all resources submitted by the banned user."""
     kade = db.create_user("Kade")
