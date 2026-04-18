@@ -1389,6 +1389,23 @@ class DuggDB:
         self.conn.commit()
         return {"deleted": info["id"], "url": info["url"], "title": info.get("title", "")}
 
+    def get_upstream_delete_targets(self, resource_id: str) -> list[dict]:
+        """Get remote server details for a published resource, for upstream delete propagation.
+
+        Returns list of dicts with endpoint_url, ingest_api_key, instance_name
+        for each remote server this resource was published to. Empty list if the
+        resource was never published (e.g. RSS-pulled content).
+        """
+        rows = self.conn.execute(
+            """SELECT DISTINCT di.endpoint_url, di.ingest_api_key, di.name as instance_name, di.id as instance_id
+               FROM publish_targets pt
+               JOIN publish_queue pq ON pq.resource_id = pt.resource_id AND pq.target_name = pt.target
+               JOIN dugg_instances di ON pq.target_instance_id = di.id
+               WHERE pt.resource_id = ? AND di.endpoint_url != '' AND di.endpoint_url IS NOT NULL""",
+            (resource_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def get_publish_targets(self, resource_id: str) -> list[dict]:
         """Get all publish targets for a resource."""
         rows = self.conn.execute(

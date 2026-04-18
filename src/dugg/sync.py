@@ -93,6 +93,38 @@ async def deliver_publish(db, queue_entry: dict) -> bool:
         return False
 
 
+async def deliver_upstream_delete(endpoint_url: str, api_key: str, url: str, source_instance_id: str = "") -> bool:
+    """POST a delete request to a remote Dugg server.
+
+    Mirrors the /ingest→/delete CRUD symmetry. Called when a user deletes
+    a resource locally that was previously published to a remote server.
+    Returns True on success, False on failure.
+    """
+    if not HAS_HTTPX:
+        logger.warning("httpx not installed — cannot deliver upstream delete")
+        return False
+
+    try:
+        delete_url = urljoin(endpoint_url.rstrip("/") + "/", "delete")
+        headers = {}
+        if api_key:
+            headers["X-Dugg-Key"] = api_key
+        payload = {"url": url}
+        if source_instance_id:
+            payload["source_instance_id"] = source_instance_id
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(delete_url, json=payload, headers=headers)
+            if response.status_code == 404:
+                logger.info(f"Upstream delete: {url} not found on {endpoint_url} (already removed)")
+                return True
+            response.raise_for_status()
+        logger.info(f"Upstream delete delivered: {url} → {endpoint_url}")
+        return True
+    except Exception as e:
+        logger.warning(f"Upstream delete failed for {url} → {endpoint_url}: {e}")
+        return False
+
+
 async def deliver_webhook(db, webhook: dict, event: dict) -> bool:
     """Deliver an event to a webhook subscriber.
 

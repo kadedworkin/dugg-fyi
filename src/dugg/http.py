@@ -216,6 +216,70 @@ def create_app(db_path: Optional[Path] = None, mode: str = "local") -> Starlette
             "source_instance_id": source_instance_id,
         }, status_code=201)
 
+    async def handle_delete(request: Request):
+        """POST /delete — remove a published resource by URL.
+
+        Mirrors /ingest for CRUD symmetry. Accepts:
+        {
+            "url": "https://...",
+            "source_instance_id": "..."
+        }
+
+        Looks up the resource by URL, verifies the requesting user submitted it
+        (or is a collection owner), and deletes it. Records a tombstone for
+        Atom feed propagation.
+        """
+        try:
+            user = resolve_user_from_request(request)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=401)
+
+        try:
+            body = await request.body()
+            payload = json.loads(body)
+        except (json.JSONDecodeError, Exception):
+            return JSONResponse({"error": "Invalid JSON payload"}, status_code=400)
+
+        url = (payload.get("url") or "").strip()
+        if not url:
+            return JSONResponse({"error": "Missing url"}, status_code=400)
+
+        d = get_db()
+
+        # Find the resource by URL across collections the user has access to
+        accessible = d._accessible_collection_ids(user["id"])
+        if not accessible:
+            return JSONResponse({"error": "No accessible collections"}, status_code=403)
+
+        placeholders = ",".join("?" for _ in accessible)
+        row = d.conn.execute(
+            f"SELECT id, collection_id, submitted_by, title FROM resources WHERE url = ? AND collection_id IN ({placeholders})",
+            [url] + accessible,
+        ).fetchone()
+
+        if not row:
+            return JSONResponse({"error": "Resource not found"}, status_code=404)
+
+        resource = dict(row)
+
+        # Authorization: submitter can delete their own, collection owner can delete any
+        member = d.get_member_status(resource["collection_id"], user["id"])
+        is_owner = member and member["role"] == "owner"
+        is_submitter = resource["submitted_by"] == user["id"]
+        if not is_owner and not is_submitter:
+            return JSONResponse({"error": "Only the submitter or collection owner can delete"}, status_code=403)
+
+        result = d.delete_resource(resource["id"], resource["collection_id"], user["id"])
+        if result.get("error"):
+            return JSONResponse({"error": result["error"]}, status_code=500)
+
+        return JSONResponse({
+            "status": "deleted",
+            "id": resource["id"],
+            "url": url,
+            "title": resource.get("title", ""),
+        }, status_code=200)
+
     async def handle_health(request: Request):
         """GET /health — liveness check."""
         d = get_db()
@@ -1880,6 +1944,7 @@ async function deleteItem(id) {
         Route("/sse", endpoint=handle_sse),
         Route("/messages", endpoint=handle_messages, methods=["POST"]),
         Route("/ingest", endpoint=handle_ingest, methods=["POST"]),
+        Route("/delete", endpoint=handle_delete, methods=["POST"]),
         Route("/health", endpoint=handle_health),
         Route("/whoami", endpoint=handle_whoami),
         Route("/instances", endpoint=handle_instances),

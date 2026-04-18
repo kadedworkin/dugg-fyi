@@ -167,6 +167,56 @@ def test_ingest_invalid_json(client):
     assert resp.status_code == 400
 
 
+# --- Delete endpoint ---
+
+def test_delete_requires_auth(client):
+    c, user = client
+    resp = c.post("/delete", json={"url": "https://example.com/x"})
+    assert resp.status_code == 401
+
+
+def test_delete_missing_url(client):
+    c, user = client
+    resp = c.post("/delete", json={},
+                  headers={"X-Dugg-Key": user["api_key"]})
+    assert resp.status_code == 400
+
+
+def test_delete_not_found(client):
+    c, user = client
+    headers = {"X-Dugg-Key": user["api_key"]}
+    # Ingest something first to establish collection membership
+    c.post("/ingest", json={
+        "resource": {"url": "https://example.com/setup", "title": "Setup"},
+        "source_instance_id": "remote1",
+    }, headers=headers)
+    resp = c.post("/delete", json={"url": "https://example.com/nonexistent"},
+                  headers=headers)
+    assert resp.status_code == 404
+
+
+def test_delete_success(client):
+    c, user = client
+    headers = {"X-Dugg-Key": user["api_key"]}
+    # Ingest a resource first
+    c.post("/ingest", json={
+        "resource": {"url": "https://example.com/delete-me", "title": "Delete Me"},
+        "source_instance_id": "remote1",
+    }, headers=headers)
+    # Delete it via /delete
+    resp = c.post("/delete", json={"url": "https://example.com/delete-me"}, headers=headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "deleted"
+    assert data["url"] == "https://example.com/delete-me"
+    # Verify it's gone — re-ingest should succeed as new
+    resp2 = c.post("/ingest", json={
+        "resource": {"url": "https://example.com/delete-me", "title": "Re-added"},
+        "source_instance_id": "remote1",
+    }, headers=headers)
+    assert resp2.status_code == 201
+
+
 # --- Tool dispatch ---
 
 def test_tool_dispatch_requires_auth(client):

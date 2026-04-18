@@ -940,7 +940,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         elif name == "dugg_set_successor":
             result = _handle_set_successor(d, user_id, arguments)
         elif name == "dugg_delete_resource":
-            result = _handle_delete_resource(d, user_id, arguments)
+            result = await _handle_delete_resource(d, user_id, arguments)
         elif name == "dugg_paste":
             result = _handle_paste(d, user_id, arguments)
         elif name == "dugg_edit":
@@ -2254,13 +2254,34 @@ def _handle_set_successor(d: DuggDB, user_id: str, args: dict) -> list[TextConte
     return [TextContent(type="text", text=f"Successor set to {name} ({successor_id}) for instance {instance_id}. If ownership needs to transfer, it's ready.")]
 
 
-def _handle_delete_resource(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+async def _handle_delete_resource(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
     resource_id = args["resource_id"]
     collection_id = args["collection_id"]
+
+    # Check for upstream publish targets BEFORE deleting locally
+    resource = d.get_resource(resource_id)
+    upstream_targets = d.get_upstream_delete_targets(resource_id) if resource else []
+    resource_url = resource["url"] if resource else ""
+
     result = d.delete_resource(resource_id, collection_id, user_id)
     if result.get("error"):
         return [TextContent(type="text", text=result["error"])]
-    return [TextContent(type="text", text=f"Deleted resource {result['deleted']}: {result.get('title') or result['url']}")]
+
+    # Fire upstream deletes for any servers this was published to
+    upstream_results = []
+    if upstream_targets and resource_url:
+        from dugg.sync import deliver_upstream_delete
+        for target in upstream_targets:
+            success = await deliver_upstream_delete(
+                target["endpoint_url"], target["ingest_api_key"],
+                resource_url, target.get("instance_id", ""),
+            )
+            upstream_results.append(f"{target['instance_name']}: {'ok' if success else 'failed'}")
+
+    msg = f"Deleted resource {result['deleted']}: {result.get('title') or result['url']}"
+    if upstream_results:
+        msg += f"\nUpstream deletes: {', '.join(upstream_results)}"
+    return [TextContent(type="text", text=msg)]
 
 
 def _handle_get(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
