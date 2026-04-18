@@ -1,0 +1,73 @@
+#dugg-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 2147483647;
+  background: linear-gradient(135deg, #1a1033 0%, #0f172a 100%);
+  border-bottom: 2px solid #6366f1;
+  color: #e0e0e0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  font-size: 13px;
+  padding: 8px 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.4);
+  animation: dugg-slide-in 0.3s ease-out;
+}
+
+@keyframes dugg-slide-in {
+  from { transform: translateY(-100%); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+#dugg-banner .dugg-logo {
+  font-weight: 700;
+  color: #a78bfa;
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+#dugg-banner .dugg-info {
+  flex: 1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  align-items: center;
+}
+
+#dugg-banner .dugg-match {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(99, 102, 241, 0.15);
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+#dugg-banner .dugg-server {
+  color: #93c5fd;
+  font-weight: 600;
+}
+
+#dugg-banner .dugg-by {
+  color: #a5b4fc;
+}
+
+#dugg-banner .dugg-close {
+  background: none;
+  border: none;
+  color: #666;
+  font-size: 18px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+#dugg-banner .dugg-close:hover {
+  color: #ccc;
+}

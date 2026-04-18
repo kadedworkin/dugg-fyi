@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
   "name": "Dugg This",
-  "version": "1.0.0",
-  "description": "Send the current page to your Dugg agent for enrichment and publication.",
+  "version": "1.1.0",
+  "description": "Save, discover, and share links across your Dugg servers.",
 
-  "permissions": ["activeTab", "storage", "scripting"],
+  "permissions": ["activeTab", "storage", "scripting", "alarms"],
   "action": {
     "default_popup": "popup.html",
     "default_icon": {
@@ -13,6 +13,17 @@
       "128": "icons/dugg-128.png"
     }
   },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ],
   "options_ui": {
     "page": "options.html",
     "open_in_tab": false

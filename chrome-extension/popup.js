@@ -22,10 +22,77 @@ document.addEventListener("DOMContentLoaded", async () => {
   const digBtn = document.getElementById("digBtn");
   const toast = document.getElementById("toast");
   const selectionNote = document.getElementById("selectionNote");
+  const surpriseBtn = document.getElementById("surpriseBtn");
 
   pageTitle.textContent = tab.title || tab.url;
 
-  // Scrape page content: selection, description, and transcript (YouTube)
+  // --- Check if this page is already Dugg ---
+  try {
+    const matches = await chrome.runtime.sendMessage({
+      type: "getMatches",
+      url: tab.url,
+    });
+    if (matches && matches.length > 0) {
+      const matchInfo = document.getElementById("matchInfo");
+      const matchDetails = document.getElementById("matchDetails");
+      matchInfo.style.display = "block";
+
+      // Group by server
+      const byServer = {};
+      for (const m of matches) {
+        const srv = m.server || "local";
+        if (!byServer[srv]) byServer[srv] = [];
+        byServer[srv].push(m);
+      }
+
+      let html = "";
+      for (const [server, entries] of Object.entries(byServer)) {
+        const submitters = [...new Set(entries.map(e => e.by).filter(Boolean))];
+        html += `<div class="match-server">${server}</div>`;
+        if (submitters.length > 0) {
+          html += `<div class="match-by">by ${submitters.join(", ")}</div>`;
+        }
+      }
+      matchDetails.innerHTML = html;
+    }
+  } catch (_) {}
+
+  // --- Show last sync time ---
+  try {
+    const { duggLastSync } = await chrome.storage.local.get(["duggLastSync"]);
+    if (duggLastSync) {
+      const ago = Math.round((Date.now() - duggLastSync) / 60000);
+      const label = ago < 1 ? "just now" : ago === 1 ? "1 min ago" : `${ago} min ago`;
+      document.getElementById("syncInfo").textContent = `Cache synced ${label}`;
+    }
+  } catch (_) {}
+
+  // --- Surprise Me ---
+  surpriseBtn.addEventListener("click", async () => {
+    surpriseBtn.disabled = true;
+    surpriseBtn.textContent = "...";
+    try {
+      const pick = await chrome.runtime.sendMessage({
+        type: "surpriseMe",
+        excludeUrl: tab.url,
+      });
+      if (pick && pick.url) {
+        chrome.tabs.update(tab.id, { url: pick.url });
+        window.close();
+      } else {
+        surpriseBtn.textContent = "Nothing yet";
+        setTimeout(() => {
+          surpriseBtn.textContent = "Surprise me";
+          surpriseBtn.disabled = false;
+        }, 1500);
+      }
+    } catch (_) {
+      surpriseBtn.textContent = "Surprise me";
+      surpriseBtn.disabled = false;
+    }
+  });
+
+  // --- Scrape page content ---
   let selectedText = "";
   let pageDescription = "";
   let pageTranscript = "";
@@ -42,7 +109,6 @@ document.addEventListener("DOMContentLoaded", async () => {
 
         // YouTube-specific: extract description from the page DOM
         if (location.hostname.includes("youtube.com") && location.pathname === "/watch") {
-          // Expanded description lives in #description-inner or ytd-text-inline-expander
           const descEl = document.querySelector(
             "ytd-watch-metadata #description-inner, " +
             "ytd-text-inline-expander .content, " +
@@ -52,7 +118,7 @@ document.addEventListener("DOMContentLoaded", async () => {
             out.description = descEl.innerText.trim();
           }
 
-          // YouTube transcript: check if transcript panel is open or can be read
+          // YouTube transcript: check if transcript panel is open
           const transcriptSegments = document.querySelectorAll(
             "ytd-transcript-segment-renderer .segment-text, " +
             "yt-formatted-string.segment-text"
@@ -78,7 +144,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     selectionNote.style.display = "block";
   }
 
-  // Fetch distribution targets
+  // --- Fetch distribution targets ---
   const url = config.agentUrl.replace(/\/+$/, "");
   let instances = [];
   try {
@@ -105,6 +171,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   }
 
+  // --- Dugg it button ---
   digBtn.addEventListener("click", async () => {
     digBtn.disabled = true;
     digBtn.textContent = "Sending...";
@@ -143,18 +210,15 @@ document.addEventListener("DOMContentLoaded", async () => {
         .map(cb => cb.value);
 
       if (checked.length > 0) {
-        // Get resource ID from the add response
         const addData = await res.clone().json().catch(() => null);
         let resourceId = null;
         if (addData) {
-          // The tool response text contains the resource info — parse the ID
           const text = typeof addData === "string" ? addData : (addData.text || addData.result || JSON.stringify(addData));
           const idMatch = String(text).match(/id[=: ]+([a-f0-9]{12})/i);
           if (idMatch) resourceId = idMatch[1];
         }
 
         if (resourceId) {
-          // Fire publish — don't block the success toast on it
           fetch(`${url}/tools/dugg_publish`, {
             method: "POST",
             headers: {
@@ -168,6 +232,9 @@ document.addEventListener("DOMContentLoaded", async () => {
           }).catch(() => {});
         }
       }
+
+      // Trigger a cache sync so this new URL shows up in badges
+      chrome.runtime.sendMessage({ type: "syncNow" }).catch(() => {});
 
       const targetCount = checked.length;
       const msg = targetCount > 0

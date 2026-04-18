@@ -5,7 +5,7 @@
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
-    width: 280px;
+    width: 300px;
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
     background: #0a0a0a;
     color: #e0e0e0;
@@ -21,7 +21,21 @@
     font-size: 14px;
     font-weight: 600;
     color: #fff;
+    flex: 1;
   }
+  .surprise-btn {
+    width: auto !important;
+    padding: 4px 10px !important;
+    font-size: 11px !important;
+    background: #1a1033 !important;
+    border: 1px solid #6366f1 !important;
+    color: #a78bfa !important;
+    border-radius: 12px !important;
+    cursor: pointer;
+    font-weight: 500 !important;
+    white-space: nowrap;
+  }
+  .surprise-btn:hover { background: #2a1a4a !important; }
   .page-title {
     font-size: 12px;
     color: #888;
@@ -29,6 +43,27 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .match-info {
+    background: rgba(99, 102, 241, 0.1);
+    border: 1px solid rgba(99, 102, 241, 0.25);
+    border-radius: 8px;
+    padding: 10px;
+    margin-bottom: 12px;
+    font-size: 12px;
+  }
+  .match-info .match-label {
+    color: #a78bfa;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+  .match-info .match-server {
+    color: #93c5fd;
+    font-size: 11px;
+  }
+  .match-info .match-by {
+    color: #888;
+    font-size: 11px;
   }
   .note-input {
     width: 100%;
@@ -126,14 +161,25 @@
     margin-bottom: 8px;
     font-style: italic;
   }
+  .sync-info {
+    text-align: center;
+    font-size: 10px;
+    color: #444;
+    margin-top: 8px;
+  }
 </style>
 </head>
 <body>
   <div id="main" style="display:none;">
     <div class="title-row">
       <h1>Dugg This</h1>
+      <button class="surprise-btn" id="surpriseBtn" title="Open a random page from your feeds">Surprise me</button>
     </div>
     <div class="page-title" id="pageTitle"></div>
+    <div class="match-info" id="matchInfo" style="display:none;">
+      <div class="match-label">Already Dugg</div>
+      <div id="matchDetails"></div>
+    </div>
     <div class="selection-note" id="selectionNote" style="display:none;">Selected text will be included as a note.</div>
     <textarea class="note-input" id="note" placeholder="Why this matters... (optional)" rows="2"></textarea>
     <div class="distribute-section" id="distributeSection" style="display:none;">
@@ -143,6 +189,7 @@
     <button id="digBtn">Dugg it</button>
     <div class="toast" id="toast"></div>
     <a href="#" class="setup-link" id="settingsLink">Settings</a>
+    <div class="sync-info" id="syncInfo"></div>
   </div>
   <div id="setup" style="display:none;">
     <div class="not-configured">

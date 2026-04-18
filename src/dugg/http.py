@@ -510,8 +510,9 @@ async function doSetup() {{
 
     # --- Invite & Feed (unauthenticated) ---
 
-    def _html_page(title: str, body: str) -> str:
-        """Minimal HTML page wrapper."""
+    def _html_page(title: str, body: str, wide: bool = False) -> str:
+        """Minimal HTML page wrapper. wide=True for feed-style pages."""
+        wrap_class = "page-wrap" if wide else "page-wrap form-page"
         return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -523,8 +524,9 @@ async function doSetup() {{
   body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
          background: #0a0a0a; color: #e0e0e0; min-height: 100vh;
          display: flex; justify-content: center; padding: 2rem 1rem; }}
-  .card {{ max-width: 480px; width: 100%; background: #1a1a1a; border: 1px solid #333;
-           border-radius: 12px; padding: 2rem; }}
+  .page-wrap {{ max-width: 720px; width: 100%; }}
+  .page-wrap.form-page {{ max-width: 480px; background: #1a1a1a; border: 1px solid #333;
+                           border-radius: 12px; padding: 2rem; }}
   h1 {{ font-size: 1.5rem; margin-bottom: 0.5rem; color: #fff; }}
   .topic {{ color: #888; font-size: 0.9rem; margin-bottom: 1.5rem; }}
   label {{ display: block; font-size: 0.85rem; color: #aaa; margin-bottom: 0.3rem; }}
@@ -542,13 +544,32 @@ async function doSetup() {{
   .next-steps li {{ font-size: 0.85rem; color: #aaa; margin-bottom: 0.5rem; list-style: none; }}
   .next-steps li strong {{ color: #e0e0e0; }}
   .error {{ color: #f87171; margin-bottom: 1rem; }}
-  .feed-item {{ border-bottom: 1px solid #222; padding: 1rem 0; }}
-  .feed-item:last-child {{ border-bottom: none; }}
-  .feed-item h3 {{ font-size: 1rem; margin-bottom: 0.25rem; }}
-  .feed-item h3 a {{ color: #93c5fd; text-decoration: none; }}
-  .feed-item h3 a:hover {{ text-decoration: underline; }}
-  .feed-item .meta {{ font-size: 0.8rem; color: #666; }}
-  .feed-item .note {{ font-size: 0.85rem; color: #aaa; margin-top: 0.3rem; }}
+  .card {{ max-width: 720px; width: 100%; background: #1a1a1a; border: 1px solid #2a2a2a;
+           border-radius: 12px; margin-bottom: 1rem; overflow: hidden; }}
+  .card-media {{ width: 100%; }}
+  .card-thumb {{ width: 100%; height: auto; display: block; border-bottom: 1px solid #2a2a2a; }}
+  .card-body {{ padding: 1.25rem; }}
+  .card h3 {{ font-size: 1.05rem; margin-bottom: 0.4rem; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }}
+  .card h3 a {{ color: #93c5fd; text-decoration: none; }}
+  .card h3 a:hover {{ text-decoration: underline; }}
+  .card .meta {{ font-size: 0.8rem; color: #666; margin-bottom: 0.5rem; }}
+  .card .submitted-by {{ color: #888; }}
+  .card .author {{ color: #a78bfa; }}
+  .card-desc {{ font-size: 0.85rem; color: #999; margin: 0.5rem 0; line-height: 1.5;
+                display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }}
+  .card .note {{ font-size: 0.85rem; color: #aaa; margin-top: 0.3rem; }}
+  .card-tags {{ display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.5rem; }}
+  .tag {{ font-size: 0.7rem; color: #888; background: #222; border: 1px solid #333;
+          border-radius: 3px; padding: 0.1rem 0.4rem; }}
+  .type-badge {{ font-size: 0.65rem; color: #fff; padding: 0.1rem 0.35rem; border-radius: 3px;
+                 font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }}
+  .type-badge.yt {{ background: #dc2626; }}
+  .type-badge.article {{ background: #2563eb; }}
+  .search-bar {{ margin-bottom: 1.5rem; display: flex; gap: 0.5rem; }}
+  .search-bar input {{ flex: 1; padding: 0.6rem 0.8rem; background: #111; border: 1px solid #333;
+                       border-radius: 8px; color: #fff; font-size: 0.9rem; }}
+  .search-bar input:focus {{ outline: none; border-color: #6366f1; }}
+  .search-bar input::placeholder {{ color: #555; }}
   .empty {{ color: #666; text-align: center; padding: 2rem 0; }}
   .item-actions {{ margin-top: 0.4rem; display: flex; gap: 0.5rem; }}
   .action-btn {{ width: auto; padding: 0.2rem 0.5rem; font-size: 0.75rem; background: transparent;
@@ -582,7 +603,7 @@ async function doSetup() {{
                  letter-spacing: 0.03em; }}
 </style>
 </head>
-<body><div class="card">{body}</div></body>
+<body><div class="{wrap_class}">{body}</div></body>
 </html>"""
 
     async def handle_invite_page(request: Request):
@@ -1025,13 +1046,13 @@ async function doSetup() {{
             )
 
         # HTML feed view
+        submitter_cache: dict[str, str] = {}
         if not feed:
             items_html = '<p class="empty">Nothing here yet. Check back later.</p>'
         else:
             items_html = ""
             for r in feed:
                 title = r.get("title") or r["url"]
-                note_html = f'<p class="note">{_xml_escape(r["note"])}</p>' if r.get("note") else ""
                 sibling_notes = d.list_resource_notes(r["id"])
                 siblings_html = ""
                 if sibling_notes:
@@ -1044,10 +1065,18 @@ async function doSetup() {{
                             f'<p class="note sibling"><span class="sib-who">{who}{origin_label}:</span> {_xml_escape(sn["note"])}</p>'
                         )
                     siblings_html = "".join(sib_parts)
-                author_html = f' · {r["author"]}' if r.get("author") else ""
+                # Submitter name
+                sub_id = r.get("submitted_by", "")
+                if sub_id and sub_id not in submitter_cache:
+                    u = d.get_user(sub_id)
+                    submitter_cache[sub_id] = u["name"] if u else sub_id
+                submitter_name = submitter_cache.get(sub_id, "")
+                author_html = f'<span class="author">{_xml_escape(r["author"])}</span> · ' if r.get("author") else ""
+                by_html = f'<span class="submitted-by">{_xml_escape(submitter_name)}</span>' if submitter_name else ""
                 added_date = _short_date(r.get("created_at"))
                 pub_date = _resource_pub_date(r)
                 pub_html = f" (published {pub_date})" if pub_date and pub_date != added_date else ""
+                source_type = r.get("source_type", "")
                 url = r["url"]
                 if url.startswith("dugg://content/"):
                     url = "/r/" + url.removeprefix("dugg://content/")
@@ -1055,14 +1084,38 @@ async function doSetup() {{
                 note_display = f'<p class="note" id="note-{r["id"]}">{note_escaped}</p>' if r.get("note") else f'<p class="note" id="note-{r["id"]}" style="display:none;"></p>'
                 coll_id = r.get("collection_id", "")
                 source_srv = r.get("source_server") or ""
-                items_html += f"""<div class="feed-item" id="item-{r["id"]}" data-collection="{coll_id}" data-source-server="{_xml_escape(source_srv)}">
-  <h3><a href="{url}" target="_blank" rel="noopener">{title}</a></h3>
-  <p class="meta">{added_date}{pub_html}{author_html}</p>
-  {note_display}
-  {siblings_html}
-  <div class="item-actions">
-    <button class="action-btn edit-btn" onclick="editNote('{r["id"]}')">edit</button>
-    <button class="action-btn delete-btn" onclick="deleteItem('{r["id"]}')">delete</button>
+                # Thumbnail
+                thumb = r.get("thumbnail") or ""
+                thumb_html = f'<img src="{_xml_escape(thumb)}" alt="" class="card-thumb" loading="lazy">' if thumb else ""
+                # Description preview
+                desc = r.get("description") or ""
+                desc_html = f'<p class="card-desc">{_xml_escape(desc[:280])}</p>' if desc else ""
+                # Tags
+                tags = r.get("tags", [])
+                tags_html = ""
+                if tags:
+                    tag_labels = [t["label"] if isinstance(t, dict) else t for t in tags]
+                    tags_html = '<div class="card-tags">' + "".join(f'<span class="tag">{_xml_escape(t)}</span>' for t in tag_labels[:6]) + "</div>"
+                # Source type badge
+                type_badge = ""
+                if source_type == "youtube":
+                    type_badge = '<span class="type-badge yt">YouTube</span>'
+                elif source_type == "article":
+                    type_badge = '<span class="type-badge article">Article</span>'
+
+                items_html += f"""<div class="card" id="item-{r["id"]}" data-collection="{coll_id}" data-source-server="{_xml_escape(source_srv)}" data-url="{_xml_escape(r['url'])}">
+  {f'<div class="card-media">{thumb_html}</div>' if thumb_html else ""}
+  <div class="card-body">
+    <h3><a href="{url}" target="_blank" rel="noopener">{_xml_escape(title)}</a> {type_badge}</h3>
+    <p class="meta">{author_html}{by_html} · {added_date}{pub_html}</p>
+    {desc_html}
+    {note_display}
+    {siblings_html}
+    {tags_html}
+    <div class="item-actions">
+      <button class="action-btn edit-btn" onclick="editNote('{r["id"]}')">edit</button>
+      <button class="action-btn delete-btn" onclick="deleteItem('{r["id"]}')">delete</button>
+    </div>
   </div>
 </div>\n"""
 
@@ -1086,9 +1139,22 @@ async function doSetup() {{
 </div>"""
 
         topic_html = f'<p class="topic">{page_topic}</p>' if page_topic else ""
+        search_bar = """<div class="search-bar">
+  <input type="text" id="feedSearch" placeholder="Search this feed..." autocomplete="off">
+</div>"""
         feed_js = """
 <script>
 const API_KEY = window.location.pathname.split('/feed/')[1];
+
+// Client-side feed filter
+document.getElementById('feedSearch').addEventListener('input', function() {
+  const q = this.value.toLowerCase().trim();
+  document.querySelectorAll('.card[data-url]').forEach(card => {
+    if (!q) { card.style.display = ''; return; }
+    const text = card.textContent.toLowerCase();
+    card.style.display = text.includes(q) ? '' : 'none';
+  });
+});
 const BASE = window.location.origin;
 
 function editNote(id) {
@@ -1214,6 +1280,7 @@ async function syncNow(e) {
         body = f"""<h1>{page_title}</h1>
 {sync_html}
 {topic_html}
+{search_bar}
 {items_html}
 {feed_js}"""
         # RFC 8288: Link header pointing to Atom alternate
@@ -1221,9 +1288,44 @@ async function syncNow(e) {
         feed_path = f"/feed/{api_key}"
         atom_url = f"{srv_url.rstrip('/')}{feed_path}" if srv_url else feed_path
         return HTMLResponse(
-            _html_page(page_title, body),
+            _html_page(page_title, body, wide=True),
             headers={"Link": f'<{atom_url}>; rel="alternate"; type="application/atom+xml"'},
         )
+
+    # --- Compact URL cache for Chrome extension ---
+
+    async def handle_feed_urls(request: Request):
+        """GET /feed/urls/{key} — compact JSON of all URLs for extension cache.
+
+        Returns a lightweight payload for the Chrome extension to sync hourly.
+        Used for badge matching and StumbleUpon-style discovery.
+        """
+        api_key = request.path_params["key"]
+        d = get_db()
+        user = d.get_user_by_api_key(api_key)
+        if not user:
+            return JSONResponse({"error": "invalid key"}, status_code=404)
+
+        d.touch_user(user["id"])
+        feed = d.get_feed(user["id"], limit=500)
+        submitter_cache: dict[str, str] = {}
+
+        entries = []
+        for r in feed:
+            sub_id = r.get("submitted_by", "")
+            if sub_id and sub_id not in submitter_cache:
+                u = d.get_user(sub_id)
+                submitter_cache[sub_id] = u["name"] if u else sub_id
+            submitter_name = submitter_cache.get(sub_id, "")
+
+            entries.append({
+                "url": r["url"],
+                "title": r.get("title") or "",
+                "id": r["id"],
+                "by": submitter_name,
+            })
+
+        return JSONResponse({"urls": entries, "count": len(entries)})
 
     # --- Note Publishing (upstream federation) ---
 
@@ -2183,6 +2285,7 @@ async function syncNow(e) {
         Route("/setup", endpoint=handle_setup_submit, methods=["POST"]),
         Route("/invite/{token}", endpoint=handle_invite_page),
         Route("/invite/{token}/redeem", endpoint=handle_invite_redeem, methods=["POST"]),
+        Route("/feed/urls/{key}", endpoint=handle_feed_urls),
         Route("/feed/{key}", endpoint=handle_feed),
         Route("/paste/{key}", endpoint=handle_paste_page),
         Route("/paste/{key}/submit", endpoint=handle_paste_submit, methods=["POST"]),
