@@ -1183,7 +1183,8 @@ document.getElementById('feedSearch').addEventListener('input', function() {
       // Parse the MCP tool response to extract matching resource IDs
       const text = typeof data === 'string' ? data : (data.text || data.result || JSON.stringify(data));
       const matchIds = new Set();
-      const idRegex = /id[=: ]+([a-f0-9]{12})/gi;
+      // Match both [abc123def456] and id=abc123def456 formats
+      const idRegex = /(?:\[|id[=: ]+)([a-f0-9]{12})/gi;
       let m;
       while ((m = idRegex.exec(String(text))) !== null) matchIds.add(m[1]);
 
