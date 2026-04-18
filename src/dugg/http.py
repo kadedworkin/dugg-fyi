@@ -1140,22 +1140,67 @@ async function doSetup() {{
 
         topic_html = f'<p class="topic">{page_topic}</p>' if page_topic else ""
         search_bar = """<div class="search-bar">
-  <input type="text" id="feedSearch" placeholder="Search this feed..." autocomplete="off">
+  <input type="text" id="feedSearch" placeholder="Search this feed... (searches full article text)" autocomplete="off">
+  <div id="searchStatus" style="font-size:0.75rem;color:#666;margin-top:0.3rem;display:none;"></div>
 </div>"""
         feed_js = """
 <script>
 const API_KEY = window.location.pathname.split('/feed/')[1];
-
-// Client-side feed filter
-document.getElementById('feedSearch').addEventListener('input', function() {
-  const q = this.value.toLowerCase().trim();
-  document.querySelectorAll('.card[data-url]').forEach(card => {
-    if (!q) { card.style.display = ''; return; }
-    const text = card.textContent.toLowerCase();
-    card.style.display = text.includes(q) ? '' : 'none';
-  });
-});
 const BASE = window.location.origin;
+
+// Debounced server-side search for full-text queries
+let searchTimeout = null;
+document.getElementById('feedSearch').addEventListener('input', function() {
+  const q = this.value.trim();
+  clearTimeout(searchTimeout);
+
+  if (!q) {
+    // Reset: show all cards, hide status
+    document.querySelectorAll('.card[data-url]').forEach(c => c.style.display = '');
+    document.getElementById('searchStatus').style.display = 'none';
+    return;
+  }
+
+  // Quick client-side filter while typing (instant feedback)
+  const ql = q.toLowerCase();
+  document.querySelectorAll('.card[data-url]').forEach(card => {
+    card.style.display = card.textContent.toLowerCase().includes(ql) ? '' : 'none';
+  });
+
+  // After 400ms pause, do server-side full-text search
+  searchTimeout = setTimeout(async () => {
+    const status = document.getElementById('searchStatus');
+    status.textContent = 'Searching full text...';
+    status.style.display = 'block';
+    try {
+      const res = await fetch(BASE + '/tools/dugg_search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Dugg-Key': API_KEY },
+        body: JSON.stringify({ query: q, limit: 50 }),
+      });
+      if (!res.ok) throw new Error('search failed');
+      const data = await res.json();
+      // Parse the MCP tool response to extract matching resource IDs
+      const text = typeof data === 'string' ? data : (data.text || data.result || JSON.stringify(data));
+      const matchIds = new Set();
+      const idRegex = /id[=: ]+([a-f0-9]{12})/gi;
+      let m;
+      while ((m = idRegex.exec(String(text))) !== null) matchIds.add(m[1]);
+
+      // Show cards that match either client-side or server-side
+      const visibleBefore = document.querySelectorAll('.card[data-url]:not([style*="display: none"])').length;
+      document.querySelectorAll('.card[data-url]').forEach(card => {
+        const cardId = card.id.replace('item-', '');
+        const clientMatch = card.textContent.toLowerCase().includes(ql);
+        card.style.display = (clientMatch || matchIds.has(cardId)) ? '' : 'none';
+      });
+      const visibleAfter = document.querySelectorAll('.card[data-url]:not([style*="display: none"])').length;
+      status.textContent = visibleAfter + ' result' + (visibleAfter !== 1 ? 's' : '') + (matchIds.size > 0 ? ' (includes full-text matches)' : '');
+    } catch (e) {
+      status.textContent = 'Full-text search unavailable';
+    }
+  }, 400);
+});
 
 function editNote(id) {
   const noteEl = document.getElementById('note-' + id);
