@@ -835,7 +835,8 @@ async function doSetup() {{
         page_topic = ""
 
         if want_atom:
-            # Simple Atom feed
+            # Atom feed with full metadata
+            srv_url = d.get_config("server_url", "")
             entries = ""
             for r in feed:
                 title = r.get("title") or r["url"]
@@ -852,11 +853,26 @@ async function doSetup() {{
                         parts.append(f"— {label}: {sn['note']}")
                     sibling_text = "\n\n".join(parts)
                 content = "\n\n".join(p for p in [desc, note, sibling_text] if p)
+                display_url = _resolve_display_url(r["url"], srv_url)
+                # Author element
+                author_xml = ""
+                if r.get("author"):
+                    author_xml = f"\n  <author><name>{_xml_escape(r['author'])}</name></author>"
+                # Published date from raw_metadata
+                pub_date = _resource_pub_date(r)
+                published_xml = ""
+                if pub_date:
+                    published_xml = f"\n  <published>{pub_date}T00:00:00Z</published>"
+                # Category elements for tags
+                tags = r.get("tags", [])
+                categories_xml = ""
+                for t in tags:
+                    categories_xml += f'\n  <category term="{_xml_escape(t["label"])}"/>'
                 entries += f"""<entry>
   <title>{_xml_escape(title)}</title>
-  <link href="{_xml_escape(r['url'])}"/>
+  <link href="{_xml_escape(display_url)}"/>
   <id>{_xml_escape(r['id'])}</id>
-  <updated>{r['created_at']}</updated>
+  <updated>{r['created_at']}</updated>{published_xml}{author_xml}{categories_xml}
   <summary>{_xml_escape(content)}</summary>
 </entry>\n"""
             atom = f"""<?xml version="1.0" encoding="utf-8"?>

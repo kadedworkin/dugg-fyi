@@ -14,7 +14,7 @@ import asyncio
 import json
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Iterable, Optional
 from urllib.parse import parse_qs, urlparse
@@ -70,6 +70,7 @@ class FeedEntry:
     published_at: str  # ISO 8601, "" if not provided
     author: str
     is_private: bool
+    categories: list[str] = field(default_factory=list)
 
 
 def _entry_to_normalized(entry) -> Optional[FeedEntry]:
@@ -105,6 +106,13 @@ def _entry_to_normalized(entry) -> Optional[FeedEntry]:
 
     author = (entry.get("author") or "").strip()
 
+    # Extract categories/tags from <category> elements
+    categories = []
+    for tag in entry.get("tags", []):
+        term = (tag.get("term") or tag.get("label") or "").strip()
+        if term:
+            categories.append(term)
+
     return FeedEntry(
         entry_id=entry_id,
         url=url,
@@ -113,6 +121,7 @@ def _entry_to_normalized(entry) -> Optional[FeedEntry]:
         published_at=published_at,
         author=author,
         is_private=is_private_link(url),
+        categories=categories,
     )
 
 
@@ -193,6 +202,9 @@ def ingest_entry(
         raw_metadata["is_private_link"] = True
 
     tags = [tag_label] if tag_label else []
+    for cat in entry.categories:
+        if cat.lower() not in {t.lower() for t in tags}:
+            tags.append(cat)
 
     return db.add_resource(
         url=entry.url,
