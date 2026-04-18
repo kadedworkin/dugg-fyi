@@ -242,6 +242,7 @@ async def fetch_og_metadata(url: str) -> dict:
         "description": "",
         "thumbnail": "",
         "site_name": "",
+        "author": "",
         "article_text": "",
         "published_at": "",
         "updated_at": "",
@@ -261,6 +262,7 @@ async def fetch_og_metadata(url: str) -> dict:
         "og:description": "description",
         "og:image": "thumbnail",
         "og:site_name": "site_name",
+        "article:author": "author",
         "article:published_time": "published_at",
         "article:modified_time": "updated_at",
     }
@@ -278,6 +280,35 @@ async def fetch_og_metadata(url: str) -> dict:
         desc_meta = soup.find("meta", attrs={"name": "description"})
         if desc_meta and desc_meta.get("content"):
             result["description"] = desc_meta["content"]
+
+    # Author fallbacks: meta[name=author], dc.creator, LD+JSON
+    if not result["author"]:
+        for attr_name in ("author", "dc.creator", "article.author"):
+            author_meta = soup.find("meta", attrs={"name": attr_name})
+            if author_meta and author_meta.get("content"):
+                result["author"] = author_meta["content"]
+                break
+    if not result["author"]:
+        # Try LD+JSON for author
+        for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
+            try:
+                data = json.loads(script.string or "")
+            except (json.JSONDecodeError, TypeError):
+                continue
+            candidates = data if isinstance(data, list) else [data]
+            for item in candidates:
+                if not isinstance(item, dict):
+                    continue
+                author = item.get("author")
+                if isinstance(author, dict):
+                    author = author.get("name", "")
+                elif isinstance(author, list) and author:
+                    author = author[0].get("name", "") if isinstance(author[0], dict) else str(author[0])
+                if author:
+                    result["author"] = str(author)
+                    break
+            if result["author"]:
+                break
 
     if not result["published_at"]:
         result["published_at"] = _extract_published_at(soup)
