@@ -982,6 +982,9 @@ async def _handle_add(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
     tags = args.get("tags", [])
     collection_name = args.get("collection", "")
     provided_title = args.get("title", "")
+    # Strip email forwarding prefixes (Fwd:, Re:, Fw:) — enrichment usually has the real title
+    import re as _re
+    provided_title = _re.sub(r'^(?:(?:Fwd|Fw|Re)\s*:\s*)+', '', provided_title, flags=_re.IGNORECASE).strip()
     provided_desc = args.get("description", "")
     provided_transcript = args.get("transcript", "")
 
@@ -1023,7 +1026,7 @@ async def _handle_add(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
         collection_id=coll_id,
         submitted_by=user_id,
         note=note,
-        title=provided_title or enriched.get("title", ""),
+        title=enriched.get("title") or provided_title or "",
         description=provided_desc or enriched.get("description", ""),
         thumbnail=enriched.get("thumbnail", ""),
         source_type=enriched.get("source_type", "unknown"),
