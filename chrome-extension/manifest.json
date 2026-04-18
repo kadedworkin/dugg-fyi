@@ -5,6 +5,7 @@
   "description": "Save, discover, and share links across your Dugg servers.",
 
   "permissions": ["activeTab", "storage", "scripting", "alarms"],
+  "host_permissions": ["<all_urls>"],
   "action": {
     "default_popup": "popup.html",
     "default_icon": {
