@@ -25,13 +25,53 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   pageTitle.textContent = tab.title || tab.url;
 
+  // Scrape page content: selection, description, and transcript (YouTube)
   let selectedText = "";
+  let pageDescription = "";
+  let pageTranscript = "";
   try {
     const [result] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      func: () => window.getSelection().toString(),
+      func: () => {
+        const out = { selection: window.getSelection().toString() };
+
+        // Extract description from meta tags
+        const ogDesc = document.querySelector('meta[property="og:description"]');
+        const metaDesc = document.querySelector('meta[name="description"]');
+        out.description = (ogDesc && ogDesc.content) || (metaDesc && metaDesc.content) || "";
+
+        // YouTube-specific: extract description from the page DOM
+        if (location.hostname.includes("youtube.com") && location.pathname === "/watch") {
+          // Expanded description lives in #description-inner or ytd-text-inline-expander
+          const descEl = document.querySelector(
+            "ytd-watch-metadata #description-inner, " +
+            "ytd-text-inline-expander .content, " +
+            "#structured-description .content"
+          );
+          if (descEl && descEl.innerText.length > out.description.length) {
+            out.description = descEl.innerText.trim();
+          }
+
+          // YouTube transcript: check if transcript panel is open or can be read
+          const transcriptSegments = document.querySelectorAll(
+            "ytd-transcript-segment-renderer .segment-text, " +
+            "yt-formatted-string.segment-text"
+          );
+          if (transcriptSegments.length > 0) {
+            out.transcript = Array.from(transcriptSegments)
+              .map(el => el.innerText.trim())
+              .filter(Boolean)
+              .join(" ");
+          }
+        }
+
+        return out;
+      },
     });
-    selectedText = (result && result.result) || "";
+    const data = (result && result.result) || {};
+    selectedText = data.selection || "";
+    pageDescription = data.description || "";
+    pageTranscript = data.transcript || "";
   } catch (_) {}
 
   if (selectedText) {
@@ -74,17 +114,19 @@ document.addEventListener("DOMContentLoaded", async () => {
     const note = [noteInput.value.trim(), selectedText].filter(Boolean).join("\n\n---\n\n");
 
     try {
-      // Step 1: Save locally
+      // Step 1: Save locally (include scraped page content)
+      const payload = { url: tab.url };
+      if (note) payload.note = note;
+      if (pageDescription) payload.description = pageDescription;
+      if (pageTranscript) payload.transcript = pageTranscript;
+
       const res = await fetch(`${url}/tools/dugg_add`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "X-Dugg-Key": config.apiKey,
         },
-        body: JSON.stringify({
-          url: tab.url,
-          note: note || undefined,
-        }),
+        body: JSON.stringify(payload),
       });
 
       if (!res.ok) {

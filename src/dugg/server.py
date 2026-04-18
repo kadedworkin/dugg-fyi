@@ -1445,6 +1445,11 @@ def _handle_search(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
             lines.append(f"  Note: {label}{sn['note'][:200]}")
         if r.get("description"):
             lines.append(f"  Description: {r['description'][:200]}")
+        if r.get("transcript") and query.strip():
+            from dugg.db import extract_snippet
+            snippet = extract_snippet(r["transcript"], query)
+            if snippet:
+                lines.append(f"  Transcript match: {snippet}")
         display_url = _resolve_display_url(r["url"], d.get_config("server_url", ""))
         lines.append(f"  URL: `{display_url}`")
         pub_date = _mcp_pub_date(r)

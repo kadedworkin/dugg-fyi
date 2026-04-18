@@ -2,11 +2,48 @@
 
 import json
 import math
+import re
 import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Union
+
+
+def extract_snippet(text: str, query: str, context_chars: int = 120) -> str:
+    """Extract a snippet from text around the first match of query terms.
+
+    Returns a short excerpt with '...' markers showing where the query
+    matched in longer text fields like transcripts.
+    """
+    if not text or not query:
+        return ""
+    words = [w.strip().lower() for w in query.split() if w.strip()]
+    if not words:
+        return ""
+    text_lower = text.lower()
+    best_pos = -1
+    for w in words:
+        pos = text_lower.find(w)
+        if pos != -1 and (best_pos == -1 or pos < best_pos):
+            best_pos = pos
+    if best_pos == -1:
+        return ""
+    start = max(0, best_pos - context_chars)
+    end = min(len(text), best_pos + len(words[0]) + context_chars)
+    # Snap to word boundaries
+    if start > 0:
+        sp = text.find(" ", start)
+        if sp != -1 and sp < best_pos:
+            start = sp + 1
+    if end < len(text):
+        sp = text.rfind(" ", best_pos, end)
+        if sp != -1:
+            end = sp
+    snippet = text[start:end].strip()
+    prefix = "..." if start > 0 else ""
+    suffix = "..." if end < len(text) else ""
+    return f"{prefix}{snippet}{suffix}"
 
 
 def dugg_email_address(api_key: str, server_url: str) -> str:

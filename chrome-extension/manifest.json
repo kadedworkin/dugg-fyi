@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "description": "Send the current page to your Dugg agent for enrichment and publication.",
 
-  "permissions": ["activeTab", "storage"],
+  "permissions": ["activeTab", "storage", "scripting"],
   "action": {
     "default_popup": "popup.html",
     "default_icon": {

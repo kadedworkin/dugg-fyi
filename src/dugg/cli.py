@@ -1005,6 +1005,11 @@ def cmd_search(args):
             print(f"    Note: {label}{sn['note'][:200]}")
         if r.get("description"):
             print(f"    {r['description'][:200]}")
+        if r.get("transcript") and args.query.strip():
+            from dugg.db import extract_snippet
+            snippet = extract_snippet(r["transcript"], args.query)
+            if snippet:
+                print(f"    Transcript: {snippet}")
         print()
 
 
