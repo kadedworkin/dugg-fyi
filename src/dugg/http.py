@@ -1367,7 +1367,15 @@ async function syncNow(e) {
         for r in feed:
             st = r.get("source_type") or "other"
             source_types[st] = source_types.get(st, 0) + 1
-        type_parts = " · ".join(f"{count} {typ}" for typ, count in sorted(source_types.items(), key=lambda x: -x[1]) if typ != "other")
+        def _type_label(typ: str, count: int) -> str:
+            if typ == "youtube":
+                return f"{count} YouTube Video{'s' if count != 1 else ''}"
+            if typ == "article":
+                return f"{count} Article{'s' if count != 1 else ''}"
+            if typ == "email":
+                return f"{count} Email{'s' if count != 1 else ''}"
+            return f"{count} {typ}"
+        type_parts = " · ".join(_type_label(typ, count) for typ, count in sorted(source_types.items(), key=lambda x: -x[1]) if typ != "other")
         stats_detail = f" · {type_parts}" if type_parts else ""
         contrib_label = f" · {n_contributors} contributor{'s' if n_contributors != 1 else ''}" if n_contributors > 1 else ""
         source_label = f" · {n_sources} source{'s' if n_sources != 1 else ''}" if n_sources > 0 else ""
