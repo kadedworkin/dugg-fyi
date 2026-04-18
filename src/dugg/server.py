@@ -1098,12 +1098,19 @@ def _handle_paste(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
         ))]
 
     # Try to extract a canonical URL from the body (e.g. Substack post link)
-    from dugg.enrichment import extract_canonical_url
+    from dugg.enrichment import extract_canonical_url, fetch_published_at
     canonical = extract_canonical_url(body)
 
     from dugg.db import _uuid
     res_id = _uuid()
     url = canonical or f"dugg://content/{res_id}"
+
+    # When we have a canonical URL, fetch the real publication date
+    # instead of using the email forward date
+    if canonical:
+        real_date = fetch_published_at(canonical)
+        if real_date:
+            published_at = real_date
 
     metadata = {}
     if source_label:

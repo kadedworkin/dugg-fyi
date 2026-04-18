@@ -104,6 +104,33 @@ def extract_canonical_url(body: str) -> Optional[str]:
     return None
 
 
+def fetch_published_at(url: str) -> str:
+    """Quick sync fetch of a canonical URL's publication date.
+
+    Grabs just the <head> to find article:published_time or similar.
+    Returns ISO date string or empty string on failure.
+    """
+    try:
+        resp = httpx.get(
+            url,
+            headers={"User-Agent": "Dugg/0.1 (metadata fetcher)", "Range": "bytes=0-16384"},
+            follow_redirects=True,
+            timeout=10.0,
+        )
+        if resp.status_code not in (200, 206):
+            return ""
+    except (httpx.HTTPError, httpx.TimeoutException):
+        return ""
+    html = resp.text
+    soup = BeautifulSoup(html, "html.parser")
+    # Check article:published_time OG tag
+    meta = soup.find("meta", attrs={"property": "article:published_time"})
+    if meta and meta.get("content"):
+        return meta["content"]
+    # Fall back to general extraction
+    return _extract_published_at(soup)
+
+
 def sanitize_url(url: str) -> str:
     """Strip tracking parameters from a URL to normalize for dedup."""
     try:
