@@ -1108,7 +1108,7 @@ def _handle_paste(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
     # When we have a canonical URL, fetch the real publication date
     # instead of using the email forward date
     if canonical:
-        real_date = fetch_published_at(canonical)
+        real_date = fetch_published_at(canonical, body=body)
         if real_date:
             published_at = real_date
 

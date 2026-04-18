@@ -104,31 +104,70 @@ def extract_canonical_url(body: str) -> Optional[str]:
     return None
 
 
-def fetch_published_at(url: str) -> str:
+def fetch_published_at(url: str, body: str = "") -> str:
     """Quick sync fetch of a canonical URL's publication date.
 
-    Grabs just the <head> to find article:published_time or similar.
+    Checks article:published_time OG tag, JSON-LD datePublished, and
+    other common date locations.  If the canonical URL is blocked (403,
+    common with open.substack.com on hosting providers), resolves to the
+    publication's custom domain via the redirect chain or body scan.
+
     Returns ISO date string or empty string on failure.
     """
-    try:
-        resp = httpx.get(
-            url,
-            headers={"User-Agent": "Dugg/0.1 (metadata fetcher)", "Range": "bytes=0-16384"},
-            follow_redirects=True,
-            timeout=10.0,
-        )
-        if resp.status_code not in (200, 206):
+    _headers = {"User-Agent": "Mozilla/5.0 (compatible; Dugg/0.1)"}
+
+    def _try_fetch(target: str) -> str:
+        try:
+            resp = httpx.get(target, headers=_headers, follow_redirects=True, timeout=10.0)
+            if resp.status_code != 200:
+                return ""
+        except (httpx.HTTPError, httpx.TimeoutException):
             return ""
-    except (httpx.HTTPError, httpx.TimeoutException):
-        return ""
-    html = resp.text
-    soup = BeautifulSoup(html, "html.parser")
-    # Check article:published_time OG tag
-    meta = soup.find("meta", attrs={"property": "article:published_time"})
-    if meta and meta.get("content"):
-        return meta["content"]
-    # Fall back to general extraction
-    return _extract_published_at(soup)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        meta = soup.find("meta", attrs={"property": "article:published_time"})
+        if meta and meta.get("content"):
+            return meta["content"]
+        return _extract_published_at(soup)
+
+    result = _try_fetch(url)
+    if result:
+        return result
+
+    # open.substack.com often 403s from servers due to Cloudflare bot
+    # detection. Try to resolve the publication's custom domain from the
+    # email body or by following the redirect chain with subprocess curl.
+    parsed = urlparse(url)
+    if parsed.hostname and "substack.com" in parsed.hostname:
+        parts = parsed.path.strip("/").split("/")
+        post_slug = parts[3] if len(parts) >= 4 and parts[0] == "pub" else parts[-1]
+
+        # Try to find the custom domain URL in the body
+        if body:
+            # Look for {domain}/p/{same-post-slug} in the body
+            import re as _re
+            pattern = _re.compile(
+                r"https?://(?:www\.)?([a-z0-9-]+\.[a-z]{2,})/p/" + _re.escape(post_slug)
+            )
+            m = pattern.search(body)
+            if m:
+                alt = f"https://www.{m.group(1)}/p/{post_slug}"
+                result = _try_fetch(alt)
+                if result:
+                    return result
+
+        # Last resort: use curl to follow the redirect (bypasses Cloudflare)
+        import subprocess
+        try:
+            proc = subprocess.run(
+                ["curl", "-sI", "-L", "-o", "/dev/null", "-w", "%{url_effective}", url],
+                capture_output=True, text=True, timeout=10,
+            )
+            effective = proc.stdout.strip()
+            if effective and effective != url and "substack.com" not in effective:
+                return _try_fetch(effective)
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+    return ""
 
 
 def sanitize_url(url: str) -> str:
