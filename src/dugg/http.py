@@ -581,6 +581,7 @@ async function doSetup() {{
                    background: none; border: none; color: #555; font-size: 1.1rem; cursor: pointer;
                    padding: 0 4px; line-height: 1; display: none; width: auto; }}
   .search-clear:hover {{ color: #ccc; background: none; }}
+  .feed-stats {{ font-size: 0.8rem; color: #555; margin-bottom: 1rem; }}
   .empty {{ color: #666; text-align: center; padding: 2rem 0; }}
   .item-actions {{ margin-top: 0.4rem; display: flex; gap: 0.5rem; }}
   .action-btn {{ width: auto; padding: 0.2rem 0.5rem; font-size: 0.75rem; background: transparent;
@@ -1356,7 +1357,24 @@ async function syncNow(e) {
   }
 }
 </script>"""
+        # Stats bar
+        n_items = len(feed)
+        contributors = set(submitter_cache.values())
+        n_contributors = len(contributors)
+        source_servers = set(r.get("source_server") or "" for r in feed) - {""}
+        n_sources = len(source_servers)
+        source_types = {}
+        for r in feed:
+            st = r.get("source_type") or "other"
+            source_types[st] = source_types.get(st, 0) + 1
+        type_parts = " · ".join(f"{count} {typ}" for typ, count in sorted(source_types.items(), key=lambda x: -x[1]) if typ != "other")
+        stats_detail = f" · {type_parts}" if type_parts else ""
+        contrib_label = f" · {n_contributors} contributor{'s' if n_contributors != 1 else ''}" if n_contributors > 1 else ""
+        source_label = f" · {n_sources} source{'s' if n_sources != 1 else ''}" if n_sources > 0 else ""
+        stats_html = f'<p class="feed-stats">{n_items} item{"s" if n_items != 1 else ""}{contrib_label}{source_label}{stats_detail}</p>' if n_items > 0 else ""
+
         body = f"""<h1>{page_title}</h1>
+{stats_html}
 {sync_html}
 {topic_html}
 {search_bar}
