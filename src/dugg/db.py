@@ -785,6 +785,7 @@ class DuggDB:
         tags: Optional[list[str]] = None,
         tag_source: str = "human",
         summary: str = "",
+        created_at: str = "",
     ) -> dict:
         """Add a resource to a collection, or attach a sibling note on collision.
 
@@ -808,7 +809,7 @@ class DuggDB:
         to the original resource as sibling notes, visible in the feed and
         findable in search.
         """
-        now = _now()
+        now = created_at or _now()
 
         # Collision path: same URL already exists in this collection.
         # Attach the new submitter's note as a sibling note (quarantined from

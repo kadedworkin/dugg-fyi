@@ -71,6 +71,7 @@ class FeedEntry:
     author: str
     is_private: bool
     categories: list[str] = field(default_factory=list)
+    updated_at: str = ""  # Server insertion date from <updated>, for replicating created_at
 
 
 def _entry_to_normalized(entry) -> Optional[FeedEntry]:
@@ -89,20 +90,21 @@ def _entry_to_normalized(entry) -> Optional[FeedEntry]:
         description = entry["description"]
 
     published_at = ""
-    for key in ("published_parsed", "updated_parsed", "created_parsed"):
-        tm = entry.get(key)
-        if tm:
-            try:
-                published_at = datetime.fromtimestamp(time.mktime(tm), tz=timezone.utc).isoformat()
-                break
-            except Exception:
-                pass
+    for key in ("published", "created"):
+        raw = entry.get(key)
+        if raw:
+            published_at = str(raw).strip()
+            break
     if not published_at:
-        for key in ("published", "updated", "created"):
-            raw = entry.get(key)
-            if raw:
-                published_at = str(raw).strip()
-                break
+        import calendar
+        for key in ("published_parsed", "created_parsed"):
+            tm = entry.get(key)
+            if tm:
+                try:
+                    published_at = datetime.fromtimestamp(calendar.timegm(tm), tz=timezone.utc).isoformat()
+                    break
+                except Exception:
+                    pass
 
     author = (entry.get("author") or "").strip()
 
@@ -113,6 +115,21 @@ def _entry_to_normalized(entry) -> Optional[FeedEntry]:
         if term:
             categories.append(term)
 
+    # Extract updated_at (server insertion date) separately from published_at.
+    # Prefer raw string to avoid timezone bugs with time.mktime on UTC structs.
+    updated_at = ""
+    raw_updated = entry.get("updated")
+    if raw_updated:
+        updated_at = str(raw_updated).strip()
+    if not updated_at:
+        tm = entry.get("updated_parsed")
+        if tm:
+            try:
+                import calendar
+                updated_at = datetime.fromtimestamp(calendar.timegm(tm), tz=timezone.utc).isoformat()
+            except Exception:
+                pass
+
     return FeedEntry(
         entry_id=entry_id,
         url=url,
@@ -122,6 +139,7 @@ def _entry_to_normalized(entry) -> Optional[FeedEntry]:
         author=author,
         is_private=is_private_link(url),
         categories=categories,
+        updated_at=updated_at,
     )
 
 
@@ -220,6 +238,7 @@ def ingest_entry(
         raw_metadata=raw_metadata,
         tags=tags,
         tag_source="agent",
+        created_at=entry.updated_at,
     )
 
 
