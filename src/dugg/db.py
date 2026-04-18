@@ -305,6 +305,16 @@ class DuggDB:
                 value TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS resource_deletions (
+                id TEXT PRIMARY KEY,
+                resource_id TEXT NOT NULL,
+                collection_id TEXT NOT NULL,
+                url TEXT NOT NULL,
+                title TEXT DEFAULT '',
+                deleted_at TEXT NOT NULL,
+                deleted_by TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS rss_subscriptions (
                 id TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL REFERENCES users(id),
@@ -1279,9 +1289,16 @@ class DuggDB:
         if not row:
             return {"error": "Resource not found in this collection"}
         info = dict(row)
+        now = _now()
         # CASCADE handles tags, reactions, publish_targets, resource_edges via FK
         self.conn.execute("DELETE FROM publish_queue WHERE resource_id = ?", (resource_id,))
         self.conn.execute("DELETE FROM resources WHERE id = ?", (resource_id,))
+        # Record tombstone for Atom feed propagation
+        self.conn.execute(
+            """INSERT OR IGNORE INTO resource_deletions (id, resource_id, collection_id, url, title, deleted_at, deleted_by)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (_uuid(), resource_id, collection_id, info["url"], info.get("title", ""), now, requester_id),
+        )
         self.conn.commit()
         self.emit_event("resource_deleted", actor_id=requester_id,
                         collection_id=collection_id,
@@ -1295,13 +1312,19 @@ class DuggDB:
             return 0
         placeholders = ",".join("?" for _ in user_ids)
         rows = self.conn.execute(
-            f"SELECT id FROM resources WHERE collection_id = ? AND submitted_by IN ({placeholders})",
+            f"SELECT id, url, title FROM resources WHERE collection_id = ? AND submitted_by IN ({placeholders})",
             [collection_id] + user_ids,
         ).fetchall()
         count = len(rows)
+        now = _now()
         for row in rows:
             self.conn.execute("DELETE FROM publish_queue WHERE resource_id = ?", (row["id"],))
             self.conn.execute("DELETE FROM resources WHERE id = ?", (row["id"],))
+            self.conn.execute(
+                """INSERT OR IGNORE INTO resource_deletions (id, resource_id, collection_id, url, title, deleted_at, deleted_by)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (_uuid(), row["id"], collection_id, row["url"], row["title"] or "", now, "system"),
+            )
         self.conn.commit()
         return count
 
@@ -1316,6 +1339,55 @@ class DuggDB:
         else:
             self.conn.execute("DELETE FROM publish_targets WHERE resource_id = ?", (resource_id,))
         self.conn.commit()
+
+    def list_recent_deletions(self, collection_id: str, since: str = "", limit: int = 100) -> list[dict]:
+        """Return recent deletion tombstones for a collection.
+
+        Used by the Atom feed to emit at:deleted-entry elements so subscribers
+        can prune their local copies.
+        """
+        if since:
+            rows = self.conn.execute(
+                """SELECT resource_id, url, title, deleted_at
+                   FROM resource_deletions
+                   WHERE collection_id = ? AND deleted_at > ?
+                   ORDER BY deleted_at DESC LIMIT ?""",
+                (collection_id, since, limit),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """SELECT resource_id, url, title, deleted_at
+                   FROM resource_deletions
+                   WHERE collection_id = ?
+                   ORDER BY deleted_at DESC LIMIT ?""",
+                (collection_id, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def prune_old_deletions(self, retention_days: int = 30):
+        """Remove tombstones older than the retention window."""
+        from datetime import timedelta
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).isoformat()
+        self.conn.execute("DELETE FROM resource_deletions WHERE deleted_at < ?", (cutoff,))
+        self.conn.commit()
+
+    def delete_resource_by_url(self, url: str, collection_id: str) -> dict:
+        """Delete a resource by URL within a collection. Used by RSS tombstone processing.
+
+        Bypasses the owner check since the deletion is driven by the upstream
+        server's authoritative tombstone, not a local user action.
+        """
+        row = self.conn.execute(
+            "SELECT id, url, title, submitted_by FROM resources WHERE url = ? AND collection_id = ?",
+            (url, collection_id),
+        ).fetchone()
+        if not row:
+            return {"error": "Resource not found"}
+        info = dict(row)
+        self.conn.execute("DELETE FROM publish_queue WHERE resource_id = ?", (info["id"],))
+        self.conn.execute("DELETE FROM resources WHERE id = ?", (info["id"],))
+        self.conn.commit()
+        return {"deleted": info["id"], "url": info["url"], "title": info.get("title", "")}
 
     def get_publish_targets(self, resource_id: str) -> list[dict]:
         """Get all publish targets for a resource."""

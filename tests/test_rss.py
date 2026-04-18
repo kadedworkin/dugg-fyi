@@ -12,6 +12,8 @@ import pytest
 from dugg.db import DuggDB
 from dugg.rss import (
     FeedEntry,
+    FeedTombstone,
+    _parse_tombstones,
     ingest_entry,
     is_private_link,
     sync_feed,
@@ -181,15 +183,16 @@ def test_ingest_entry_flags_private_link(db, user_and_collection):
     assert meta.get("is_private_link") is True
 
 
-def _mock_fetch_result(entries):
+def _mock_fetch_result(entries, tombstones=None):
     async def _mock(feed_url, *, etag="", last_modified="", timeout=20.0):
-        return entries, {
+        meta = {
             "etag": "new-etag",
             "last_modified": "Tue, 01 Apr 2026 12:00:00 GMT",
             "status": 200,
             "feed_title": "Mock Feed",
             "feed_description": "",
         }
+        return entries, tombstones or [], meta
     return _mock
 
 
@@ -217,3 +220,74 @@ def test_sync_feed_ingests_new_and_skips_seen(db, user_and_collection):
         result2 = asyncio.run(sync_feed(db, sub2))
     assert result2["new"] == 0
     assert result2["skipped"] == 2
+
+
+def test_parse_tombstones_from_atom():
+    xml = b"""<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:at="http://purl.org/atompub/tombstones/1.0">
+  <title>Test Feed</title>
+  <at:deleted-entry ref="res-abc123" when="2026-04-17T12:00:00+00:00">
+    <at:comment>Removed: Bad link</at:comment>
+    <link href="https://example.com/bad-link"/>
+  </at:deleted-entry>
+  <entry>
+    <title>Good Entry</title>
+    <link href="https://example.com/good"/>
+    <id>good-1</id>
+    <updated>2026-04-17T12:00:00+00:00</updated>
+  </entry>
+</feed>"""
+    tombstones = _parse_tombstones(xml)
+    assert len(tombstones) == 1
+    assert tombstones[0].ref == "res-abc123"
+    assert tombstones[0].url == "https://example.com/bad-link"
+    assert tombstones[0].when == "2026-04-17T12:00:00+00:00"
+
+
+def test_sync_feed_processes_tombstones(db, user_and_collection):
+    """Tombstones in the feed should delete matching local resources."""
+    user, coll_id = user_and_collection
+    sub = db.add_rss_subscription(user_id=user["id"], collection_id=coll_id,
+                                   feed_url="https://example.com/rss.xml")
+
+    e1 = FeedEntry(entry_id="a", url="https://example.com/a", title="A", description="",
+                   published_at="", author="", is_private=False)
+    e2 = FeedEntry(entry_id="b", url="https://example.com/b", title="B", description="",
+                   published_at="", author="", is_private=False)
+
+    # First sync — ingest both entries
+    with patch("dugg.rss.fetch_and_parse", _mock_fetch_result([e1, e2])):
+        result = asyncio.run(sync_feed(db, dict(sub)))
+    assert result["new"] == 2
+
+    # Second sync — tombstone for entry "a", entry "b" still present
+    tomb = FeedTombstone(ref="a", when="2026-04-17T13:00:00+00:00", url="https://example.com/a")
+    sub2 = dict(sub)
+    sub2["seen_entry_ids"] = result["seen_entry_ids"]
+    with patch("dugg.rss.fetch_and_parse", _mock_fetch_result([e2], tombstones=[tomb])):
+        result2 = asyncio.run(sync_feed(db, sub2))
+    assert result2["deleted"] == 1
+    assert result2["skipped"] == 1  # e2 already seen
+
+    # Verify the resource was actually deleted
+    feed = db.get_feed(user["id"], limit=50)
+    urls = [r["url"] for r in feed]
+    assert "https://example.com/a" not in urls
+    assert "https://example.com/b" in urls
+
+    # Tombstone ref should be removed from seen_entry_ids
+    seen = json.loads(result2["seen_entry_ids"])
+    assert "a" not in seen
+    assert "b" in seen
+
+
+def test_resource_deletions_table(db, user_and_collection):
+    """delete_resource should record a tombstone in resource_deletions."""
+    user, coll_id = user_and_collection
+    res = db.add_resource(url="https://example.com/delete-me", collection_id=coll_id,
+                          submitted_by=user["id"], title="Delete Me")
+    db.delete_resource(res["id"], coll_id, user["id"])
+    deletions = db.list_recent_deletions(coll_id)
+    assert len(deletions) == 1
+    assert deletions[0]["resource_id"] == res["id"]
+    assert deletions[0]["url"] == "https://example.com/delete-me"

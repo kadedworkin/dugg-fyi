@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Iterable, Optional
@@ -72,6 +73,42 @@ class FeedEntry:
     is_private: bool
     categories: list[str] = field(default_factory=list)
     updated_at: str = ""  # Server insertion date from <updated>, for replicating created_at
+
+
+@dataclass
+class FeedTombstone:
+    """A deleted-entry tombstone from an Atom feed (RFC 6721)."""
+    ref: str       # resource ID from the server
+    when: str      # ISO 8601 deletion timestamp
+    url: str       # link href, for matching local resources by URL
+
+
+def _parse_tombstones(raw_xml: bytes) -> list[FeedTombstone]:
+    """Extract at:deleted-entry elements from raw Atom XML.
+
+    feedparser ignores these, so we parse them directly with ElementTree.
+    """
+    tombstones = []
+    try:
+        root = ET.fromstring(raw_xml)
+    except ET.ParseError:
+        return []
+    ns = {
+        "atom": "http://www.w3.org/2005/Atom",
+        "at": "http://purl.org/atompub/tombstones/1.0",
+    }
+    for el in root.findall("at:deleted-entry", ns):
+        ref = (el.get("ref") or "").strip()
+        when = (el.get("when") or "").strip()
+        url = ""
+        link = el.find("atom:link", ns)
+        if link is None:
+            link = el.find("link")
+        if link is not None:
+            url = (link.get("href") or "").strip()
+        if ref and url:
+            tombstones.append(FeedTombstone(ref=ref, when=when, url=url))
+    return tombstones
 
 
 def _entry_to_normalized(entry) -> Optional[FeedEntry]:
@@ -149,12 +186,15 @@ async def fetch_and_parse(
     etag: str = "",
     last_modified: str = "",
     timeout: float = 20.0,
-) -> tuple[list[FeedEntry], dict]:
-    """Fetch a feed URL and parse it. Returns (entries, metadata).
+) -> tuple[list[FeedEntry], list[FeedTombstone], dict]:
+    """Fetch a feed URL and parse it. Returns (entries, tombstones, metadata).
 
     `metadata` is a dict with keys `etag`, `last_modified`, `status`,
     `feed_title`, `feed_description` — suitable for stashing alongside the
     subscription record so the next poll can send conditional-GET headers.
+
+    `tombstones` contains RFC 6721 at:deleted-entry elements parsed from
+    the raw XML — feedparser ignores these.
     """
     headers = {
         "User-Agent": "Dugg-RSS/0.1 (+https://dugg.fyi)",
@@ -172,22 +212,25 @@ async def fetch_and_parse(
             resp = await client.get(feed_url, headers=headers)
     except (httpx.HTTPError, httpx.TimeoutException) as e:
         logger.warning(f"RSS fetch failed for {feed_url}: {e}")
-        return [], meta
+        return [], [], meta
 
     meta["status"] = resp.status_code
     if resp.status_code == 304:
-        return [], meta
+        return [], [], meta
     if resp.status_code >= 400:
         logger.warning(f"RSS {resp.status_code} for {feed_url}")
-        return [], meta
+        return [], [], meta
 
     meta["etag"] = resp.headers.get("etag", "") or etag
     meta["last_modified"] = resp.headers.get("last-modified", "") or last_modified
 
+    # Parse tombstones from raw XML before feedparser strips them
+    tombstones = _parse_tombstones(resp.content)
+
     parsed = feedparser.parse(resp.content)
     if parsed.get("bozo") and not parsed.get("entries"):
         logger.warning(f"Feed parse error for {feed_url}: {parsed.get('bozo_exception')}")
-        return [], meta
+        return [], tombstones, meta
 
     feed_info = parsed.get("feed", {}) or {}
     meta["feed_title"] = (feed_info.get("title") or "").strip()
@@ -198,7 +241,7 @@ async def fetch_and_parse(
         norm = _entry_to_normalized(e)
         if norm:
             entries.append(norm)
-    return entries, meta
+    return entries, tombstones, meta
 
 
 def ingest_entry(
@@ -253,10 +296,11 @@ async def sync_feed(
     `subscription` is a dict with keys: id, user_id, collection_id, feed_url,
     etag, last_modified, seen_entry_ids (JSON-encoded list), tag_label.
 
-    Returns `{new: int, skipped: int, status: int, etag: str, last_modified: str,
-    feed_title: str}` so the caller can persist state and report back.
+    Returns `{new: int, skipped: int, deleted: int, status: int, etag: str,
+    last_modified: str, feed_title: str}` so the caller can persist state
+    and report back.
     """
-    entries, meta = await fetch_and_parse(
+    entries, tombstones, meta = await fetch_and_parse(
         subscription["feed_url"],
         etag=subscription.get("etag", "") or "",
         last_modified=subscription.get("last_modified", "") or "",
@@ -268,6 +312,18 @@ async def sync_feed(
     except (ValueError, TypeError):
         seen = []
     seen_set = set(seen)
+
+    # Process tombstones FIRST — remove deleted resources before adding new ones
+    deleted_count = 0
+    for tomb in tombstones:
+        result = db.delete_resource_by_url(tomb.url, subscription["collection_id"])
+        if "deleted" in result:
+            deleted_count += 1
+            # Remove from seen set so we don't track stale IDs
+            if tomb.ref in seen_set:
+                seen_set.discard(tomb.ref)
+                seen = [s for s in seen if s != tomb.ref]
+            logger.info(f"RSS tombstone: removed {tomb.url} (ref={tomb.ref})")
 
     tag_label = subscription.get("tag_label") or "rss"
     new_count = 0
@@ -294,6 +350,7 @@ async def sync_feed(
     return {
         "new": new_count,
         "skipped": skipped,
+        "deleted": deleted_count,
         "status": meta["status"],
         "etag": meta["etag"],
         "last_modified": meta["last_modified"],
@@ -305,6 +362,7 @@ async def sync_feed(
 async def rss_loop(db, *, interval: int = 60):
     """Background polling loop. Wakes every `interval` seconds, syncs any
     subscription whose next_poll_at has passed."""
+    poll_count = 0
     while True:
         try:
             due = db.list_due_rss_subscriptions()
@@ -324,8 +382,18 @@ async def rss_loop(db, *, interval: int = 60):
                 )
                 if result["new"]:
                     logger.info(f"RSS[{sub['feed_url']}]: +{result['new']} new")
+                if result["deleted"]:
+                    logger.info(f"RSS[{sub['feed_url']}]: -{result['deleted']} removed (tombstones)")
             except Exception as e:
                 logger.error(f"RSS sync error for {sub.get('feed_url')}: {e}")
+
+        # Prune expired tombstones once per ~24h of polling (every ~1440 iterations at 60s)
+        poll_count += 1
+        if poll_count % 1440 == 0:
+            try:
+                db.prune_old_deletions()
+            except Exception as e:
+                logger.error(f"Tombstone pruning error: {e}")
 
         await asyncio.sleep(interval)
 

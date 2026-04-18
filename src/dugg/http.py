@@ -843,8 +843,17 @@ async function doSetup() {{
         page_topic = ""
 
         if want_atom:
-            # Atom feed with full metadata
+            # Atom feed with full metadata + tombstones (RFC 6721)
             srv_url = d.get_config("server_url", "")
+            # Collect tombstones from all accessible collections
+            accessible = d._accessible_collection_ids(user["id"])
+            tombstones_xml = ""
+            for coll_id in accessible:
+                for tomb in d.list_recent_deletions(coll_id):
+                    tombstones_xml += f"""<at:deleted-entry ref="{_xml_escape(tomb['resource_id'])}" when="{tomb['deleted_at']}">
+  <at:comment>Removed: {_xml_escape(tomb.get('title') or tomb['url'])}</at:comment>
+  <link href="{_xml_escape(tomb['url'])}"/>
+</at:deleted-entry>\n"""
             entries = ""
             for r in feed:
                 title = r.get("title") or r["url"]
@@ -884,10 +893,10 @@ async function doSetup() {{
   <summary>{_xml_escape(content)}</summary>
 </entry>\n"""
             atom = f"""<?xml version="1.0" encoding="utf-8"?>
-<feed xmlns="http://www.w3.org/2005/Atom">
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:at="http://purl.org/atompub/tombstones/1.0">
   <title>{_xml_escape(page_title)}</title>
   <updated>{feed[0]['created_at'] if feed else ''}</updated>
-{entries}</feed>"""
+{tombstones_xml}{entries}</feed>"""
             return HTMLResponse(atom, media_type="application/atom+xml")
 
         # HTML feed view

@@ -253,7 +253,7 @@ async def poll_feed(
     """Poll one feed, push new entries, update state in place. Returns result dict."""
     key = feed.url
     cached = state.get(key) or {}
-    entries, meta = await fetch_and_parse(
+    entries, _tombstones, meta = await fetch_and_parse(
         feed.url,
         etag=cached.get("etag", ""),
         last_modified=cached.get("last_modified", ""),
