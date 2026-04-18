@@ -1341,7 +1341,7 @@ async function deleteItem(id) {
                     attrib = f"by {added_by}"
                 elif added_date:
                     attrib = f"on {added_date}"
-                if attrib and pub_date and pub_date != added_date:
+                if attrib and pub_date:
                     attrib += f" (published {pub_date})"
                 meta = []
                 if attrib:
@@ -1352,6 +1352,8 @@ async function deleteItem(id) {
                     res_lines.append(" · ".join(meta))
                 if r.get("note"):
                     res_lines.append(f"_{_xml_escape(r['note'])}_")
+                if r.get("description"):
+                    res_lines.append(f">{_xml_escape(r['description'][:200])}")
                 res_text = "\n".join(res_lines)
                 text_lines.extend(res_lines + [""])
                 blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": res_text}})
@@ -1369,7 +1371,7 @@ async function deleteItem(id) {
                         ],
                     })
                 blocks.append({"type": "divider"})
-            return JSONResponse({"response_type": "in_channel", "text": "\n".join(text_lines), "blocks": blocks})
+            return JSONResponse({"response_type": "in_channel", "text": "\n".join(text_lines), "blocks": blocks, "unfurl_links": False, "unfurl_media": False})
 
         # /dugg <url> [--note ...] → add resource
         url = text.split()[0].strip("<>")
@@ -1460,6 +1462,8 @@ async function deleteItem(id) {
                 res_lines.append(attrib)
             if r.get("note"):
                 res_lines.append(f"_{_xml_escape(r['note'])}_")
+            if r.get("description"):
+                res_lines.append(f">{_xml_escape(r['description'][:200])}")
             res_text = "\n".join(res_lines)
             text_lines.extend(res_lines + [""])
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": res_text}})
@@ -1477,7 +1481,7 @@ async function deleteItem(id) {
                     ],
                 })
             blocks.append({"type": "divider"})
-        return JSONResponse({"response_type": "in_channel", "text": "\n".join(text_lines), "blocks": blocks})
+        return JSONResponse({"response_type": "in_channel", "text": "\n".join(text_lines), "blocks": blocks, "unfurl_links": False, "unfurl_media": False})
 
     # --- Slack interactive actions (Block Kit buttons) ---
 

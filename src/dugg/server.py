@@ -15,6 +15,27 @@ from dugg.db import DuggDB, _now
 from dugg.enrichment import enrich_url
 from dugg.sync import start_sync_daemon
 
+
+def _mcp_pub_date(resource: dict) -> str:
+    """Extract published_at from raw_metadata as YYYY-MM-DD."""
+    raw = resource.get("raw_metadata")
+    if not raw:
+        return ""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (ValueError, TypeError):
+            return ""
+    if not isinstance(raw, dict):
+        return ""
+    val = raw.get("published_at") or raw.get("updated_at")
+    if not val:
+        return ""
+    s = str(val).strip()
+    if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+        return s[:10]
+    return ""
+
 # --- Server Setup ---
 
 db: Optional[DuggDB] = None
@@ -333,6 +354,7 @@ async def list_tools() -> list[Tool]:
                     "onboarding_mode": {"type": "string", "enum": ["graduated", "full_access"], "description": "Onboarding preset: 'graduated' (default) or 'full_access' (sets horizon=-1, storage=-1, index=full)"},
                     "pruning_mode": {"type": "string", "enum": ["interaction", "none"], "description": "Member pruning policy: 'interaction' (prune inactive after grace period) or 'none' (never prune)"},
                     "pruning_grace_days": {"type": "integer", "description": "Days of inactivity before a member can be pruned (default 14). Only applies when pruning_mode is 'interaction'."},
+                    "pruning_stale_days": {"type": "integer", "description": "Days since last seen before a member is considered stale (default 60). Set to -1 to never stale-prune (recommended for broadcast servers)."},
                     "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
                 },
                 "required": ["instance_id"],
@@ -1394,7 +1416,12 @@ def _handle_search(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
             lines.append(f"  Tags: {tags_str}")
         if r.get("note"):
             lines.append(f"  Note: {r['note'][:200]}")
-        lines.append(f"  URL: <{r['url']}>")
+        if r.get("description"):
+            lines.append(f"  Description: {r['description'][:200]}")
+        lines.append(f"  URL: `{r['url']}`")
+        pub_date = _mcp_pub_date(r)
+        if pub_date:
+            lines.append(f"  Published: {pub_date}")
         lines.append("")
     return [TextContent(type="text", text="\n".join(lines))]
 
@@ -1421,8 +1448,13 @@ def _handle_feed(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
             lines.append(f"  Tags: {tags_str}")
         if r.get("note"):
             lines.append(f"  Note: {r['note'][:200]}")
-        lines.append(f"  URL: <{r['url']}>")
+        if r.get("description"):
+            lines.append(f"  Description: {r['description'][:200]}")
+        lines.append(f"  URL: `{r['url']}`")
         lines.append(f"  Added: {r['created_at']}")
+        pub_date = _mcp_pub_date(r)
+        if pub_date:
+            lines.append(f"  Published: {pub_date}")
         lines.append("")
     return [TextContent(type="text", text="\n".join(lines))]
 
@@ -1817,6 +1849,8 @@ def _handle_instance_update(d: DuggDB, user_id: str, args: dict) -> list[TextCon
         updates["pruning_mode"] = args["pruning_mode"]
     if "pruning_grace_days" in args and args["pruning_grace_days"] is not None:
         updates["pruning_grace_days"] = args["pruning_grace_days"]
+    if "pruning_stale_days" in args and args["pruning_stale_days"] is not None:
+        updates["pruning_stale_days"] = args["pruning_stale_days"]
     # Handle onboarding_mode preset — overrides individual settings
     onboarding_mode = args.get("onboarding_mode", "")
     if onboarding_mode == "full_access":
@@ -1858,6 +1892,8 @@ def _handle_instance_policy(d: DuggDB, user_id: str, args: dict) -> list[TextCon
     lines.append(f"Pruning mode: {policy['pruning_mode']}")
     if policy['pruning_mode'] == 'interaction':
         lines.append(f"Pruning grace period: {policy.get('pruning_grace_days', 14)} days")
+        stale = policy.get('pruning_stale_days', 60)
+        lines.append(f"Pruning stale timeout: {'never' if stale == -1 else f'{stale} days'}")
     lines.append(f"Access mode: {policy['access_mode']}")
     return [TextContent(type="text", text="\n".join(lines))]
 
