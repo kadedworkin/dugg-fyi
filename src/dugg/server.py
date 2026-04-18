@@ -1097,9 +1097,13 @@ def _handle_paste(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
             f"Do not retry — wait until tomorrow (UTC midnight reset)."
         ))]
 
+    # Try to extract a canonical URL from the body (e.g. Substack post link)
+    from dugg.enrichment import extract_canonical_url
+    canonical = extract_canonical_url(body)
+
     from dugg.db import _uuid
     res_id = _uuid()
-    synthetic_url = f"dugg://content/{res_id}"
+    url = canonical or f"dugg://content/{res_id}"
 
     metadata = {}
     if source_label:
@@ -1108,7 +1112,7 @@ def _handle_paste(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
         metadata["published_at"] = published_at
 
     resource = d.add_resource(
-        url=synthetic_url,
+        url=url,
         collection_id=coll_id,
         submitted_by=user_id,
         note=note,
@@ -1121,19 +1125,12 @@ def _handle_paste(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
         tag_source="human" if tags else "agent",
     )
 
-    # Try to extract a canonical URL from the body (e.g. Substack post link)
-    from dugg.enrichment import extract_canonical_url
-    canonical = extract_canonical_url(body)
-    if canonical:
-        d.update_resource(resource["id"], url=canonical)
-        resource["url"] = canonical
-
     word_count = len(body.split())
     summary = f"Pasted: {title}\n"
     summary += f"ID: {resource['id']}\n"
     summary += f"Type: {source_type}\n"
     if canonical:
-        summary += f"URL: {canonical}\n"
+        summary += f"URL: {resource['url']}\n"
     if source_label:
         summary += f"Source: {source_label}\n"
     summary += f"Content: {word_count} words\n"
