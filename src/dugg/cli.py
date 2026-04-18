@@ -685,6 +685,16 @@ def _user_name_cache(db):
     return {r["id"]: r["name"] for r in rows}
 
 
+def _resolve_display_url(url: str, server_url: str = "") -> str:
+    """Resolve dugg:// internal URLs to web-accessible /r/ URLs."""
+    if url.startswith("dugg://content/"):
+        resource_id = url.removeprefix("dugg://content/")
+        if server_url:
+            return f"{server_url.rstrip('/')}/r/{resource_id}"
+        return f"/r/{resource_id}"
+    return url
+
+
 def _short_date(value) -> str:
     """Coerce an ISO-ish date/datetime string to YYYY-MM-DD, or '' if it can't."""
     if not value:
@@ -968,6 +978,7 @@ def cmd_search(args):
                         tags=search_tags, submitted_by=submitted_by,
                         limit=getattr(args, "limit", 20))
     sibling_notes = db.batch_resource_notes([r["id"] for r in results])
+    srv_url = db.get_config("server_url", "")
     db.close()
 
     if not results:
@@ -981,8 +992,9 @@ def cmd_search(args):
         added_date = _short_date(r.get("created_at", ""))
         pub_date = _publication_date(r.get("raw_metadata"))
         source = r.get("source_server", "")
+        display_url = _resolve_display_url(r["url"], srv_url)
         print(f"  {title}")
-        print(f"    {r['url']}")
+        print(f"    {display_url}")
         meta = _format_attribution(added_by, added_date, pub_date, source)
         if meta:
             print(f"    {meta}")
@@ -1050,6 +1062,7 @@ def cmd_feed(args):
     limit = getattr(args, "limit", 20)
     results = db.get_feed(user["id"], limit=limit)
     sibling_notes = db.batch_resource_notes([r["id"] for r in results])
+    srv_url = server_url
     db.close()
 
     if not results:
@@ -1063,8 +1076,9 @@ def cmd_feed(args):
         added_by = names.get(r.get("submitted_by", ""), "")
         pub_date = _publication_date(r.get("raw_metadata"))
         source = r.get("source_server", "")
+        display_url = _resolve_display_url(r["url"], srv_url)
         print(f"  {title}")
-        print(f"    {r['url']}")
+        print(f"    {display_url}")
         meta = _format_attribution(added_by, added_date, pub_date, source)
         if meta:
             print(f"    {meta}")

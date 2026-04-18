@@ -48,6 +48,16 @@ def _short_date(value) -> str:
     return ""
 
 
+def _resolve_display_url(url: str, server_url: str = "") -> str:
+    """Resolve dugg:// internal URLs to web-accessible /r/ URLs."""
+    if url.startswith("dugg://content/"):
+        resource_id = url.removeprefix("dugg://content/")
+        if server_url:
+            return f"{server_url.rstrip('/')}/r/{resource_id}"
+        return f"/r/{resource_id}"
+    return url
+
+
 def _resource_pub_date(resource: dict) -> str:
     """Pull a publication date (YYYY-MM-DD) out of the resource's raw_metadata, if any."""
     raw = resource.get("raw_metadata")
@@ -1325,6 +1335,7 @@ async function deleteItem(id) {
                 return JSONResponse({"response_type": "ephemeral", "text": "Feed is empty. Add something with `/dugg https://...`"})
             names = {r["id"]: r["name"] for r in d.conn.execute("SELECT id, name FROM users").fetchall()}
             sibling_notes = d.batch_resource_notes([r["id"] for r in feed])
+            srv_url = d.get_config("server_url", "")
             blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": f"*Latest {len(feed)} resource(s):*"}}]
             text_lines = [f"*Latest {len(feed)} resource(s):*\n"]
             for r in feed:
@@ -1333,8 +1344,9 @@ async function deleteItem(id) {
                 source = r.get("source_server", "")
                 added_date = _short_date(r.get("created_at"))
                 pub_date = _resource_pub_date(r)
+                display_url = _resolve_display_url(r["url"], srv_url)
                 res_lines = [f"*{_xml_escape(title)}*"]
-                res_lines.append(f"<{r['url']}>")
+                res_lines.append(f"<{display_url}>")
                 attrib = ""
                 if added_by and added_date:
                     attrib = f"by {added_by} on {added_date}"
@@ -1445,6 +1457,7 @@ async function deleteItem(id) {
             return JSONResponse({"response_type": "ephemeral", "text": f'No results for "{_xml_escape(search_text)}"'})
         names = {r["id"]: r["name"] for r in d.conn.execute("SELECT id, name FROM users").fetchall()}
         sibling_notes = d.batch_resource_notes([r["id"] for r in results])
+        srv_url = d.get_config("server_url", "")
         blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": f'*{len(results)} result(s) for "{_xml_escape(search_text)}":*'}}]
         text_lines = [f'*{len(results)} result(s) for "{_xml_escape(search_text)}":*\n']
         for r in results:
@@ -1452,8 +1465,9 @@ async function deleteItem(id) {
             added_by = names.get(r.get("submitted_by", ""), "")
             added_date = _short_date(r.get("created_at"))
             pub_date = _resource_pub_date(r)
+            display_url = _resolve_display_url(r["url"], srv_url)
             res_lines = [f"*{_xml_escape(title)}*"]
-            res_lines.append(f"<{r['url']}>")
+            res_lines.append(f"<{display_url}>")
             attrib = ""
             if added_by and added_date:
                 attrib = f"by {added_by} on {added_date}"

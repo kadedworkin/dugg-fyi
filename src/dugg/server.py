@@ -16,6 +16,16 @@ from dugg.enrichment import enrich_url
 from dugg.sync import start_sync_daemon
 
 
+def _resolve_display_url(url: str, server_url: str = "") -> str:
+    """Resolve dugg:// internal URLs to web-accessible /r/ URLs."""
+    if url.startswith("dugg://content/"):
+        resource_id = url.removeprefix("dugg://content/")
+        if server_url:
+            return f"{server_url.rstrip('/')}/r/{resource_id}"
+        return f"/r/{resource_id}"
+    return url
+
+
 def _mcp_pub_date(resource: dict) -> str:
     """Extract published_at from raw_metadata as YYYY-MM-DD."""
     raw = resource.get("raw_metadata")
@@ -1422,7 +1432,8 @@ def _handle_search(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
             lines.append(f"  Note: {label}{sn['note'][:200]}")
         if r.get("description"):
             lines.append(f"  Description: {r['description'][:200]}")
-        lines.append(f"  URL: `{r['url']}`")
+        display_url = _resolve_display_url(r["url"], d.get_config("server_url", ""))
+        lines.append(f"  URL: `{display_url}`")
         pub_date = _mcp_pub_date(r)
         if pub_date:
             lines.append(f"  Published: {pub_date}")
@@ -1458,7 +1469,8 @@ def _handle_feed(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
             lines.append(f"  Note: {label}{sn['note'][:200]}")
         if r.get("description"):
             lines.append(f"  Description: {r['description'][:200]}")
-        lines.append(f"  URL: `{r['url']}`")
+        display_url = _resolve_display_url(r["url"], d.get_config("server_url", ""))
+        lines.append(f"  URL: `{display_url}`")
         lines.append(f"  Added: {r['created_at']}")
         pub_date = _mcp_pub_date(r)
         if pub_date:
