@@ -668,18 +668,26 @@ async function doSetup() {{
             }
 
             if invite_role == "contributor":
+                feed_url = f"{server_url_json}/feed/{user['api_key']}" if server_url_json else None
                 response_data["quickstart"] = [
                     {
                         "step": 1,
                         "action": "Set up your local Dugg",
-                        "commands": ["git clone https://github.com/kadedworkin/dugg-fyi.git", "cd dugg-fyi && uv sync", "dugg init", "dugg serve"],
-                        "what_happens": "Creates your personal knowledge base. Starts empty — the shared server is where value comes from first.",
+                        "commands": ["git clone https://github.com/kadedworkin/dugg-fyi.git", "cd dugg-fyi && uv sync", "dugg init"],
+                        "what_happens": "Creates your personal knowledge base.",
                     },
                     {
                         "step": 2,
-                        "action": "Explore what's already here",
+                        "action": "Sync shared server content into local",
+                        "commands": [f"dugg rss subscribe {feed_url} --tag {instance['name'] if instance else 'shared'}", "dugg rss poll"] if feed_url else [],
+                        "feed_url": feed_url,
+                        "what_happens": "Backfills all existing content from the shared server into your local Dugg. New items sync automatically every hour. No empty starting point.",
+                    },
+                    {
+                        "step": 3,
+                        "action": "Connect and explore",
                         "tools": ["dugg_welcome", "dugg_feed", "dugg_search", "dugg_react"],
-                        "what_happens": "Day-one value: browse what others have shared, search for topics, react to signal value. Use dugg_catchup later for incremental updates.",
+                        "what_happens": "Browse what others have shared, search for topics, react to signal value. Content is already in your local feed from step 2.",
                     },
                 ]
             else:

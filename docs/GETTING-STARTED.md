@@ -123,11 +123,12 @@ Someone invites you to their server. You sign up, get an API key, and your agent
 
 **Best for:** Power users, agents that work across contexts, anyone who wants private *and* shared knowledge.
 
-You run a local Dugg for your private stuff and join one or more shared servers for community content. Your agent talks to all of them. You choose what to publish from local to shared — nothing leaks automatically.
+You run a local Dugg for your private stuff and join one or more shared servers for community content. Your agent talks to all of them. Content flows both ways: shared server content syncs into your local instance automatically via RSS, and you choose what to publish from local to shared.
 
 **What you get:**
 - Everything from Path A (private local knowledge base)
 - Everything from Path B (shared server access)
+- Automatic pull sync: shared server content appears in your local feed
 - The ability to publish selected resources from local to shared servers
 - Your agent can search across both local and shared content
 
@@ -142,7 +143,14 @@ You run a local Dugg for your private stuff and join one or more shared servers 
 
 2. **Join a shared server** (Path B above) — redeem your invite and get your API key.
 
-3. **Configure your agent for both** — two entries in your MCP config:
+3. **Sync the shared server's content into local:**
+   ```bash
+   dugg rss subscribe https://server.example.com/feed/dugg_your_user_key --tag server-name
+   dugg rss poll
+   ```
+   This immediately backfills all existing content from the shared server into your local Dugg. New items sync automatically every hour. Server-side dates are preserved.
+
+4. **Configure your agent for both** — two entries in your MCP config:
 
    ```json
    {
@@ -162,11 +170,11 @@ You run a local Dugg for your private stuff and join one or more shared servers 
    }
    ```
 
-4. **Use them naturally.** Your agent knows which is which:
+5. **Use them naturally.** Your agent knows which is which:
    - *"Dugg this article"* — saves to your local instance
    - *"Publish that to the team server"* — pushes it from local to shared
-   - *"Search the team Dugg for deployment guides"* — searches the shared server
-   - *"What's new on the team feed?"* — checks the shared server
+   - *"Search the team Dugg for deployment guides"* — searches local (includes synced content)
+   - *"What's new on the team feed?"* — checks local feed (auto-updated via RSS)
 
 **The publishing workflow:**
 
@@ -177,7 +185,7 @@ Your local Dugg is the source of truth. When you find something worth sharing:
 3. Publish it: your agent pushes it to the target server
 4. The shared server's members can now search, browse, and react to it
 
-Not everything local belongs on every server. Publishing is intentional, not automatic.
+Not everything local belongs on every server. Publishing is intentional, not automatic. Pull sync (RSS) is automatic — push sync (publish) is deliberate.
 
 ---
 
@@ -198,7 +206,7 @@ Both keys are linked. If you get banned, your agent's key stops working too. Thi
 | Shared server | That server's database | Members of that server |
 | Published from local → shared | Both (a copy is sent) | You locally + server members |
 
-There's no sync. Local and shared are separate databases. Publishing copies a resource from one to the other. If you delete it locally after publishing, the shared copy remains.
+Local and shared are separate databases. **Pull sync** happens automatically via RSS — shared server content flows into your local feed, preserving server-side dates. **Push sync** (publishing) is manual — you choose what to share. If you delete locally after publishing, the shared copy remains.
 
 ## Next steps
 

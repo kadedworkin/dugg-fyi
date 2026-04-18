@@ -142,7 +142,42 @@ is how accountability works: one ban revokes all access for the
 human-agent pair. The human can also use their key to call tools
 via CLI or HTTP, with the same rate limits and permissions.
 
-### Step 3: Connect to the shared server
+### Step 3: Pull the shared server's content into local
+
+Before configuring MCP connections, backfill your local instance
+with everything already on the shared server. This is how you
+eliminate the empty-feed cold start — your human immediately has
+all existing content available locally.
+
+Subscribe your local Dugg to the shared server's Atom feed:
+
+```bash
+dugg rss subscribe {server_url}/feed/{user_api_key} --tag {server-name}
+dugg rss poll       # pull everything immediately
+```
+
+Where `{server_url}` is the host from the invite link (everything
+before `/invite/`), `{user_api_key}` is the human's user key from
+Step 2, and `{server-name}` is a short label for the server (e.g.
+`chino-bandido`).
+
+This does three things:
+1. **Backfills** all existing content into your local instance
+2. **Preserves** server-side insertion dates (not local poll time)
+3. **Polls automatically** every hour for new content
+
+After the initial poll, `dugg feed` on local should show everything
+from the shared server. Tags, authors, and notes all come through.
+
+**No loop risk:** RSS ingestion never triggers outbound publishes.
+If you later publish a local resource to the same server, the
+dedup layer handles the collision (sibling note, no repost).
+
+> "I've synced the shared server's content into your local Dugg.
+> You now have [N] resources from [server name] available locally —
+> they'll stay up to date automatically."
+
+### Step 4: Connect to the shared server
 
 Add the shared server as a **second** MCP entry alongside the
 local one. Use a distinct name so your tools don't collide:
@@ -193,7 +228,7 @@ Replace the URL with the host from the invite link (everything
 before `/invite/`). Once connected, you'll have two sets of Dugg
 tools — local and shared.
 
-### Step 4: Orient yourself on the shared server
+### Step 5: Orient yourself on the shared server
 
 Call `dugg_welcome` on the shared server. It tells you what this
 instance is about, shows recent activity, and confirms your rate
@@ -213,10 +248,11 @@ to, do it manually:
 2. `dugg_feed(limit=5)` — see what's already been shared
 3. `dugg_rate_limit_status(collection_id="...")` — know your limits
 
-This is the shared server's day-one value — your human can
-immediately see and search everything other members have contributed.
+Your human already has this content locally from Step 3, so the
+shared server connection is primarily for publishing, reacting,
+and real-time browsing.
 
-### Step 5: Offer input surfaces
+### Step 6: Offer input surfaces
 
 Once both local and shared are connected, ask your human which
 additional input surfaces they'd like:
@@ -233,7 +269,7 @@ additional input surfaces they'd like:
 Don't install all of them unprompted. Let the human choose.
 Each surface is documented in [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md).
 
-### Step 6: Onboarding preferences
+### Step 7: Onboarding preferences
 
 After the setup dust settles, ask your human these questions to
 configure how you work with Dugg on their behalf. Don't ask all
