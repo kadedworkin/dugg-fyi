@@ -954,7 +954,9 @@ class DuggDB:
                 submitter_params = [submitted_by]
 
         if query.strip():
-            fts_query = query.replace('"', '""')
+            # Quote the query to escape FTS5 operators (hyphens, colons, etc.)
+            # "t-shirts" must not be parsed as t NOT shirts
+            fts_query = '"' + query.replace('"', '""') + '"'
             # UNION ALL both FTS indexes, keep the best rank per resource, then
             # rejoin `resources` for the full row. Sibling matches are filtered
             # so banned local submitters' notes stop surfacing immediately.
