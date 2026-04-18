@@ -405,6 +405,8 @@ class DuggDB:
             self.conn.execute("ALTER TABLE dugg_instances ADD COLUMN pruning_grace_days INTEGER DEFAULT 14")
         if "pruning_stale_days" not in inst_cols:
             self.conn.execute("ALTER TABLE dugg_instances ADD COLUMN pruning_stale_days INTEGER DEFAULT 60")
+        if "ingest_api_key" not in inst_cols:
+            self.conn.execute("ALTER TABLE dugg_instances ADD COLUMN ingest_api_key TEXT DEFAULT ''")
 
         res_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(resources)").fetchall()}
         if "summary" not in res_cols:
