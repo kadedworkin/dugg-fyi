@@ -71,6 +71,8 @@ For remote connections (HTTP/SSE), see [docs/HTTP.md](docs/HTTP.md).
 
 **Zero LLM cost in the server.** All enrichment, summarization, and judgment runs in the agent layer on the user's tokens. Dugg stores, indexes, and retrieves — nothing more. This keeps the hosted server boring, predictable, and cheap.
 
+**Local enrichment, shared distribution.** YouTube and other platforms block requests from cloud provider IPs. Your private Dugg runs on your local machine — a residential IP that can pull full video transcripts and descriptions without bot detection. When you publish to a shared server, the content arrives already enriched. The shared server never contacts YouTube.
+
 **Trust networks over open firehoses.** Invite-only growth with tracked lineage. No content goes to strangers by default; federation is an opt-in relationship between trusted instances.
 
 ## Key concepts

@@ -70,6 +70,14 @@ Try it: ask your agent *"Dugg this: https://example.com/article — interesting 
 
 You can stop here. Private Dugg is a complete product on its own.
 
+#### Why private Dugg matters for enrichment
+
+YouTube and other platforms aggressively block requests from cloud provider IPs (AWS, DigitalOcean, GCP, etc.). A shared Dugg server hosted on a VPS often can't pull video descriptions or transcripts — YouTube returns bot-detection challenges that no tool can bypass from a datacenter IP.
+
+Your private Dugg runs on your local machine, which has a residential IP. Enrichment tools like `yt-dlp` work normally from residential connections. When you add a YouTube video to your private Dugg, your agent pulls the full description and transcript locally — then publishes the fully enriched resource to shared servers.
+
+This is the core reason the private + shared architecture exists: **your local machine is the enrichment engine, shared servers are the distribution layer.** Content arrives at shared servers already enriched with searchable transcripts, metadata, and descriptions — the shared server never needs to contact YouTube at all.
+
 ---
 
 ### Path B: Joining a shared server
