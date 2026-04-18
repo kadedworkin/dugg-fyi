@@ -6,33 +6,33 @@ Dugg has a setup model that's different from most apps. This page explains why, 
 
 Most tools have one account on one server. Dugg doesn't work that way.
 
-**Your local Dugg is yours.** It runs on your machine, stores everything in a local database, and works without an internet connection. Your agent connects to it directly. Nothing leaves your machine unless you choose to share it.
+**Your private Dugg is yours.** It runs on your machine, stores everything in a local database, and works without an internet connection. Your agent connects to it directly. Nothing leaves your machine unless you choose to share it.
 
 **A shared server is someone else's.** When you join a shared Dugg instance (like a team or community server), you get a separate account on that server. You can browse what others have shared, contribute your own finds, and react to content — but that's a different database with different users, different rules, and a different API key.
 
-**You can run both at the same time.** Your agent can talk to your local Dugg *and* one or more shared servers simultaneously. Your local instance is your private library. Each shared server is a reading room you've been invited into.
+**You can run both at the same time.** Your agent can talk to your private Dugg *and* one or more shared servers simultaneously. Your private instance is your personal library. Each shared server is a reading room you've been invited into.
 
-This isn't complexity for its own sake. It's how trust boundaries work: your data stays local by default, and you choose exactly what to share, with whom, on a per-server basis.
+This isn't complexity for its own sake. It's how trust boundaries work: your data stays private by default, and you choose exactly what to share, with whom, on a per-server basis.
 
 ### The closest analogy
 
-Think of it like running your own email server (local Dugg) and also having accounts on mailing lists (shared servers). The difference is that on shared Dugg servers, joining and contributing are the same act — there's no "subscribe but never post" mode. If you're in, you can search, browse, react, and add content within the server's rate limits.
+Think of it like running your own email server (private Dugg) and also having accounts on mailing lists (shared servers). The difference is that on shared Dugg servers, joining and contributing are the same act — there's no "subscribe but never post" mode. If you're in, you can search, browse, react, and add content within the server's rate limits.
 
 ---
 
 ## Choose your path
 
-### Path A: Local only
+### Path A: Private only
 
 **Best for:** Personal knowledge base, solo use, trying Dugg out.
 
-You install Dugg, run it on your machine, and connect your AI agent. Everything stays local. No accounts, no servers, no network.
+You install Dugg, run it on your machine, and connect your AI agent. Everything stays private. No accounts, no servers, no network.
 
 **What you get:**
 - A searchable knowledge base for links, articles, videos, notes
 - Full-text search across titles, transcripts, tags, and notes
 - Your agent handles enrichment (metadata, transcripts, summaries)
-- Chrome extension, CLI, email forwarding, and Slack integration all work locally
+- Chrome extension, CLI, email forwarding, and Slack integration all work with your private instance
 
 **Steps:**
 
@@ -68,7 +68,7 @@ dugg doctor
 
 Try it: ask your agent *"Dugg this: https://example.com/article — interesting take on X"* and then *"Search Dugg for X"*.
 
-You can stop here. Local Dugg is a complete product on its own.
+You can stop here. Private Dugg is a complete product on its own.
 
 ---
 
@@ -115,7 +115,7 @@ Someone invites you to their server. You sign up, get an API key, and your agent
    - *"Search Dugg for [topic]"* — find specific things
    - *"React to that last resource"* — signal value to the publisher
 
-**Important:** This path doesn't give you a local database. Everything lives on the shared server. If you also want a private local knowledge base, see Path C.
+**Important:** This path doesn't give you a private database. Everything lives on the shared server. If you also want a private knowledge base, see Path C.
 
 ---
 
@@ -123,18 +123,18 @@ Someone invites you to their server. You sign up, get an API key, and your agent
 
 **Best for:** Power users, agents that work across contexts, anyone who wants private *and* shared knowledge.
 
-You run a local Dugg for your private stuff and join one or more shared servers for community content. Your agent talks to all of them. Content flows both ways: shared server content syncs into your local instance automatically via RSS, and you choose what to publish from local to shared.
+You run a private Dugg for your own stuff and join one or more shared servers for community content. Your agent talks to all of them. Content flows both ways: shared server content syncs into your private instance automatically via RSS, and you choose what to publish from private to shared.
 
 **What you get:**
-- Everything from Path A (private local knowledge base)
+- Everything from Path A (private knowledge base)
 - Everything from Path B (shared server access)
-- Automatic pull sync: shared server content appears in your local feed
-- The ability to publish selected resources from local to shared servers
-- Your agent can search across both local and shared content
+- Automatic pull sync: shared server content appears in your private feed
+- The ability to publish selected resources from private to shared servers
+- Your agent can search across both private and shared content
 
 **Steps:**
 
-1. **Set up local first** (Path A above):
+1. **Set up private first** (Path A above):
    ```bash
    git clone https://github.com/kadedworkin/dugg-fyi.git
    cd dugg-fyi && uv sync
@@ -143,12 +143,12 @@ You run a local Dugg for your private stuff and join one or more shared servers 
 
 2. **Join a shared server** (Path B above) — redeem your invite and get your API key.
 
-3. **Sync the shared server's content into local:**
+3. **Sync the shared server's content into your private instance:**
    ```bash
    dugg rss subscribe https://server.example.com/feed/dugg_your_user_key --tag server-name
    dugg rss poll
    ```
-   This immediately backfills all existing content from the shared server into your local Dugg. New items sync automatically every hour. Server-side dates are preserved. Deletions sync too — when content is removed on the shared server, tombstones in the Atom feed trigger automatic removal from your local instance.
+   This immediately backfills all existing content from the shared server into your private Dugg. New items sync automatically every hour. Server-side dates are preserved. Deletions sync too — when content is removed on the shared server, tombstones in the Atom feed trigger automatic removal from your private instance.
 
 4. **Configure your agent for both** — two entries in your MCP config:
 
@@ -171,21 +171,21 @@ You run a local Dugg for your private stuff and join one or more shared servers 
    ```
 
 5. **Use them naturally.** Your agent knows which is which:
-   - *"Dugg this article"* — saves to your local instance
-   - *"Publish that to the team server"* — pushes it from local to shared
-   - *"Search the team Dugg for deployment guides"* — searches local (includes synced content)
-   - *"What's new on the team feed?"* — checks local feed (auto-updated via RSS)
+   - *"Dugg this article"* — saves to your private instance
+   - *"Publish that to the team server"* — pushes it from private to shared
+   - *"Search the team Dugg for deployment guides"* — searches private (includes synced content)
+   - *"What's new on the team feed?"* — checks private feed (auto-updated via RSS)
 
 **The publishing workflow:**
 
-Your local Dugg is the source of truth. When you find something worth sharing:
+Your private Dugg is the source of truth. When you find something worth sharing:
 
 1. Add it locally (your agent enriches it with metadata, transcripts, tags)
 2. Decide it belongs on a shared server
 3. Publish it: your agent pushes it to the target server
 4. The shared server's members can now search, browse, and react to it
 
-Not everything local belongs on every server. Publishing is intentional, not automatic. Pull sync (RSS) is automatic — push sync (publish) is deliberate.
+Not everything private belongs on every server. Publishing is intentional, not automatic. Pull sync (RSS) is automatic — push sync (publish) is deliberate.
 
 ---
 
@@ -202,18 +202,18 @@ Both keys are linked. If you get banned, your agent's key stops working too. Thi
 
 | Where you add it | Where it lives | Who can see it |
 |------------------|----------------|----------------|
-| Local Dugg | Your machine only | Just you and your agent |
+| Private Dugg | Your machine only | Just you and your agent |
 | Shared server | That server's database | Members of that server |
-| Published from local → shared | Both (a copy is sent) | You locally + server members |
+| Published from private → shared | Both (a copy is sent) | You + server members |
 
-Local and shared are separate databases. **Pull sync** happens automatically via RSS — shared server content flows into your local feed, preserving server-side dates. **Push sync** (publishing) is manual — you choose what to share. If you delete locally after publishing, the shared copy remains.
+Private and shared are separate databases. **Pull sync** happens automatically via RSS — shared server content flows into your private feed, preserving server-side dates. **Push sync** (publishing) is manual — you choose what to share. If you delete from your private instance after publishing, the shared copy remains.
 
 **Deletion behavior:**
 
 | Action | What happens |
 |--------|-------------|
-| Local delete | Removed locally only (unless published to servers, then upstream delete fires) |
-| Server delete | Tombstone propagates to RSS subscribers, local copies removed automatically |
+| Private delete | Removed from private only (unless published to servers, then upstream delete fires) |
+| Server delete | Tombstone propagates to RSS subscribers, synced copies removed automatically |
 
 ## Next steps
 

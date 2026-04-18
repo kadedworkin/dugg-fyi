@@ -1,6 +1,6 @@
 # Publishing & Federation
 
-Dugg instances federate through a publish/subscribe model. Your local Dugg is the source of truth — publishing pushes selected content to remote instances.
+Dugg instances federate through a publish/subscribe model. Your private Dugg is the source of truth — publishing pushes selected content to remote instances.
 
 ## Publishing
 
@@ -10,7 +10,7 @@ dugg_unpublish(resource_id="abc123", targets=["public"])
 dugg_unpublish(resource_id="abc123")  # unpublish from everything
 ```
 
-- Every resource starts local and unpublished
+- Every resource starts private and unpublished
 - You (or your agent) flag resources with named publish targets
 - Each target maps to a remote Dugg instance
 - Non-concentric circles: publish to any combination independently

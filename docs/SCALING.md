@@ -99,11 +99,11 @@ Same as large audience, plus:
 A subscriber's agent can still provide full retrieval value:
 
 1. Agent polls the shared server's Atom feed periodically
-2. Agent ingests new resources into the subscriber's **local** Dugg
-3. When the human asks a question, the agent searches **local** Dugg (which now includes shared content)
-4. Agent builds context from local results and sends it to the LLM
+2. Agent ingests new resources into the subscriber's **private** Dugg
+3. When the human asks a question, the agent searches **private** Dugg (which now includes shared content)
+4. Agent builds context from private results and sends it to the LLM
 
-This means the subscriber gets the same "search across everything" experience as a contributor — the only difference is they can't post back to the shared server. Their local Dugg becomes a mirror of what they have access to.
+This means the subscriber gets the same "search across everything" experience as a contributor — the only difference is they can't post back to the shared server. Their private Dugg becomes a mirror of what they have access to.
 
 ## When to split into multiple instances
 
