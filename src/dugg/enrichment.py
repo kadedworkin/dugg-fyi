@@ -416,8 +416,47 @@ def _clean_vtt(vtt_text: str) -> str:
     return " ".join(lines)
 
 
+async def _fetch_youtube_description_http(video_id: str) -> str:
+    """Fetch YouTube description by parsing ytInitialData from the watch page."""
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
+            r = await client.get(url, headers=headers)
+        m = re.search(r"var ytInitialData = ({.*?});</script>", r.text)
+        if not m:
+            return ""
+        data = json.loads(m.group(1))
+        contents = (
+            data.get("contents", {})
+            .get("twoColumnWatchNextResults", {})
+            .get("results", {})
+            .get("results", {})
+            .get("contents", [])
+        )
+        for item in contents:
+            desc = (
+                item.get("videoSecondaryInfoRenderer", {})
+                .get("attributedDescription", {})
+                .get("content", "")
+            )
+            if desc:
+                return desc.strip()
+    except Exception as exc:
+        logger.debug("HTTP description fetch failed for %s: %s", video_id, exc)
+    return ""
+
+
 async def fetch_youtube_description(video_id: str) -> str:
-    """Fetch YouTube video description using yt-dlp."""
+    """Fetch YouTube video description. Tries HTTP scrape first, yt-dlp as fallback."""
+    desc = await _fetch_youtube_description_http(video_id)
+    if desc:
+        return desc
+
+    # Fallback to yt-dlp
     import asyncio
 
     try:
