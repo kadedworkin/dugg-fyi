@@ -7,9 +7,12 @@ Runs alongside a user's Dugg server(s). Two responsibilities:
    enriches them and publishes to the appropriate Dugg server(s).
 
 2. **Event stream (Option B)** — SSE subscriber to each Dugg server.
-   Watches for `resource_added` events from the user's own submissions
-   that arrived through other paths (email, paste, Slack). Enriches
-   them via `dugg_edit` and federates via `dugg_publish`.
+   Watches for `resource_added` events. For the agent's own submissions
+   that arrived through other paths (email, paste, Slack), enriches
+   them via `dugg_edit` and federates via `dugg_publish`. For *any*
+   user's YouTube submissions, backfills description and transcript
+   from the local machine's residential IP (cloud servers can't fetch
+   from YouTube).
 
 De-dup: resources marked with metadata flag `agent_enriched=true` are
 skipped by the event listener. Option A sets this flag on every submission.
@@ -153,6 +156,62 @@ class DuggClient:
                             yield json.loads(payload)
                         except json.JSONDecodeError:
                             log.warning("skipping malformed SSE payload: %s", payload[:80])
+
+
+# --- YouTube enrichment (local residential IP) ---
+
+_YT_PATTERNS = (
+    re.compile(r"(?:youtube\.com/watch\?.*v=|youtu\.be/)([\w-]{11})"),
+)
+
+
+def _is_youtube_url(url: str) -> bool:
+    return any(p.search(url) for p in _YT_PATTERNS)
+
+
+def _extract_video_id(url: str) -> Optional[str]:
+    for p in _YT_PATTERNS:
+        m = p.search(url)
+        if m:
+            return m.group(1)
+    return None
+
+
+async def _enrich_youtube_locally(url: str) -> Optional[dict]:
+    """Pull YouTube description + transcript using the local enrichment library.
+
+    Uses the same yt-dlp + HTTP scrape pipeline from dugg.enrichment, which
+    works from residential IPs but fails on cloud provider IPs.
+    """
+    try:
+        from dugg.enrichment import fetch_youtube_description, fetch_youtube_transcript
+    except ImportError:
+        log.warning("dugg.enrichment not available — skipping YouTube backfill")
+        return None
+
+    video_id = _extract_video_id(url)
+    if not video_id:
+        return None
+
+    fields = {}
+    try:
+        desc = await fetch_youtube_description(video_id)
+        if desc:
+            fields["description"] = desc
+    except Exception as e:
+        log.warning("YouTube description fetch failed for %s: %s", video_id, e)
+
+    try:
+        transcript = await fetch_youtube_transcript(video_id)
+        if transcript:
+            fields["transcript"] = transcript
+    except Exception as e:
+        log.warning("YouTube transcript fetch failed for %s: %s", video_id, e)
+
+    if fields:
+        log.info("YouTube local enrichment for %s: desc=%d transcript=%d",
+                 video_id, len(fields.get("description", "")), len(fields.get("transcript", "")))
+    return fields or None
 
 
 # --- Enrichment ---
@@ -322,16 +381,14 @@ class DuggAgent:
     async def _handle_event(self, server_name: str, event: dict):
         if event.get("event_type") != "resource_added":
             return
-        my_uid = self.user_ids.get(server_name)
-        if not my_uid:
-            return
-        actor = event.get("user_id") or event.get("submitted_by") or event.get("actor_id")
-        if actor != my_uid:
-            return
 
         resource_id = event.get("resource_id") or (event.get("data") or {}).get("resource_id")
         if not resource_id:
             return
+
+        my_uid = self.user_ids.get(server_name)
+        actor = event.get("user_id") or event.get("submitted_by") or event.get("actor_id")
+        is_mine = my_uid and actor == my_uid
 
         client = self.clients[server_name]
         try:
@@ -341,25 +398,38 @@ class DuggAgent:
             log.warning("[%s] get_resource failed: %s", server_name, e)
             return
 
-        # Server's text response doesn't expose raw_metadata, so we can't read
-        # the agent_enriched flag back. We rely on the event stream filter:
-        # Option A injects agent_enriched=True at write time, which means an
-        # un-enriched event must have come from another path (paste, email,
-        # CLI). Re-enriching is safe; dugg_edit replaces description/tags.
         url = parsed.get("url", "")
         title = parsed.get("title", "") or parsed.get("resource", "")
-        content = await fetch_text(url) if url else ""
 
-        log.info("[%s] enriching %s via event stream", server_name, resource_id)
-        enriched = await llm_enrich(url, title, content, self.anthropic_key)
+        # YouTube enrichment: any user's submission gets description + transcript
+        # backfilled from the local machine's residential IP, since cloud servers
+        # can't fetch from YouTube.
+        yt_enriched = False
+        if _is_youtube_url(url):
+            desc_len = len(parsed.get("description", "").strip())
+            transcript_hint = parsed.get("transcript", "")
+            if desc_len == 0 or not transcript_hint:
+                log.info("[%s] YouTube backfill for %s (%s)", server_name, resource_id, title[:50])
+                yt_fields = await _enrich_youtube_locally(url)
+                if yt_fields:
+                    await client.edit_resource(resource_id, **yt_fields)
+                    yt_enriched = True
 
-        await client.edit_resource(
-            resource_id,
-            description=enriched.get("summary", ""),
-            tags=enriched.get("tags", []),
-            raw_metadata={"agent_enriched": True},
-        )
-        await self._federate(server_name, resource_id, content + " " + (enriched.get("summary") or ""))
+        # Full LLM enrichment: only for the agent's own submissions
+        if is_mine:
+            content = await fetch_text(url) if url else ""
+            log.info("[%s] enriching %s via event stream", server_name, resource_id)
+            enriched = await llm_enrich(url, title, content, self.anthropic_key)
+
+            await client.edit_resource(
+                resource_id,
+                description=enriched.get("summary", ""),
+                tags=enriched.get("tags", []),
+                raw_metadata={"agent_enriched": True},
+            )
+            await self._federate(server_name, resource_id, content + " " + (enriched.get("summary") or ""))
+        elif yt_enriched:
+            log.info("[%s] YouTube backfill complete for %s", server_name, resource_id)
 
 
 # --- HTTP API for Option A ---
