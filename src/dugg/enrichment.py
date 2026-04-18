@@ -460,8 +460,9 @@ def _clean_vtt(vtt_text: str) -> str:
     return " ".join(lines)
 
 
-async def _fetch_youtube_description_http(video_id: str) -> str:
-    """Fetch YouTube description by parsing ytInitialData from the watch page."""
+async def _fetch_youtube_page_data(video_id: str) -> dict:
+    """Fetch YouTube description and publish date by parsing ytInitialData from the watch page."""
+    result = {"description": "", "published_at": ""}
     url = f"https://www.youtube.com/watch?v={video_id}"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -472,7 +473,7 @@ async def _fetch_youtube_description_http(video_id: str) -> str:
             r = await client.get(url, headers=headers)
         m = re.search(r"var ytInitialData = ({.*?});</script>", r.text)
         if not m:
-            return ""
+            return result
         data = json.loads(m.group(1))
         contents = (
             data.get("contents", {})
@@ -482,23 +483,57 @@ async def _fetch_youtube_description_http(video_id: str) -> str:
             .get("contents", [])
         )
         for item in contents:
+            # Description from videoSecondaryInfoRenderer
             desc = (
                 item.get("videoSecondaryInfoRenderer", {})
                 .get("attributedDescription", {})
                 .get("content", "")
             )
             if desc:
-                return desc.strip()
+                result["description"] = desc.strip()
+            # Publish date from videoPrimaryInfoRenderer
+            date_text = (
+                item.get("videoPrimaryInfoRenderer", {})
+                .get("dateText", {})
+                .get("simpleText", "")
+            )
+            if date_text:
+                result["published_at"] = _parse_youtube_date(date_text)
+
+        # Also try microformat for a more reliable ISO date
+        microformat = (
+            data.get("microformat", {})
+            .get("playerMicroformatRenderer", {})
+        )
+        if microformat.get("publishDate") and not result["published_at"]:
+            result["published_at"] = microformat["publishDate"]
+        elif microformat.get("uploadDate") and not result["published_at"]:
+            result["published_at"] = microformat["uploadDate"]
+
     except Exception as exc:
-        logger.debug("HTTP description fetch failed for %s: %s", video_id, exc)
+        logger.debug("HTTP page data fetch failed for %s: %s", video_id, exc)
+    return result
+
+
+def _parse_youtube_date(text: str) -> str:
+    """Parse YouTube date strings like 'Apr 3, 2026' or 'Premiered Apr 3, 2026' into ISO format."""
+    import re as _re
+    # Strip common prefixes
+    text = _re.sub(r"^(?:Premiered|Streamed live|Streamed)\s+", "", text.strip())
+    from datetime import datetime as _dt
+    for fmt in ("%b %d, %Y", "%B %d, %Y", "%Y-%m-%d"):
+        try:
+            return _dt.strptime(text, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
     return ""
 
 
 async def fetch_youtube_description(video_id: str) -> str:
     """Fetch YouTube video description. Tries HTTP scrape first, yt-dlp as fallback."""
-    desc = await _fetch_youtube_description_http(video_id)
-    if desc:
-        return desc
+    page_data = await _fetch_youtube_page_data(video_id)
+    if page_data["description"]:
+        return page_data["description"]
 
     # Fallback to yt-dlp
     import asyncio
@@ -570,8 +605,46 @@ async def enrich_url(url: str) -> dict:
             result["thumbnail"] = meta.get("thumbnail", "")
             result["raw_metadata"] = meta
 
-            desc = await fetch_youtube_description(video_id)
-            result["description"] = desc
+            # Fetch description + publish date from page scrape
+            page_data = await _fetch_youtube_page_data(video_id)
+            result["description"] = page_data["description"]
+            if page_data["published_at"]:
+                result["raw_metadata"]["published_at"] = page_data["published_at"]
+
+            # If page scrape missed description or date, try yt-dlp fallback
+            need_desc = not result["description"]
+            need_date = "published_at" not in result["raw_metadata"]
+            if need_desc or need_date:
+                import asyncio as _aio
+                try:
+                    ytdlp = _yt_dlp_path()
+                    fields = []
+                    if need_desc:
+                        fields.append("%(description)s")
+                    if need_date:
+                        fields.append("%(upload_date)s")
+                    separator = "|||DUGG_SEP|||"
+                    print_fmt = separator.join(fields)
+                    cmd = [ytdlp, "--skip-download", "--print", print_fmt,
+                           "--remote-components", "ejs:github",
+                           f"https://www.youtube.com/watch?v={video_id}"]
+                    proc = await _aio.create_subprocess_exec(
+                        *cmd, stdout=_aio.subprocess.PIPE, stderr=_aio.subprocess.PIPE, env=_yt_dlp_env())
+                    stdout, _ = await _aio.wait_for(proc.communicate(), timeout=30)
+                    parts = stdout.decode("utf-8", errors="replace").strip().split(separator)
+                    idx = 0
+                    if need_desc and idx < len(parts) and parts[idx].strip():
+                        result["description"] = parts[idx].strip()
+                        idx += 1
+                    elif need_desc:
+                        idx += 1
+                    if need_date and idx < len(parts) and parts[idx].strip():
+                        raw_date = parts[idx].strip()
+                        # yt-dlp returns YYYYMMDD format
+                        if len(raw_date) == 8 and raw_date.isdigit():
+                            result["raw_metadata"]["published_at"] = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
+                except (FileNotFoundError, _aio.TimeoutError):
+                    pass
 
             transcript = await fetch_youtube_transcript(video_id)
             result["transcript"] = transcript
