@@ -2829,6 +2829,10 @@ class DuggDB:
         import urllib.error
         payload = event.get("payload", {})
         url = payload.get("url", "")
+        # Resolve dugg:// internal URLs to web-accessible /r/ URLs
+        if url.startswith("dugg://content/") and server_url:
+            resource_id = url.removeprefix("dugg://content/")
+            url = f"{server_url.rstrip('/')}/r/{resource_id}"
         title = payload.get("title", url)
         note = payload.get("note", "")
         event_type = event["event_type"]

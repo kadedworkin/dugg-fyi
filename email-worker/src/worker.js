@@ -32,7 +32,7 @@ export default {
         title: subject,
         body: body,
         source_type: "email",
-        source_label: `from ${message.from}`,
+        source_label: "email",
         published_at: publishedAt,
       }),
     });
