@@ -721,7 +721,7 @@ def _format_attribution(added_by: str, added_date: str, pub_date: str, source: s
     elif added_date:
         who_when = f"on {added_date}"
     if who_when:
-        if pub_date and pub_date != added_date:
+        if pub_date:
             who_when += f" (published {pub_date})"
         parts.append(who_when)
     elif pub_date:
@@ -967,6 +967,7 @@ def cmd_search(args):
     results = db.search(args.query, user["id"], collection_id=collection_id,
                         tags=search_tags, submitted_by=submitted_by,
                         limit=getattr(args, "limit", 20))
+    sibling_notes = db.batch_resource_notes([r["id"] for r in results])
     db.close()
 
     if not results:
@@ -987,6 +988,11 @@ def cmd_search(args):
             print(f"    {meta}")
         if r.get("note"):
             print(f"    Note: {r['note']}")
+        for sn in sibling_notes.get(r["id"], []):
+            label = f"{sn['submitter_name']}: " if sn.get("submitter_name") else ""
+            print(f"    Note: {label}{sn['note'][:200]}")
+        if r.get("description"):
+            print(f"    {r['description'][:200]}")
         print()
 
 
@@ -1043,6 +1049,7 @@ def cmd_feed(args):
 
     limit = getattr(args, "limit", 20)
     results = db.get_feed(user["id"], limit=limit)
+    sibling_notes = db.batch_resource_notes([r["id"] for r in results])
     db.close()
 
     if not results:
@@ -1063,6 +1070,11 @@ def cmd_feed(args):
             print(f"    {meta}")
         if r.get("note"):
             print(f"    Note: {r['note']}")
+        for sn in sibling_notes.get(r["id"], []):
+            label = f"{sn['submitter_name']}: " if sn.get("submitter_name") else ""
+            print(f"    Note: {label}{sn['note'][:200]}")
+        if r.get("description"):
+            print(f"    {r['description'][:200]}")
         print()
 
     if server_url:
@@ -1490,6 +1502,52 @@ def cmd_welcome(args):
     db.close()
 
 
+def cmd_set_pruning(args):
+    """Configure pruning policy for the local instance."""
+    from pathlib import Path
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+    user = _resolve_user(db, args)
+    user_id = user["id"]
+    instances = db.conn.execute(
+        "SELECT * FROM dugg_instances WHERE owner_id = ? ORDER BY created_at LIMIT 1",
+        (user_id,),
+    ).fetchone()
+    if not instances:
+        print("No instance found for your user. Are you the server owner?")
+        sys.exit(1)
+    inst_id = instances["id"]
+    updates = {}
+    if args.mode is not None:
+        updates["pruning_mode"] = args.mode
+    if args.grace_days is not None:
+        updates["pruning_grace_days"] = args.grace_days
+    if args.stale_days is not None:
+        updates["pruning_stale_days"] = args.stale_days
+    if not updates:
+        # Show current settings
+        policy = db.get_instance_policy(inst_id)
+        print(f"Pruning policy for {policy['instance_name']}:")
+        print(f"  Mode: {policy['pruning_mode']}")
+        if policy['pruning_mode'] == 'interaction':
+            print(f"  Grace period: {policy['pruning_grace_days']} days")
+            stale = policy['pruning_stale_days']
+            print(f"  Stale timeout: {'never' if stale == -1 else f'{stale} days'}")
+        else:
+            print("  (all pruning disabled)")
+        return
+    result = db.update_instance(inst_id, user_id, **updates)
+    if not result:
+        print("Failed to update instance.")
+        sys.exit(1)
+    print(f"Updated pruning policy for {result['name']}:")
+    print(f"  Mode: {result.get('pruning_mode', 'interaction')}")
+    grace = result.get('pruning_grace_days', 14)
+    print(f"  Grace period: {grace} days")
+    stale = result.get('pruning_stale_days', 60)
+    print(f"  Stale timeout: {'never' if stale == -1 else f'{stale} days'}")
+
+
 def cmd_admin(args):
     """Launch the admin TUI for ban & appeal management."""
     from pathlib import Path
@@ -1730,6 +1788,12 @@ def main():
     pw_test = webhook_sub.add_parser("test", help="Fire a test event to your webhooks")
     pw_test.add_argument("--key", default=None, help="Your API key")
 
+    p_pruning = sub.add_parser("set-pruning", help="View or set pruning policy (mode, grace period, stale timeout)")
+    p_pruning.add_argument("--mode", choices=["interaction", "none"], default=None, help="Pruning mode: 'interaction' (default) or 'none' (never prune)")
+    p_pruning.add_argument("--grace-days", type=int, default=None, help="Days before inactive members can be pruned (default 14)")
+    p_pruning.add_argument("--stale-days", type=int, default=None, help="Days since last seen before stale pruning (default 60, -1 = never)")
+    p_pruning.add_argument("--key", default=None, help="API key (uses local user if omitted)")
+
     p_doctor = sub.add_parser("doctor", help="Full installation diagnostics (schema, FTS, users)")
     p_doctor.add_argument("--host", default="127.0.0.1", help="HTTP host to check (default: 127.0.0.1)")
     p_doctor.add_argument("--port", type=int, default=None, help="If set, also check HTTP server reachability")
@@ -1857,6 +1921,8 @@ def main():
         cmd_health(args)
     elif args.command == "webhook":
         cmd_webhook(args)
+    elif args.command == "set-pruning":
+        cmd_set_pruning(args)
     elif args.command == "admin":
         cmd_admin(args)
     elif args.command == "doctor":
