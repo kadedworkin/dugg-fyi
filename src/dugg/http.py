@@ -1324,6 +1324,7 @@ async function deleteItem(id) {
             if not feed:
                 return JSONResponse({"response_type": "ephemeral", "text": "Feed is empty. Add something with `/dugg https://...`"})
             names = {r["id"]: r["name"] for r in d.conn.execute("SELECT id, name FROM users").fetchall()}
+            sibling_notes = d.batch_resource_notes([r["id"] for r in feed])
             blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": f"*Latest {len(feed)} resource(s):*"}}]
             text_lines = [f"*Latest {len(feed)} resource(s):*\n"]
             for r in feed:
@@ -1352,6 +1353,9 @@ async function deleteItem(id) {
                     res_lines.append(" · ".join(meta))
                 if r.get("note"):
                     res_lines.append(f"_{_xml_escape(r['note'])}_")
+                for sn in sibling_notes.get(r.get("id", ""), []):
+                    label = f"{sn['submitter_name']}: " if sn.get("submitter_name") else ""
+                    res_lines.append(f"_{_xml_escape(label + sn['note'][:200])}_")
                 if r.get("description"):
                     res_lines.append(f">{_xml_escape(r['description'][:200])}")
                 res_text = "\n".join(res_lines)
@@ -1440,6 +1444,7 @@ async function deleteItem(id) {
         if not results:
             return JSONResponse({"response_type": "ephemeral", "text": f'No results for "{_xml_escape(search_text)}"'})
         names = {r["id"]: r["name"] for r in d.conn.execute("SELECT id, name FROM users").fetchall()}
+        sibling_notes = d.batch_resource_notes([r["id"] for r in results])
         blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": f'*{len(results)} result(s) for "{_xml_escape(search_text)}":*'}}]
         text_lines = [f'*{len(results)} result(s) for "{_xml_escape(search_text)}":*\n']
         for r in results:
@@ -1456,12 +1461,15 @@ async function deleteItem(id) {
                 attrib = f"by {added_by}"
             elif added_date:
                 attrib = f"on {added_date}"
-            if attrib and pub_date and pub_date != added_date:
+            if attrib and pub_date:
                 attrib += f" (published {pub_date})"
             if attrib:
                 res_lines.append(attrib)
             if r.get("note"):
                 res_lines.append(f"_{_xml_escape(r['note'])}_")
+            for sn in sibling_notes.get(r.get("id", ""), []):
+                label = f"{sn['submitter_name']}: " if sn.get("submitter_name") else ""
+                res_lines.append(f"_{_xml_escape(label + sn['note'][:200])}_")
             if r.get("description"):
                 res_lines.append(f">{_xml_escape(r['description'][:200])}")
             res_text = "\n".join(res_lines)

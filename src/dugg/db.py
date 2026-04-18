@@ -139,6 +139,7 @@ class DuggDB:
                 onboarding_mode TEXT DEFAULT 'graduated' CHECK(onboarding_mode IN ('graduated', 'full_access')),
                 pruning_mode TEXT DEFAULT 'interaction' CHECK(pruning_mode IN ('none', 'interaction')),
                 pruning_grace_days INTEGER DEFAULT 14,
+                pruning_stale_days INTEGER DEFAULT 60,
                 owner_id TEXT NOT NULL REFERENCES users(id),
                 successor_id TEXT REFERENCES users(id) DEFAULT NULL,
                 created_at TEXT NOT NULL,
@@ -392,6 +393,8 @@ class DuggDB:
             self.conn.execute("ALTER TABLE dugg_instances ADD COLUMN pruning_mode TEXT DEFAULT 'interaction'")
         if "pruning_grace_days" not in inst_cols:
             self.conn.execute("ALTER TABLE dugg_instances ADD COLUMN pruning_grace_days INTEGER DEFAULT 14")
+        if "pruning_stale_days" not in inst_cols:
+            self.conn.execute("ALTER TABLE dugg_instances ADD COLUMN pruning_stale_days INTEGER DEFAULT 60")
 
         res_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(resources)").fetchall()}
         if "summary" not in res_cols:
@@ -1132,6 +1135,23 @@ class DuggDB:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def batch_resource_notes(self, resource_ids: list[str]) -> dict[str, list[dict]]:
+        """Return resource_notes grouped by resource_id for a batch of IDs."""
+        if not resource_ids:
+            return {}
+        placeholders = ",".join("?" for _ in resource_ids)
+        rows = self.conn.execute(
+            f"""SELECT resource_id, submitter_name, note
+                FROM resource_notes WHERE resource_id IN ({placeholders})
+                ORDER BY added_at ASC""",
+            resource_ids,
+        ).fetchall()
+        result: dict[str, list[dict]] = {}
+        for r in rows:
+            rid = r["resource_id"]
+            result.setdefault(rid, []).append({"submitter_name": r["submitter_name"], "note": r["note"]})
+        return result
+
     # --- Share Rules ---
 
     def set_share_rule(self, collection_id: str, target_user_id: str, include_tags: list[str] = None, exclude_tags: list[str] = None) -> dict:
@@ -1428,7 +1448,8 @@ class DuggDB:
             return None
         allowed = {"name", "topic", "endpoint_url", "rate_limit_initial", "rate_limit_growth",
                    "read_horizon_base_days", "read_horizon_growth", "index_mode", "local_storage_cap_mb",
-                   "onboarding_mode", "auto_invite_endpoint", "pruning_mode", "pruning_grace_days"}
+                   "onboarding_mode", "auto_invite_endpoint", "pruning_mode", "pruning_grace_days",
+                   "pruning_stale_days"}
         updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
         if not updates:
             return inst
@@ -1457,6 +1478,7 @@ class DuggDB:
             "access_mode": inst.get("access_mode", "invite"),
             "pruning_mode": inst.get("pruning_mode", "interaction"),
             "pruning_grace_days": inst.get("pruning_grace_days", 14),
+            "pruning_stale_days": inst.get("pruning_stale_days", 60),
         }
 
     def get_instance_scope(self, instance_id: str) -> dict:
@@ -2542,23 +2564,34 @@ class DuggDB:
         self.conn.commit()
 
     def get_stale_members(self, days: int = None) -> list[dict]:
-        """Get members who haven't been seen in EGRESS_TIMEOUT_DAYS days.
-        Skips members in collections whose instance has pruning_mode='none'.
+        """Get members who haven't been seen in their instance's pruning_stale_days.
+        Skips members in collections whose instance has pruning_mode='none'
+        or pruning_stale_days=-1 (never stale-prune).
+        The `days` parameter overrides the per-instance setting when provided.
         """
-        timeout = days or EGRESS_TIMEOUT_DAYS
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=timeout)).isoformat()
+        now = datetime.now(timezone.utc)
         rows = self.conn.execute(
-            """SELECT cm.collection_id, cm.user_id, cm.last_seen_at, u.name
+            """SELECT cm.collection_id, cm.user_id, cm.last_seen_at, u.name,
+                      COALESCE(di.pruning_stale_days, ?) as stale_days
                FROM collection_members cm
                JOIN users u ON cm.user_id = u.id
                JOIN collections c ON cm.collection_id = c.id
                LEFT JOIN dugg_instances di ON di.owner_id = c.created_by
                WHERE cm.status = 'active'
-                 AND (cm.last_seen_at IS NOT NULL AND cm.last_seen_at < ?)
-                 AND COALESCE(di.pruning_mode, 'interaction') != 'none'""",
-            (cutoff,),
+                 AND cm.member_type != 'subscriber'
+                 AND cm.last_seen_at IS NOT NULL
+                 AND COALESCE(di.pruning_mode, 'interaction') != 'none'
+                 AND COALESCE(di.pruning_stale_days, ?) != -1""",
+            (EGRESS_TIMEOUT_DAYS, EGRESS_TIMEOUT_DAYS),
         ).fetchall()
-        return [dict(r) for r in rows]
+        result = []
+        for row in rows:
+            d = dict(row)
+            timeout = days or d.pop("stale_days")
+            cutoff = (now - timedelta(days=timeout)).isoformat()
+            if d["last_seen_at"] < cutoff:
+                result.append(d)
+        return result
 
     # --- Inactive Member Pruning ---
 
@@ -2579,6 +2612,7 @@ class DuggDB:
                FROM collection_members cm
                JOIN users u ON cm.user_id = u.id
                WHERE cm.collection_id = ? AND cm.status = 'active' AND cm.role != 'owner'
+                 AND cm.member_type != 'subscriber'
                  AND (cm.grace_expires_at IS NOT NULL AND cm.grace_expires_at < ?)
                  AND (cm.last_seen_at IS NULL OR cm.last_seen_at < ?)""",
             (collection_id, grace_cutoff, seen_cutoff),

@@ -1399,6 +1399,7 @@ def _handle_search(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
     if not results:
         return [TextContent(type="text", text=f"No results for: {query}")]
 
+    sibling_notes = d.batch_resource_notes([r["id"] for r in results])
     submitter_cache: dict[str, str] = {}
     lines = [f"Found {len(results)} result(s) for: {query}\n"]
     for r in results:
@@ -1416,6 +1417,9 @@ def _handle_search(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
             lines.append(f"  Tags: {tags_str}")
         if r.get("note"):
             lines.append(f"  Note: {r['note'][:200]}")
+        for sn in sibling_notes.get(r["id"], []):
+            label = f"{sn['submitter_name']}: " if sn.get("submitter_name") else ""
+            lines.append(f"  Note: {label}{sn['note'][:200]}")
         if r.get("description"):
             lines.append(f"  Description: {r['description'][:200]}")
         lines.append(f"  URL: `{r['url']}`")
@@ -1434,6 +1438,7 @@ def _handle_feed(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
     if not results:
         return [TextContent(type="text", text="Your feed is empty. Add some resources with dugg_add!")]
 
+    sibling_notes = d.batch_resource_notes([r["id"] for r in results])
     lines = [f"Feed: {len(results)} resource(s)\n"]
     for r in results:
         tags_str = ", ".join(t["label"] for t in r.get("tags", []))
@@ -1448,6 +1453,9 @@ def _handle_feed(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
             lines.append(f"  Tags: {tags_str}")
         if r.get("note"):
             lines.append(f"  Note: {r['note'][:200]}")
+        for sn in sibling_notes.get(r["id"], []):
+            label = f"{sn['submitter_name']}: " if sn.get("submitter_name") else ""
+            lines.append(f"  Note: {label}{sn['note'][:200]}")
         if r.get("description"):
             lines.append(f"  Description: {r['description'][:200]}")
         lines.append(f"  URL: `{r['url']}`")
