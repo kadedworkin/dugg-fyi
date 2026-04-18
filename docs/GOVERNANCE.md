@@ -73,6 +73,12 @@ Remove individual resources without banning anyone:
 dugg_delete_resource(resource_id="abc123", collection_id="def456")
 ```
 
+Every deletion records an entry in the `resource_deletions` table for audit trail purposes. A tombstone is emitted in the Atom feed so RSS subscribers can prune their local copies (per [RFC 6721](https://www.rfc-editor.org/rfc/rfc6721)). If the resource was published to remote servers via `publish_targets`, upstream deletes fire automatically.
+
+Ban-with-purge (`purge_user_resources`) also records a tombstone for each deleted resource, giving downstream subscribers the same pruning signal.
+
+Tombstones are retained for 30 days, then pruned.
+
 ## Appeals
 
 Banned users can appeal. The owner sees their contribution history and decides.

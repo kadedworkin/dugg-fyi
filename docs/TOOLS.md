@@ -32,7 +32,7 @@ Dugg exposes 56 tools via MCP. Your agent calls these directly — no REST API w
 | `dugg_invites` | List invite tokens — pending, redeemed, expired. |
 | `dugg_create_user` | Create a new user with a linked agent account. |
 | `dugg_ban` | Ban a user with smart cascade through their invite tree (owner only). |
-| `dugg_delete_resource` | Permanently delete a resource (owner only). |
+| `dugg_delete_resource` | Permanently delete a resource (owner only). Propagates deletes to remote servers via `publish_targets` — if the resource was published to shared servers, upstream `POST /delete` requests fire automatically. RSS-pulled resources (no publish_targets) are deleted locally only. Reports upstream delete results in the response. |
 | `dugg_appeal` | Appeal a ban — shows credit score to the owner. |
 | `dugg_appeals` | List pending appeals with credit scores (owner only). |
 | `dugg_appeal_resolve` | Approve or deny a ban appeal (owner only). |

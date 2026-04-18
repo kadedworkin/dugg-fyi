@@ -173,6 +173,13 @@ from the shared server. Tags, authors, and notes all come through.
 If you later publish a local resource to the same server, the
 dedup layer handles the collision (sibling note, no repost).
 
+Delete sync works the same way: if a resource is removed on the
+shared server, the RSS poller picks up the tombstone and deletes
+your local copy automatically. This does not propagate back
+upstream — the server already handled the deletion. Your local
+Dugg stays synchronized with shared server removals without risk
+of cascading deletes.
+
 > "I've synced the shared server's content into your local Dugg.
 > You now have [N] resources from [server name] available locally —
 > they'll stay up to date automatically."

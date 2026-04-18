@@ -21,7 +21,7 @@ Dugg ships a full management CLI alongside the MCP server.
 | `dugg status` | Dashboard: user, DB path, server, collections, resources, webhooks, health |
 | `dugg health` | Ping the configured server and show status + timestamp |
 | `dugg servers` | List this server, subscribed instances, and publish targets |
-| `dugg remove <id-or-url>` | Delete a resource (submitter or owner) |
+| `dugg remove <id-or-url>` | Delete a resource (submitter or owner). Propagates upstream to publish targets automatically. RSS-pulled content is deleted locally only (no upstream propagation). |
 | `dugg edit <id-or-url> [--title ...] [--note ...] [--description ...] [--author ...] [--source-type ...] [--tags ...]` | Edit a resource's metadata (submitter only) |
 | `dugg tag <id-or-url> --tags "tag1,tag2"` | Add tags to an existing resource |
 | `dugg react <id-or-url> [--type tap\|star\|thumbsup]` | Silently react to a resource (default: tap) |

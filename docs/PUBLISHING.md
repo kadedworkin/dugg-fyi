@@ -84,6 +84,68 @@ The same quarantine handles same-server collisions: when a second user (or the s
 
 **Search:** sibling text is searchable through a parallel FTS index. A ban on the contributing user (direct or via cascade) removes their sibling notes from search results at query time — no stored-state rewrite needed.
 
+## Remote delete sync
+
+Dugg implements full CRUD symmetry for federated content. Just as `POST /ingest` pushes resources to remote servers, `POST /delete` removes them.
+
+When you delete a resource locally that was previously published to remote servers:
+
+1. The MCP tool (`dugg_delete_resource`) checks `publish_targets` for the resource
+2. For each target server, it fires `POST /delete` with the resource URL and your API key
+3. The remote server verifies you're the submitter or collection owner, then deletes
+4. The remote server records a tombstone so other subscribers are notified via the Atom feed
+5. The local copy is deleted
+
+**Directionality rule:** `publish_targets` determines whether a delete propagates upstream.
+
+| Content source | `publish_targets` | On local delete |
+|---|---|---|
+| You added it, published to servers | Has entries | Upstream deletes fire automatically |
+| Pulled via RSS from a shared server | Empty | Local-only delete, server unaffected |
+
+This prevents cascading deletes: if you remove an RSS-synced article from your local library, the server copy (and every other subscriber's copy) stays intact. You're only cleaning your own shelf.
+
+### The `/delete` endpoint
+
+```
+POST /delete
+X-Dugg-Key: dugg_your_api_key
+Content-Type: application/json
+
+{"url": "https://example.com/article-to-remove"}
+```
+
+Returns `200` with `{"status": "deleted", "id": "...", "url": "..."}` on success, `404` if the resource doesn't exist (idempotent), `403` if you're not authorized.
+
+## Atom tombstones (RFC 6721)
+
+When a resource is deleted on a shared server, the deletion propagates to RSS subscribers via [Atom Tombstones (RFC 6721)](https://datatracker.ietf.org/doc/html/rfc6721).
+
+The server's Atom feed includes `at:deleted-entry` elements alongside regular entries:
+
+```xml
+<feed xmlns="http://www.w3.org/2005/Atom"
+      xmlns:at="http://purl.org/atompub/tombstones/1.0">
+  <at:deleted-entry ref="resource-id" when="2026-04-17T12:00:00+00:00">
+    <at:comment>Removed: Malware link</at:comment>
+    <link href="https://example.com/bad-link"/>
+  </at:deleted-entry>
+  <!-- regular entries follow -->
+</feed>
+```
+
+The RSS poller processes tombstones **before** regular entries on each poll cycle. When a tombstone is encountered:
+
+1. The matching local resource is looked up by URL
+2. It's hard-deleted — gone from search, feed, CLI, everything
+3. The tombstone ref is removed from `seen_entry_ids` to prevent stale tracking
+
+**Safety property:** If a malware link gets published and an admin removes it, every subscriber's local copy is deleted on the next poll cycle (≤1 hour). No ghost links linger on subscriber machines.
+
+**Retention:** Tombstones are retained for 30 days, then pruned automatically. Subscribers whose pollers are offline longer than 30 days will miss the tombstone — a full-sync reconciliation handles this edge case by comparing local entry IDs against the live feed.
+
+**No loop risk:** Tombstone processing uses `delete_resource_by_url()` which bypasses the owner check (the upstream server's tombstone is authoritative) and does not create publish_targets entries, so no upstream delete fires. The deletion stays local.
+
 ## Events
 
 Every significant action emits an event:

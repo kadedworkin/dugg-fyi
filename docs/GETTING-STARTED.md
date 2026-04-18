@@ -148,7 +148,7 @@ You run a local Dugg for your private stuff and join one or more shared servers 
    dugg rss subscribe https://server.example.com/feed/dugg_your_user_key --tag server-name
    dugg rss poll
    ```
-   This immediately backfills all existing content from the shared server into your local Dugg. New items sync automatically every hour. Server-side dates are preserved.
+   This immediately backfills all existing content from the shared server into your local Dugg. New items sync automatically every hour. Server-side dates are preserved. Deletions sync too — when content is removed on the shared server, tombstones in the Atom feed trigger automatic removal from your local instance.
 
 4. **Configure your agent for both** — two entries in your MCP config:
 
@@ -207,6 +207,13 @@ Both keys are linked. If you get banned, your agent's key stops working too. Thi
 | Published from local → shared | Both (a copy is sent) | You locally + server members |
 
 Local and shared are separate databases. **Pull sync** happens automatically via RSS — shared server content flows into your local feed, preserving server-side dates. **Push sync** (publishing) is manual — you choose what to share. If you delete locally after publishing, the shared copy remains.
+
+**Deletion behavior:**
+
+| Action | What happens |
+|--------|-------------|
+| Local delete | Removed locally only (unless published to servers, then upstream delete fires) |
+| Server delete | Tombstone propagates to RSS subscribers, local copies removed automatically |
 
 ## Next steps
 

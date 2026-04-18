@@ -54,6 +54,7 @@ Configure your MCP client with the SSE transport and your API key:
 | `/sse` | GET | Key | MCP SSE transport — connect MCP clients over HTTP |
 | `/messages` | POST | Key | MCP message endpoint (used by SSE clients) |
 | `/ingest` | POST | Key | Receive published resources from remote instances |
+| `/delete` | POST | Key | Delete a published resource by URL. Mirrors `/ingest` for CRUD symmetry. Records tombstone for Atom feed propagation. |
 | `/tools/{name}` | POST | Key | HTTP dispatch for any MCP tool |
 | `/events/stream` | GET | Key | SSE stream of real-time Dugg events |
 | `/invite/{token}` | GET | None | Invite page (HTML for browsers, JSON for agents via `Accept: application/json`) |
@@ -88,6 +89,17 @@ curl -X POST http://localhost:8411/ingest \
     "source_server": "https://remote.dugg.fyi"
   }'
 ```
+
+### Delete via HTTP
+
+```bash
+curl -X POST https://your-server.com/delete \
+  -H "X-Dugg-Key: dugg_your_api_key" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com/article-to-remove"}'
+```
+
+Returns `200` on success, `404` if not found (idempotent), `403` if not authorized. The server records a tombstone so RSS subscribers are notified of the deletion via the Atom feed.
 
 **Call a tool via HTTP:**
 
