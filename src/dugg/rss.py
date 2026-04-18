@@ -138,7 +138,10 @@ async def fetch_and_parse(
     `feed_title`, `feed_description` — suitable for stashing alongside the
     subscription record so the next poll can send conditional-GET headers.
     """
-    headers = {"User-Agent": "Dugg-RSS/0.1 (+https://dugg.fyi)"}
+    headers = {
+        "User-Agent": "Dugg-RSS/0.1 (+https://dugg.fyi)",
+        "Accept": "application/atom+xml, application/rss+xml, application/xml, text/xml, */*;q=0.1",
+    }
     if etag:
         headers["If-None-Match"] = etag
     if last_modified:
