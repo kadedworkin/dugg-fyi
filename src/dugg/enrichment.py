@@ -25,6 +25,17 @@ def _yt_dlp_path() -> str:
         return system
     raise FileNotFoundError("yt-dlp not found in venv or on PATH")
 
+
+def _yt_dlp_env() -> dict:
+    """Build env for yt-dlp subprocesses with deno on PATH."""
+    import os
+
+    env = os.environ.copy()
+    deno_bin = Path.home() / ".deno" / "bin"
+    if deno_bin.is_dir():
+        env["PATH"] = str(deno_bin) + os.pathsep + env.get("PATH", "")
+    return env
+
 # Tracking parameters to strip during URL sanitization
 _TRACKING_PARAMS = {
     "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
@@ -370,6 +381,7 @@ async def fetch_youtube_transcript(video_id: str) -> str:
             "--write-auto-sub",
             "--sub-lang", "en",
             "--sub-format", "vtt",
+            "--remote-components", "ejs:github",
             "-o", str(output_path),
             f"https://www.youtube.com/watch?v={video_id}",
         ]
@@ -378,6 +390,7 @@ async def fetch_youtube_transcript(video_id: str) -> str:
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=_yt_dlp_env(),
             )
             await asyncio.wait_for(proc.communicate(), timeout=60)
         except asyncio.TimeoutError:
@@ -469,6 +482,7 @@ async def fetch_youtube_description(video_id: str) -> str:
         ytdlp,
         "--skip-download",
         "--print", "description",
+        "--remote-components", "ejs:github",
         f"https://www.youtube.com/watch?v={video_id}",
     ]
     try:
@@ -476,6 +490,7 @@ async def fetch_youtube_description(video_id: str) -> str:
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=_yt_dlp_env(),
         )
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
         return stdout.decode("utf-8", errors="replace").strip()
