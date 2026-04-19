@@ -736,3 +736,198 @@ def test_slack_actions_react(client, db_path):
     assert reactions["total"] == 1
     assert reactions["breakdown"]["star"] == 1
     d.close()
+
+
+# --- Session cookie auth (web feature-freeze lifted 2026-04-18) ---
+
+
+def test_session_unlock_get_renders_form(client):
+    c, _ = client
+    resp = c.get("/session/unlock?return_to=/feed")
+    assert resp.status_code == 200
+    assert "<form" in resp.text
+    assert 'action="/session/unlock"' in resp.text
+    assert 'value="/feed"' in resp.text
+
+
+def test_session_unlock_post_valid_sets_cookie(client, user):
+    c, _ = client
+    resp = c.post(
+        "/session/unlock",
+        data={"key": user["api_key"], "return_to": "/feed"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/feed"
+    assert resp.cookies.get("dugg_key") == user["api_key"]
+
+
+def test_session_unlock_post_invalid_key(client):
+    c, _ = client
+    resp = c.post("/session/unlock", data={"key": "dugg_wrong", "return_to": "/feed"})
+    assert resp.status_code == 401
+    assert "Invalid key" in resp.text
+
+
+def test_session_unlock_rejects_external_return_to(client, user):
+    """return_to must be a same-origin path; `//evil.com` or `http://...` fall back to /feed."""
+    c, _ = client
+    resp = c.post(
+        "/session/unlock",
+        data={"key": user["api_key"], "return_to": "//evil.com/x"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/feed"  # normalized, not the malicious value
+
+
+def test_session_clear_deletes_cookie(client, user):
+    c, _ = client
+    # Set cookie
+    c.post("/session/unlock", data={"key": user["api_key"], "return_to": "/feed"}, follow_redirects=False)
+    assert c.cookies.get("dugg_key") == user["api_key"]
+    # Clear it
+    resp = c.get("/session/clear", follow_redirects=False)
+    assert resp.status_code == 303
+    # Starlette delete_cookie emits a Set-Cookie with empty value + expired Max-Age
+    assert "dugg_key" in resp.headers.get("set-cookie", "")
+
+
+# --- /feed: silent migration + cookie auth + Atom content-negotiation ---
+
+
+def test_feed_html_silent_migrates_to_bare_path(client, user):
+    """Browser visit to /feed/{key} sets cookie + 302 to /feed so key leaves URL bar."""
+    c, _ = client
+    resp = c.get(f"/feed/{user['api_key']}", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/feed"
+    assert resp.cookies.get("dugg_key") == user["api_key"]
+
+
+def test_feed_atom_still_serves_xml_on_key_path(client, user):
+    """Atom clients (RSS readers) can't carry cookies — /feed/{key} must still serve XML."""
+    c, _ = client
+    resp = c.get(
+        f"/feed/{user['api_key']}",
+        headers={"Accept": "application/atom+xml"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("application/atom+xml")
+    assert "<feed" in resp.text
+
+
+def test_feed_bare_redirects_to_unlock_without_cookie(client):
+    c, _ = client
+    resp = c.get("/feed", follow_redirects=False)
+    assert resp.status_code == 303
+    assert "/session/unlock" in resp.headers["location"]
+
+
+def test_feed_bare_with_cookie_renders_html(client, user):
+    c, _ = client
+    c.cookies.set("dugg_key", user["api_key"])
+    resp = c.get("/feed")
+    assert resp.status_code == 200
+    assert "Dugg" in resp.text
+    # JS no longer reads the key from URL path
+    assert "window.location.pathname.split('/feed/')" not in resp.text
+    # Key must not appear in the rendered HTML
+    assert user["api_key"] not in resp.text
+
+
+# --- /paste: silent migration + cookie auth ---
+
+
+def test_paste_key_path_silent_migrates(client, user):
+    c, _ = client
+    resp = c.get(f"/paste/{user['api_key']}", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/paste"
+    assert resp.cookies.get("dugg_key") == user["api_key"]
+
+
+def test_paste_bare_redirects_to_unlock_without_cookie(client):
+    c, _ = client
+    resp = c.get("/paste", follow_redirects=False)
+    assert resp.status_code == 303
+    assert "/session/unlock" in resp.headers["location"]
+
+
+def test_paste_bare_with_cookie_renders_form(client, user):
+    c, _ = client
+    c.cookies.set("dugg_key", user["api_key"])
+    resp = c.get("/paste")
+    assert resp.status_code == 200
+    assert 'action="/paste/submit"' in resp.text
+    assert user["api_key"] not in resp.text
+
+
+def test_paste_submit_bare_with_cookie(client, user):
+    c, _ = client
+    c.cookies.set("dugg_key", user["api_key"])
+    resp = c.post(
+        "/paste/submit",
+        data={"title": "My note", "body": "Hello world", "source_type": "note"},
+    )
+    assert resp.status_code == 200
+    assert "Saved" in resp.text
+
+
+# --- /admin: silent migration + cookie auth ---
+
+
+def test_admin_key_path_silent_migrates(client, user):
+    c, _ = client
+    resp = c.get(f"/admin/{user['api_key']}", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/admin"
+    assert resp.cookies.get("dugg_key") == user["api_key"]
+
+
+def test_admin_bare_redirects_to_unlock_without_cookie(client):
+    c, _ = client
+    resp = c.get("/admin", follow_redirects=False)
+    assert resp.status_code == 303
+    assert "/session/unlock" in resp.headers["location"]
+
+
+def test_admin_bare_with_cookie_renders(client, user):
+    c, _ = client
+    c.cookies.set("dugg_key", user["api_key"])
+    resp = c.get("/admin")
+    assert resp.status_code == 200
+    assert "Dugg Admin" in resp.text
+    assert user["api_key"] not in resp.text
+
+
+# --- /appeal: silent migration + cookie auth ---
+
+
+def test_appeal_key_path_silent_migrates(client, user):
+    c, _ = client
+    resp = c.get(f"/appeal/{user['api_key']}", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/appeal"
+    assert resp.cookies.get("dugg_key") == user["api_key"]
+
+
+def test_appeal_bare_with_cookie_renders(client, user):
+    c, _ = client
+    c.cookies.set("dugg_key", user["api_key"])
+    resp = c.get("/appeal")
+    assert resp.status_code == 200
+    # Not banned, so message is "No active bans"
+    assert "No active bans" in resp.text
+
+
+# --- Tools endpoint accepts cookie (not just X-Dugg-Key header) ---
+
+
+def test_tools_endpoint_accepts_cookie(client, user):
+    """Same-origin fetch() auto-sends the dugg_key cookie, so /tools/* must accept it."""
+    c, _ = client
+    c.cookies.set("dugg_key", user["api_key"])
+    resp = c.post("/tools/dugg_search", json={"query": "x", "limit": 5})
+    assert resp.status_code == 200

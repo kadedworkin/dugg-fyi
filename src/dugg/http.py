@@ -131,16 +131,58 @@ def create_app(db_path: Optional[Path] = None, mode: str = "local") -> Starlette
         """Ensure user has a default collection, return its ID."""
         return d.ensure_default_collection(user_id)
 
-    def resolve_user_from_request(request: Request) -> dict:
-        """Resolve user from X-Dugg-Key header."""
-        api_key = request.headers.get("x-dugg-key", "")
+    # --- Session cookie auth (shared across all browser-served endpoints) ---
+    # The `dugg_key` cookie holds the API key directly — HttpOnly+Secure+SameSite=Lax,
+    # 30-day Max-Age. Cookie first, X-Dugg-Key header as fallback. Key rotation
+    # invalidates the cookie instantly (the cookie value == the key).
+    COOKIE_NAME = "dugg_key"
+    COOKIE_MAX_AGE = 60 * 60 * 24 * 30  # 30 days
+
+    def _resolve_user_from_cookie_or_header(request: Request) -> Optional[dict]:
+        """Cookie > X-Dugg-Key header. Returns None if neither resolves to a user."""
         d = get_db()
-        if api_key:
-            user = d.get_user_by_api_key(api_key)
+        cookie_key = request.cookies.get(COOKIE_NAME, "")
+        if cookie_key:
+            user = d.get_user_by_api_key(cookie_key)
             if user:
                 return user
+        header_key = request.headers.get("x-dugg-key", "")
+        if header_key:
+            user = d.get_user_by_api_key(header_key)
+            if user:
+                return user
+        return None
+
+    def _cookie_key_from_request(request: Request) -> str:
+        """Return the cookie-or-header key string (empty if neither set)."""
+        return request.cookies.get(COOKIE_NAME, "") or request.headers.get("x-dugg-key", "")
+
+    def _set_session_cookie(resp, key: str, request: Request) -> None:
+        """Attach a 30-day dugg_key cookie to a response. HttpOnly+Secure(when TLS)+SameSite=Lax."""
+        is_https = request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
+        resp.set_cookie(
+            COOKIE_NAME, key,
+            httponly=True, secure=is_https, samesite="lax",
+            max_age=COOKIE_MAX_AGE,
+            path="/",
+        )
+
+    def _safe_return_to(raw: Optional[str], default: str = "/feed") -> str:
+        """Validate a return_to path: must be same-origin (starts with `/`, not `//`)."""
+        if not raw or not isinstance(raw, str):
+            return default
+        if not raw.startswith("/") or raw.startswith("//"):
+            return default
+        return raw
+
+    def resolve_user_from_request(request: Request) -> dict:
+        """Resolve user from dugg_key cookie or X-Dugg-Key header."""
+        user = _resolve_user_from_cookie_or_header(request)
+        if user:
+            return user
+        if request.cookies.get(COOKIE_NAME) or request.headers.get("x-dugg-key"):
             raise ValueError("Invalid API key")
-        raise ValueError("Missing X-Dugg-Key header — API key required for HTTP transport")
+        raise ValueError("Missing credentials — dugg_key cookie or X-Dugg-Key header required")
 
     def verify_hmac_signature(request: Request, body: bytes, secret: str) -> bool:
         """Verify HMAC-SHA256 signature from X-Dugg-Signature header."""
@@ -970,94 +1012,81 @@ async function doSetup() {{
 </div>"""
         return HTMLResponse(_html_page("Welcome to Dugg", body))
 
-    async def handle_feed(request: Request):
-        """GET /feed/{key} — read-only browser-friendly feed view."""
-        api_key = request.path_params["key"]
-        d = get_db()
-        user = d.get_user_by_api_key(api_key)
-
-        if not user:
-            return HTMLResponse(_html_page("Not Found", "<h1>Invalid key</h1><p>This feed URL is not valid.</p>"), status_code=404)
-
-        d.touch_user(user["id"])
-
-        # Check Accept header for Atom/RSS preference
+    def _wants_atom(request: Request) -> bool:
         accept = request.headers.get("accept", "")
-        want_atom = "application/atom+xml" in accept or "application/rss+xml" in accept
+        return "application/atom+xml" in accept or "application/rss+xml" in accept
 
+    def _render_feed_atom(request: Request, user: dict, api_key: str) -> HTMLResponse:
+        """Render the Atom feed for a resolved user. `api_key` is embedded in self-link."""
+        d = get_db()
         feed = d.get_feed(user["id"], limit=50)
-
-        # Page title: user's name feed
         page_title = f"{user['name']}'s Dugg"
-        page_topic = ""
-
-        if want_atom:
-            # Atom feed with full metadata + tombstones (RFC 6721)
-            srv_url = d.get_config("server_url", "")
-            # Collect tombstones from all accessible collections
-            accessible = d._accessible_collection_ids(user["id"])
-            tombstones_xml = ""
-            for coll_id in accessible:
-                for tomb in d.list_recent_deletions(coll_id):
-                    tombstones_xml += f"""<at:deleted-entry ref="{_xml_escape(tomb['resource_id'])}" when="{tomb['deleted_at']}">
+        srv_url = d.get_config("server_url", "")
+        accessible = d._accessible_collection_ids(user["id"])
+        tombstones_xml = ""
+        for coll_id in accessible:
+            for tomb in d.list_recent_deletions(coll_id):
+                tombstones_xml += f"""<at:deleted-entry ref="{_xml_escape(tomb['resource_id'])}" when="{tomb['deleted_at']}">
   <at:comment>Removed: {_xml_escape(tomb.get('title') or tomb['url'])}</at:comment>
   <link href="{_xml_escape(tomb['url'])}"/>
 </at:deleted-entry>\n"""
-            entries = ""
-            for r in feed:
-                title = r.get("title") or r["url"]
-                desc = r.get("description", "")
-                note = r.get("note", "")
-                sibling_notes = d.list_resource_notes(r["id"])
-                sibling_text = ""
-                if sibling_notes:
-                    parts = []
-                    for sn in sibling_notes:
-                        who = sn.get("submitter_name") or "someone"
-                        origin = sn.get("source_server") or ""
-                        label = f"{who}" + (f" (via {origin})" if origin else "")
-                        parts.append(f"— {label}: {sn['note']}")
-                    sibling_text = "\n\n".join(parts)
-                content = "\n\n".join(p for p in [desc, note, sibling_text] if p)
-                display_url = _resolve_display_url(r["url"], srv_url)
-                # Author element
-                author_xml = ""
-                if r.get("author"):
-                    author_xml = f"\n  <author><name>{_xml_escape(r['author'])}</name></author>"
-                # Published date from raw_metadata
-                pub_date = _resource_pub_date(r)
-                published_xml = ""
-                if pub_date:
-                    published_xml = f"\n  <published>{pub_date}T00:00:00Z</published>"
-                # Category elements for tags
-                tags = r.get("tags", [])
-                categories_xml = ""
-                for t in tags:
-                    categories_xml += f'\n  <category term="{_xml_escape(t["label"])}"/>'
-                entries += f"""<entry>
+        entries = ""
+        for r in feed:
+            title = r.get("title") or r["url"]
+            desc = r.get("description", "")
+            note = r.get("note", "")
+            sibling_notes = d.list_resource_notes(r["id"])
+            sibling_text = ""
+            if sibling_notes:
+                parts = []
+                for sn in sibling_notes:
+                    who = sn.get("submitter_name") or "someone"
+                    origin = sn.get("source_server") or ""
+                    label = f"{who}" + (f" (via {origin})" if origin else "")
+                    parts.append(f"— {label}: {sn['note']}")
+                sibling_text = "\n\n".join(parts)
+            content = "\n\n".join(p for p in [desc, note, sibling_text] if p)
+            display_url = _resolve_display_url(r["url"], srv_url)
+            author_xml = ""
+            if r.get("author"):
+                author_xml = f"\n  <author><name>{_xml_escape(r['author'])}</name></author>"
+            pub_date = _resource_pub_date(r)
+            published_xml = ""
+            if pub_date:
+                published_xml = f"\n  <published>{pub_date}T00:00:00Z</published>"
+            tags = r.get("tags", [])
+            categories_xml = ""
+            for t in tags:
+                categories_xml += f'\n  <category term="{_xml_escape(t["label"])}"/>'
+            entries += f"""<entry>
   <title>{_xml_escape(title)}</title>
   <link href="{_xml_escape(display_url)}"/>
   <id>{_xml_escape(r['id'])}</id>
   <updated>{r['created_at']}</updated>{published_xml}{author_xml}{categories_xml}
   <summary>{_xml_escape(content)}</summary>
 </entry>\n"""
-            # RFC 8288: self-referencing Link header + Atom <link rel="self">
-            feed_path = f"/feed/{api_key}"
-            self_url = f"{srv_url.rstrip('/')}{feed_path}" if srv_url else feed_path
-            atom = f"""<?xml version="1.0" encoding="utf-8"?>
+        feed_path = f"/feed/{api_key}"
+        self_url = f"{srv_url.rstrip('/')}{feed_path}" if srv_url else feed_path
+        atom = f"""<?xml version="1.0" encoding="utf-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom" xmlns:at="http://purl.org/atompub/tombstones/1.0">
   <title>{_xml_escape(page_title)}</title>
   <link rel="self" type="application/atom+xml" href="{_xml_escape(self_url)}"/>
   <updated>{feed[0]['created_at'] if feed else ''}</updated>
 {tombstones_xml}{entries}</feed>"""
-            link_header = f'<{self_url}>; rel="self"; type="application/atom+xml"'
-            return HTMLResponse(
-                atom,
-                media_type="application/atom+xml",
-                headers={"Link": link_header},
-            )
+        link_header = f'<{self_url}>; rel="self"; type="application/atom+xml"'
+        return HTMLResponse(
+            atom,
+            media_type="application/atom+xml",
+            headers={"Link": link_header},
+        )
 
-        # HTML feed view
+    def _render_feed_html(request: Request, user: dict) -> HTMLResponse:
+        """Render the HTML feed for a cookie-authed user. No key appears in URLs or JS."""
+        d = get_db()
+        feed = d.get_feed(user["id"], limit=50)
+        page_title = f"{user['name']}'s Dugg"
+        page_topic = ""
+
         submitter_cache: dict[str, str] = {}
         if not feed:
             items_html = '<p class="empty">Nothing here yet. Check back later.</p>'
@@ -1167,10 +1196,10 @@ async function doSetup() {{
 <div id="searchStatus" style="font-size:0.75rem;color:#666;margin-top:-1rem;margin-bottom:1rem;display:none;"></div>"""
         feed_js = """
 <script>
-const API_KEY = window.location.pathname.split('/feed/')[1];
+// Same-origin fetch auto-includes the dugg_key cookie, so no X-Dugg-Key header
+// or API key is ever written into JS or URLs on this page.
 const BASE = window.location.origin;
 
-// Debounced server-side search for full-text queries
 let searchTimeout = null;
 const searchInput = document.getElementById('feedSearch');
 const clearBtn = document.getElementById('searchClear');
@@ -1195,13 +1224,11 @@ searchInput.addEventListener('input', function() {
     return;
   }
 
-  // Quick client-side filter while typing (instant feedback)
   const ql = q.toLowerCase();
   document.querySelectorAll('.card[data-url]').forEach(card => {
     card.style.display = card.textContent.toLowerCase().includes(ql) ? '' : 'none';
   });
 
-  // After 400ms pause, do server-side full-text search
   searchTimeout = setTimeout(async () => {
     const status = document.getElementById('searchStatus');
     status.textContent = 'Searching full text...';
@@ -1209,21 +1236,17 @@ searchInput.addEventListener('input', function() {
     try {
       const res = await fetch(BASE + '/tools/dugg_search', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Dugg-Key': API_KEY },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: q, limit: 50 }),
       });
       if (!res.ok) throw new Error('search failed');
       const data = await res.json();
-      // Parse the MCP tool response to extract matching resource IDs
       const text = typeof data === 'string' ? data : (data.text || data.result || JSON.stringify(data));
       const matchIds = new Set();
-      // Match both [abc123def456] and id=abc123def456 formats
       const idRegex = /(?:\[|id[=: ]+)([a-f0-9]{12})/gi;
       let m;
       while ((m = idRegex.exec(String(text))) !== null) matchIds.add(m[1]);
 
-      // Show cards that match either client-side or server-side
-      const visibleBefore = document.querySelectorAll('.card[data-url]:not([style*="display: none"])').length;
       document.querySelectorAll('.card[data-url]').forEach(card => {
         const cardId = card.id.replace('item-', '');
         const clientMatch = card.textContent.toLowerCase().includes(ql);
@@ -1242,7 +1265,6 @@ function editNote(id) {
   const current = noteEl.textContent || '';
   const actionsEl = noteEl.parentElement.querySelector('.item-actions');
   const sourceServer = document.getElementById('item-' + id).dataset.sourceServer || '';
-  // Replace note with textarea
   const editor = document.createElement('div');
   editor.className = 'edit-form';
   const publishBtn = sourceServer
@@ -1274,7 +1296,7 @@ async function saveNote(id) {
   try {
     const res = await fetch(BASE + '/tools/dugg_edit', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Dugg-Key': API_KEY },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ resource_id: id, note: newNote }),
     });
     if (!res.ok) { alert('Failed to save'); return; }
@@ -1291,12 +1313,11 @@ async function publishNote(id) {
   const textarea = document.getElementById('edit-' + id);
   const note = textarea.value.trim();
   if (!note) { alert('Write a note before publishing'); return; }
-  // Save locally first, then publish upstream
   await saveNote(id);
   const btn = document.querySelector('#item-' + id + ' .publish-btn');
   if (btn) { btn.textContent = 'publishing...'; btn.disabled = true; }
   try {
-    const res = await fetch(BASE + '/publish-note/' + API_KEY, {
+    const res = await fetch(BASE + '/publish-note', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ resource_id: id, note: note }),
@@ -1321,7 +1342,7 @@ async function deleteItem(id) {
     const collectionId = document.getElementById('item-' + id).dataset.collection;
     const res = await fetch(BASE + '/tools/dugg_delete_resource', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Dugg-Key': API_KEY },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ resource_id: id, collection_id: collectionId }),
     });
     if (!res.ok) { alert('Failed to delete'); return; }
@@ -1341,7 +1362,7 @@ async function syncNow(e) {
   try {
     const res = await fetch(BASE + '/tools/dugg_rss_poll', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Dugg-Key': API_KEY },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({}),
     });
     if (res.ok) {
@@ -1388,14 +1409,42 @@ async function syncNow(e) {
 {search_bar}
 {items_html}
 {feed_js}"""
-        # RFC 8288: Link header pointing to Atom alternate
-        srv_url = d.get_config("server_url", "")
-        feed_path = f"/feed/{api_key}"
-        atom_url = f"{srv_url.rstrip('/')}{feed_path}" if srv_url else feed_path
-        return HTMLResponse(
-            _html_page(page_title, body, wide=True),
-            headers={"Link": f'<{atom_url}>; rel="alternate"; type="application/atom+xml"'},
-        )
+        return HTMLResponse(_html_page(page_title, body, wide=True))
+
+    async def handle_feed(request: Request):
+        """GET /feed/{key} — content-negotiated.
+
+        Atom/RSS requests serve the XML feed unchanged (machine clients can't
+        carry a cookie). Browser HTML requests silent-migrate: set the dugg_key
+        cookie and 302 to `/feed`, so the key never appears in the URL bar again.
+        """
+        api_key = request.path_params["key"]
+        d = get_db()
+        user = d.get_user_by_api_key(api_key)
+        if not user:
+            if _wants_atom(request):
+                return _problem_response(404, "Invalid key")
+            return HTMLResponse(_html_page("Not Found", "<h1>Invalid key</h1><p>This feed URL is not valid.</p>"), status_code=404)
+
+        d.touch_user(user["id"])
+
+        if _wants_atom(request):
+            return _render_feed_atom(request, user, api_key)
+
+        # Browser visit: silent migrate to cookie-authed bare path.
+        from starlette.responses import RedirectResponse
+        resp = RedirectResponse(url="/feed", status_code=303)
+        _set_session_cookie(resp, api_key, request)
+        return resp
+
+    async def handle_feed_bare(request: Request):
+        """GET /feed — cookie-authed HTML feed. Redirects to /session/unlock if unauthed."""
+        user = _resolve_user_from_cookie_or_header(request)
+        if not user:
+            from starlette.responses import RedirectResponse
+            return RedirectResponse(url="/session/unlock?return_to=/feed", status_code=303)
+        get_db().touch_user(user["id"])
+        return _render_feed_html(request, user)
 
     # --- Compact URL cache for Chrome extension ---
 
@@ -1435,17 +1484,20 @@ async function syncNow(e) {
     # --- Note Publishing (upstream federation) ---
 
     async def handle_publish_note(request: Request):
-        """POST /publish-note/{key} — push a local note upstream to its source server.
+        """POST /publish-note or /publish-note/{key} — push a local note upstream.
 
         Body: {"resource_id": "...", "note": "..."}
+        Auth: dugg_key cookie, X-Dugg-Key header, or legacy path key.
         The resource must have a source_server set (i.e. it came from an RSS sync).
         The user's API key for that server is extracted from their RSS subscription
         feed URL. The note is POSTed to the source server's /tools/dugg_add endpoint,
         which will attach it as a sibling note via the URL collision path.
         """
-        api_key = request.path_params["key"]
         d = get_db()
-        user = d.get_user_by_api_key(api_key)
+        user = _resolve_user_from_cookie_or_header(request)
+        if not user:
+            api_key = request.path_params.get("key", "")
+            user = d.get_user_by_api_key(api_key) if api_key else None
         if not user:
             return JSONResponse({"error": "Invalid key"}, status_code=401)
 
@@ -1530,41 +1582,53 @@ async function syncNow(e) {
         new_key = d.rotate_api_key(user["id"])
         return JSONResponse({"api_key": new_key, "user_id": user["id"]})
 
-    # --- Shareable Resource Viewer (/r/{resource_id}) ---
-    # Form-gated: unauthenticated visitors get a "paste your key" form; submitting
-    # sets a cookie so subsequent visits go straight to content. Membership is
-    # checked on every render, so leaking the URL does not grant access.
+    # --- Shared unlock form + session endpoints ---
+    # `/session/unlock` is the canonical paste-your-key form for every browser-served
+    # authenticated endpoint (/feed, /paste, /admin, /appeal, /r/{id}). On submit,
+    # validates the key, sets the dugg_key cookie, and redirects to `return_to`.
+    # The resource viewer (/r/{id}) is a thin wrapper that specifies its own return_to.
 
-    COOKIE_NAME = "dugg_key"
-
-    def _resolve_user_for_viewer(request: Request) -> Optional[dict]:
-        """Cookie > X-Dugg-Key header. Returns None if neither resolves to a user."""
-        d = get_db()
-        cookie_key = request.cookies.get(COOKIE_NAME, "")
-        if cookie_key:
-            user = d.get_user_by_api_key(cookie_key)
-            if user:
-                return user
-        header_key = request.headers.get("x-dugg-key", "")
-        if header_key:
-            user = d.get_user_by_api_key(header_key)
-            if user:
-                return user
-        return None
-
-    def _unlock_form_html(resource_id: str, error: str = "") -> str:
+    def _unlock_form_html(return_to: str = "/feed", error: str = "") -> str:
         err_html = f'<p style="color:#f87171;margin-top:0.5rem;font-size:0.9rem;">{_xml_escape(error)}</p>' if error else ""
         return _html_page(
             "Unlock",
             f"""<h1>Unlock</h1>
-<p style="margin-top:0.5rem;color:#aaa;">This content is only visible to Dugg members of this server. Paste your Dugg key to view.</p>
-<form method="POST" action="/r/{_xml_escape(resource_id)}/unlock" style="margin-top:1rem;">
+<p style="margin-top:0.5rem;color:#aaa;">This page is only visible to Dugg members of this server. Paste your Dugg key to view.</p>
+<form method="POST" action="/session/unlock" style="margin-top:1rem;">
+  <input type="hidden" name="return_to" value="{_xml_escape(return_to)}">
   <input type="password" name="key" placeholder="dugg_..." autofocus required
          style="width:100%;padding:0.6rem;background:#1a1a1a;border:1px solid #333;color:#eee;border-radius:4px;font-family:monospace;">
   <button type="submit" style="margin-top:0.5rem;padding:0.6rem 1rem;background:#2563eb;color:white;border:0;border-radius:4px;cursor:pointer;">Unlock</button>
   {err_html}
 </form>""",
         )
+
+    async def handle_session_unlock_get(request: Request):
+        """GET /session/unlock?return_to=/feed — render the paste-key form."""
+        return_to = _safe_return_to(request.query_params.get("return_to"))
+        return HTMLResponse(_unlock_form_html(return_to))
+
+    async def handle_session_unlock_post(request: Request):
+        """POST /session/unlock — validate posted key, set dugg_key cookie, redirect to return_to."""
+        form = await request.form()
+        key = (form.get("key") or "").strip()
+        return_to = _safe_return_to(form.get("return_to"))
+        d = get_db()
+        user = d.get_user_by_api_key(key) if key else None
+        if not user:
+            return HTMLResponse(_unlock_form_html(return_to, error="Invalid key."), status_code=401)
+        from starlette.responses import RedirectResponse
+        resp = RedirectResponse(url=return_to, status_code=303)
+        _set_session_cookie(resp, key, request)
+        return resp
+
+    async def handle_session_clear(request: Request):
+        """GET /session/clear?return_to=/ — delete cookie and redirect (logout)."""
+        return_to = _safe_return_to(request.query_params.get("return_to"), default="/")
+        from starlette.responses import RedirectResponse
+        resp = RedirectResponse(url=return_to, status_code=303)
+        resp.delete_cookie(COOKIE_NAME, path="/")
+        return resp
 
     def _render_resource(resource: dict, sibling_notes: Optional[list] = None) -> str:
         title = resource.get("title") or "Untitled"
@@ -1611,9 +1675,9 @@ async function syncNow(e) {
         collection that contains the resource."""
         resource_id = request.path_params["resource_id"]
         d = get_db()
-        user = _resolve_user_for_viewer(request)
+        user = _resolve_user_from_cookie_or_header(request)
         if not user:
-            return HTMLResponse(_unlock_form_html(resource_id), status_code=401)
+            return HTMLResponse(_unlock_form_html(return_to=f"/r/{resource_id}"), status_code=401)
 
         d.touch_user(user["id"])
         resource = d.get_resource(resource_id)
@@ -1632,40 +1696,27 @@ async function syncNow(e) {
         return HTMLResponse(_render_resource(resource, sibling_notes=siblings))
 
     async def handle_resource_unlock(request: Request):
-        """POST /r/{resource_id}/unlock — validate pasted key, set cookie, redirect back."""
+        """POST /r/{resource_id}/unlock — legacy alias for /session/unlock with resource return_to.
+
+        Preserved for any bookmarked forms; the generalized `/session/unlock`
+        endpoint is preferred.
+        """
         resource_id = request.path_params["resource_id"]
         form = await request.form()
         key = (form.get("key") or "").strip()
+        return_to = f"/r/{resource_id}"
         d = get_db()
         user = d.get_user_by_api_key(key) if key else None
         if not user:
-            return HTMLResponse(_unlock_form_html(resource_id, error="Invalid key."), status_code=401)
+            return HTMLResponse(_unlock_form_html(return_to, error="Invalid key."), status_code=401)
         from starlette.responses import RedirectResponse
-        resp = RedirectResponse(url=f"/r/{resource_id}", status_code=303)
-        is_https = request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
-        resp.set_cookie(
-            COOKIE_NAME, key,
-            httponly=True, secure=is_https, samesite="lax",
-            max_age=60 * 60 * 24 * 365,
-            path="/",
-        )
+        resp = RedirectResponse(url=return_to, status_code=303)
+        _set_session_cookie(resp, key, request)
         return resp
 
     # --- Ban Appeal Pages ---
 
-    async def handle_appeal_page(request: Request):
-        """GET /appeal/{key} — show the ban appeal submission page.
-
-        The key is the user's API key. If they're banned, they can submit an appeal.
-        """
-        api_key = request.path_params["key"]
-        d = get_db()
-        user = d.get_user_by_api_key(api_key)
-
-        if not user:
-            return HTMLResponse(_html_page("Not Found", "<h1>Invalid key</h1><p>This appeal URL is not valid.</p>"), status_code=404)
-
-        # Find collections where this user is banned or appealing
+    def _render_appeal_page_html(d, user: dict) -> HTMLResponse:
         rows = d.conn.execute(
             """SELECT cm.collection_id, cm.status, c.name
                FROM collection_members cm
@@ -1696,7 +1747,7 @@ async function syncNow(e) {
                 items_html += f"""<div class="feed-item">
   <h3>{coll_name}</h3>
   <p class="meta">Your credit score: {score['total']} ({score['submissions']} submissions, {score['distinct_human_reactors']} reactions)</p>
-  <form method="POST" action="/appeal/{api_key}/submit" style="margin-top: 0.5rem;">
+  <form method="POST" action="/appeal/submit" style="margin-top: 0.5rem;">
     <input type="hidden" name="collection_id" value="{coll_id}">
     <button type="submit">Submit Appeal</button>
   </form>
@@ -1707,15 +1758,28 @@ async function syncNow(e) {
 {items_html}"""
         return HTMLResponse(_html_page("Ban Appeals", body))
 
-    async def handle_appeal_submit(request: Request):
-        """POST /appeal/{key}/submit — submit an appeal for a specific collection."""
+    async def handle_appeal_page(request: Request):
+        """GET /appeal/{key} — silent-migrate to cookie-authed /appeal."""
         api_key = request.path_params["key"]
         d = get_db()
         user = d.get_user_by_api_key(api_key)
-
         if not user:
-            return HTMLResponse(_html_page("Error", "<h1>Invalid key</h1>"), status_code=404)
+            return HTMLResponse(_html_page("Not Found", "<h1>Invalid key</h1><p>This appeal URL is not valid.</p>"), status_code=404)
+        from starlette.responses import RedirectResponse
+        resp = RedirectResponse(url="/appeal", status_code=303)
+        _set_session_cookie(resp, api_key, request)
+        return resp
 
+    async def handle_appeal_page_bare(request: Request):
+        """GET /appeal — cookie-authed appeal page."""
+        user = _resolve_user_from_cookie_or_header(request)
+        if not user:
+            from starlette.responses import RedirectResponse
+            return RedirectResponse(url="/session/unlock?return_to=/appeal", status_code=303)
+        return _render_appeal_page_html(get_db(), user)
+
+    async def _do_appeal_submit(request: Request, user: dict, redirect_to: str) -> HTMLResponse:
+        d = get_db()
         content_type = request.headers.get("content-type", "")
         if "application/json" in content_type:
             body = await request.body()
@@ -1740,18 +1804,26 @@ async function syncNow(e) {
 
         body = f"""<h1>Appeal submitted</h1>
 <p>Your appeal has been submitted. The collection owner will review it along with your credit score.</p>
-<p style="margin-top: 1rem;"><a href="/appeal/{api_key}" style="color: #93c5fd;">Back to appeals</a></p>"""
+<p style="margin-top: 1rem;"><a href="{_xml_escape(redirect_to)}" style="color: #93c5fd;">Back to appeals</a></p>"""
         return HTMLResponse(_html_page("Appeal Submitted", body))
 
-    async def handle_appeal_status(request: Request):
-        """GET /appeal/{key}/status — JSON endpoint for checking appeal status."""
+    async def handle_appeal_submit(request: Request):
+        """POST /appeal/{key}/submit — legacy path-based variant."""
         api_key = request.path_params["key"]
         d = get_db()
         user = d.get_user_by_api_key(api_key)
-
         if not user:
-            return _problem_response(404, "Invalid key")
+            return HTMLResponse(_html_page("Error", "<h1>Invalid key</h1>"), status_code=404)
+        return await _do_appeal_submit(request, user, f"/appeal/{api_key}")
 
+    async def handle_appeal_submit_bare(request: Request):
+        """POST /appeal/submit — cookie-authed appeal submission."""
+        user = _resolve_user_from_cookie_or_header(request)
+        if not user:
+            return HTMLResponse(_html_page("Error", "<h1>Unauthorized</h1>"), status_code=401)
+        return await _do_appeal_submit(request, user, "/appeal")
+
+    def _render_appeal_status_json(d, user: dict) -> JSONResponse:
         rows = d.conn.execute(
             """SELECT cm.collection_id, cm.status, c.name
                FROM collection_members cm
@@ -1759,11 +1831,26 @@ async function syncNow(e) {
                WHERE cm.user_id = ? AND cm.status IN ('banned', 'appealing')""",
             (user["id"],),
         ).fetchall()
-
         return JSONResponse({
             "user_id": user["id"],
             "bans": [{"collection_id": r["collection_id"], "name": r["name"], "status": r["status"]} for r in rows],
         })
+
+    async def handle_appeal_status(request: Request):
+        """GET /appeal/{key}/status — legacy JSON status endpoint (key in path)."""
+        api_key = request.path_params["key"]
+        d = get_db()
+        user = d.get_user_by_api_key(api_key)
+        if not user:
+            return _problem_response(404, "Invalid key")
+        return _render_appeal_status_json(d, user)
+
+    async def handle_appeal_status_bare(request: Request):
+        """GET /appeal/status — cookie-authed JSON status endpoint."""
+        user = _resolve_user_from_cookie_or_header(request)
+        if not user:
+            return _problem_response(401, "Unauthorized")
+        return _render_appeal_status_json(get_db(), user)
 
     # --- Events SSE stream ---
 
@@ -2118,29 +2205,25 @@ async function syncNow(e) {
     # --- Browser admin panel ---
 
     def _admin_resolve_user(request: Request):
-        """Resolve user from URL path key param."""
-        key = request.path_params.get("key", "")
+        """Resolve user from cookie/header first, then path key (legacy)."""
         d = get_db()
-        user = d.get_user_by_api_key(key)
-        return d, user
+        user = _resolve_user_from_cookie_or_header(request)
+        if user:
+            return d, user
+        key = request.path_params.get("key", "")
+        if key:
+            return d, d.get_user_by_api_key(key)
+        return d, None
 
     # --- Paste Pages ---
 
-    async def handle_paste_page(request: Request):
-        """GET /paste/{key} — browser form to paste raw content."""
-        api_key = request.path_params["key"]
-        d = get_db()
-        user = d.get_user_by_api_key(api_key)
-
-        if not user:
-            return HTMLResponse(_html_page("Not Found", "<h1>Invalid key</h1><p>This paste URL is not valid.</p>"), status_code=404)
-
+    def _render_paste_page_html(d, user: dict) -> HTMLResponse:
+        """Render the paste form for a resolved user (cookie-authed submit)."""
         instances = d.list_instances(user["id"])
         page_title = instances[0]["name"] if instances else "Dugg"
-
         body = f"""<h1>Paste Content</h1>
 <p class="topic">Add raw content to {_xml_escape(page_title)} — no URL needed.</p>
-<form method="POST" action="/paste/{_xml_escape(api_key)}/submit" enctype="multipart/form-data">
+<form method="POST" action="/paste/submit" enctype="multipart/form-data">
   <label for="title">Title</label>
   <input type="text" id="title" name="title" placeholder="e.g. Weekly AI newsletter, Apr 15" required>
   <label for="body">Content</label>
@@ -2163,15 +2246,28 @@ async function syncNow(e) {
 </form>"""
         return HTMLResponse(_html_page(f"Paste — {page_title}", body))
 
-    async def handle_paste_submit(request: Request):
-        """POST /paste/{key}/submit — process paste form submission."""
+    async def handle_paste_page(request: Request):
+        """GET /paste/{key} — silent-migrate to cookie-authed /paste."""
         api_key = request.path_params["key"]
         d = get_db()
         user = d.get_user_by_api_key(api_key)
-
         if not user:
-            return HTMLResponse(_html_page("Error", "<h1>Invalid key</h1>"), status_code=404)
+            return HTMLResponse(_html_page("Not Found", "<h1>Invalid key</h1><p>This paste URL is not valid.</p>"), status_code=404)
+        from starlette.responses import RedirectResponse
+        resp = RedirectResponse(url="/paste", status_code=303)
+        _set_session_cookie(resp, api_key, request)
+        return resp
 
+    async def handle_paste_page_bare(request: Request):
+        """GET /paste — cookie-authed paste form."""
+        user = _resolve_user_from_cookie_or_header(request)
+        if not user:
+            from starlette.responses import RedirectResponse
+            return RedirectResponse(url="/session/unlock?return_to=/paste", status_code=303)
+        return _render_paste_page_html(get_db(), user)
+
+    async def _handle_paste_submit_for_user(request: Request, user: dict) -> HTMLResponse:
+        d = get_db()
         d.touch_user(user["id"])
 
         form = await request.form()
@@ -2223,26 +2319,35 @@ async function syncNow(e) {
   Type: {source_type}<br>
   Content: {word_count} words
 </div>
-<p style="margin-top:1rem;"><a href="/paste/{_xml_escape(api_key)}" style="color:#93c5fd;">Paste another</a></p>"""
+<p style="margin-top:1rem;"><a href="/paste" style="color:#93c5fd;">Paste another</a></p>"""
         return HTMLResponse(_html_page("Saved", success_body))
 
-    async def handle_admin_page(request: Request):
-        """GET /admin/{key} — browser-based admin dashboard."""
-        d, user = _admin_resolve_user(request)
+    async def handle_paste_submit(request: Request):
+        """POST /paste/{key}/submit — legacy. Resolves via path key; prefer /paste/submit."""
+        api_key = request.path_params["key"]
+        d = get_db()
+        user = d.get_user_by_api_key(api_key)
         if not user:
-            return HTMLResponse(_html_page("Unauthorized", "<h1>Invalid API key</h1><p>Check your admin URL.</p>"), status_code=401)
+            return HTMLResponse(_html_page("Error", "<h1>Invalid key</h1>"), status_code=404)
+        return await _handle_paste_submit_for_user(request, user)
 
-        key = request.path_params["key"]
+    async def handle_paste_submit_bare(request: Request):
+        """POST /paste/submit — cookie-authed paste submission."""
+        user = _resolve_user_from_cookie_or_header(request)
+        if not user:
+            return HTMLResponse(_html_page("Error", "<h1>Unauthorized</h1>"), status_code=401)
+        return await _handle_paste_submit_for_user(request, user)
+
+    def _render_admin_page_html(d, user: dict) -> HTMLResponse:
+        """Render admin dashboard for a resolved user. All form actions use bare /admin/* paths."""
         collections = d.list_collections(user["id"])
         server_url = d.get_config("server_url", "")
 
-        # Gather members and resources per collection
         sections = []
         for c in collections:
             member = d.get_member_status(c["id"], user["id"])
             is_owner = member and member["role"] == "owner"
 
-            # Members
             members = d.conn.execute(
                 "SELECT cm.user_id, cm.role, cm.status, u.name FROM collection_members cm JOIN users u ON cm.user_id = u.id WHERE cm.collection_id = ? ORDER BY cm.joined_at",
                 (c["id"],)
@@ -2258,12 +2363,11 @@ async function syncNow(e) {
                 actions = ""
                 if is_owner and m["user_id"] != user["id"]:
                     if m["status"] == "active":
-                        actions = f' <form method="POST" action="/admin/{key}/ban" style="display:inline;"><input type="hidden" name="collection_id" value="{c["id"]}"><input type="hidden" name="user_id" value="{m["user_id"]}"><button type="submit" style="background:#dc2626;padding:0.2rem 0.5rem;font-size:0.75rem;border-radius:4px;border:none;color:#fff;cursor:pointer;">Ban</button></form>'
+                        actions = f' <form method="POST" action="/admin/ban" style="display:inline;"><input type="hidden" name="collection_id" value="{c["id"]}"><input type="hidden" name="user_id" value="{m["user_id"]}"><button type="submit" style="background:#dc2626;padding:0.2rem 0.5rem;font-size:0.75rem;border-radius:4px;border:none;color:#fff;cursor:pointer;">Ban</button></form>'
                     elif m["status"] in ("banned", "appealing"):
-                        actions = f' <form method="POST" action="/admin/{key}/unban" style="display:inline;"><input type="hidden" name="collection_id" value="{c["id"]}"><input type="hidden" name="user_id" value="{m["user_id"]}"><button type="submit" style="background:#16a34a;padding:0.2rem 0.5rem;font-size:0.75rem;border-radius:4px;border:none;color:#fff;cursor:pointer;">Unban</button></form>'
+                        actions = f' <form method="POST" action="/admin/unban" style="display:inline;"><input type="hidden" name="collection_id" value="{c["id"]}"><input type="hidden" name="user_id" value="{m["user_id"]}"><button type="submit" style="background:#16a34a;padding:0.2rem 0.5rem;font-size:0.75rem;border-radius:4px;border:none;color:#fff;cursor:pointer;">Unban</button></form>'
                 member_html += f'<div style="padding:0.4rem 0;border-bottom:1px solid #222;display:flex;justify-content:space-between;align-items:center;"><span>{_xml_escape(m["name"])} <span style="color:#666;">({m["role"]})</span>{status_badge}</span>{actions}</div>'
 
-            # Resources
             resources = d.conn.execute(
                 "SELECT r.id, r.url, r.title, r.submitted_by, r.created_at, u.name as submitter_name FROM resources r JOIN users u ON r.submitted_by = u.id WHERE r.collection_id = ? ORDER BY r.created_at DESC LIMIT 50",
                 (c["id"],)
@@ -2275,7 +2379,7 @@ async function syncNow(e) {
                 date = r["created_at"][:10]
                 remove_btn = ""
                 if is_owner or r["submitted_by"] == user["id"]:
-                    remove_btn = f' <form method="POST" action="/admin/{key}/remove" style="display:inline;"><input type="hidden" name="resource_id" value="{r["id"]}"><input type="hidden" name="collection_id" value="{c["id"]}"><button type="submit" style="background:#dc2626;padding:0.15rem 0.4rem;font-size:0.7rem;border-radius:4px;border:none;color:#fff;cursor:pointer;">Remove</button></form>'
+                    remove_btn = f' <form method="POST" action="/admin/remove" style="display:inline;"><input type="hidden" name="resource_id" value="{r["id"]}"><input type="hidden" name="collection_id" value="{c["id"]}"><button type="submit" style="background:#dc2626;padding:0.15rem 0.4rem;font-size:0.7rem;border-radius:4px;border:none;color:#fff;cursor:pointer;">Remove</button></form>'
                 resource_html += f'<div class="feed-item"><h3><a href="{_xml_escape(r["url"])}" target="_blank">{_xml_escape(title)}</a>{remove_btn}</h3><div class="meta">by {_xml_escape(r["submitter_name"])} · {date}</div></div>'
 
             if not resource_html:
@@ -2301,11 +2405,28 @@ async function syncNow(e) {
 """
         return HTMLResponse(_html_page("Dugg Admin", body))
 
-    async def handle_admin_ban(request: Request):
-        """POST /admin/{key}/ban — ban a user from a collection."""
-        d, user = _admin_resolve_user(request)
+    async def handle_admin_page(request: Request):
+        """GET /admin/{key} — silent-migrate to cookie-authed /admin."""
+        api_key = request.path_params["key"]
+        d = get_db()
+        user = d.get_user_by_api_key(api_key)
         if not user:
-            return HTMLResponse(_html_page("Unauthorized", "<h1>Invalid API key</h1>"), status_code=401)
+            return HTMLResponse(_html_page("Unauthorized", "<h1>Invalid API key</h1><p>Check your admin URL.</p>"), status_code=401)
+        from starlette.responses import RedirectResponse
+        resp = RedirectResponse(url="/admin", status_code=303)
+        _set_session_cookie(resp, api_key, request)
+        return resp
+
+    async def handle_admin_page_bare(request: Request):
+        """GET /admin — cookie-authed admin dashboard."""
+        user = _resolve_user_from_cookie_or_header(request)
+        if not user:
+            from starlette.responses import RedirectResponse
+            return RedirectResponse(url="/session/unlock?return_to=/admin", status_code=303)
+        return _render_admin_page_html(get_db(), user)
+
+    async def _do_admin_ban(request: Request, user: dict, redirect_to: str) -> HTMLResponse:
+        d = get_db()
         form = await request.form()
         collection_id = form.get("collection_id", "")
         target_user_id = form.get("user_id", "")
@@ -2314,15 +2435,11 @@ async function syncNow(e) {
             return HTMLResponse(_html_page("Forbidden", "<h1>Not the collection owner</h1>"), status_code=403)
         d.conn.execute("UPDATE collection_members SET status = 'banned' WHERE collection_id = ? AND user_id = ?", (collection_id, target_user_id))
         d.conn.commit()
-        key = request.path_params["key"]
         from starlette.responses import RedirectResponse
-        return RedirectResponse(f"/admin/{key}", status_code=303)
+        return RedirectResponse(redirect_to, status_code=303)
 
-    async def handle_admin_unban(request: Request):
-        """POST /admin/{key}/unban — unban a user."""
-        d, user = _admin_resolve_user(request)
-        if not user:
-            return HTMLResponse(_html_page("Unauthorized", "<h1>Invalid API key</h1>"), status_code=401)
+    async def _do_admin_unban(request: Request, user: dict, redirect_to: str) -> HTMLResponse:
+        d = get_db()
         form = await request.form()
         collection_id = form.get("collection_id", "")
         target_user_id = form.get("user_id", "")
@@ -2331,15 +2448,11 @@ async function syncNow(e) {
             return HTMLResponse(_html_page("Forbidden", "<h1>Not the collection owner</h1>"), status_code=403)
         d.conn.execute("UPDATE collection_members SET status = 'active' WHERE collection_id = ? AND user_id = ?", (collection_id, target_user_id))
         d.conn.commit()
-        key = request.path_params["key"]
         from starlette.responses import RedirectResponse
-        return RedirectResponse(f"/admin/{key}", status_code=303)
+        return RedirectResponse(redirect_to, status_code=303)
 
-    async def handle_admin_remove(request: Request):
-        """POST /admin/{key}/remove — remove a resource."""
-        d, user = _admin_resolve_user(request)
-        if not user:
-            return HTMLResponse(_html_page("Unauthorized", "<h1>Invalid API key</h1>"), status_code=401)
+    async def _do_admin_remove(request: Request, user: dict, redirect_to: str) -> HTMLResponse:
+        d = get_db()
         form = await request.form()
         resource_id = form.get("resource_id", "")
         collection_id = form.get("collection_id", "")
@@ -2354,9 +2467,56 @@ async function syncNow(e) {
         d.conn.execute("DELETE FROM publish_queue WHERE resource_id = ?", (resource_id,))
         d.conn.execute("DELETE FROM resources WHERE id = ?", (resource_id,))
         d.conn.commit()
-        key = request.path_params["key"]
         from starlette.responses import RedirectResponse
-        return RedirectResponse(f"/admin/{key}", status_code=303)
+        return RedirectResponse(redirect_to, status_code=303)
+
+    async def handle_admin_ban(request: Request):
+        """POST /admin/{key}/ban — legacy path-based variant."""
+        d, user = _admin_resolve_user(request)
+        if not user:
+            return HTMLResponse(_html_page("Unauthorized", "<h1>Invalid API key</h1>"), status_code=401)
+        key = request.path_params.get("key", "")
+        redirect_to = f"/admin/{key}" if key else "/admin"
+        return await _do_admin_ban(request, user, redirect_to)
+
+    async def handle_admin_unban(request: Request):
+        """POST /admin/{key}/unban — legacy path-based variant."""
+        d, user = _admin_resolve_user(request)
+        if not user:
+            return HTMLResponse(_html_page("Unauthorized", "<h1>Invalid API key</h1>"), status_code=401)
+        key = request.path_params.get("key", "")
+        redirect_to = f"/admin/{key}" if key else "/admin"
+        return await _do_admin_unban(request, user, redirect_to)
+
+    async def handle_admin_remove(request: Request):
+        """POST /admin/{key}/remove — legacy path-based variant."""
+        d, user = _admin_resolve_user(request)
+        if not user:
+            return HTMLResponse(_html_page("Unauthorized", "<h1>Invalid API key</h1>"), status_code=401)
+        key = request.path_params.get("key", "")
+        redirect_to = f"/admin/{key}" if key else "/admin"
+        return await _do_admin_remove(request, user, redirect_to)
+
+    async def handle_admin_ban_bare(request: Request):
+        """POST /admin/ban — cookie-authed ban action."""
+        user = _resolve_user_from_cookie_or_header(request)
+        if not user:
+            return HTMLResponse(_html_page("Unauthorized", "<h1>Unauthorized</h1>"), status_code=401)
+        return await _do_admin_ban(request, user, "/admin")
+
+    async def handle_admin_unban_bare(request: Request):
+        """POST /admin/unban — cookie-authed unban action."""
+        user = _resolve_user_from_cookie_or_header(request)
+        if not user:
+            return HTMLResponse(_html_page("Unauthorized", "<h1>Unauthorized</h1>"), status_code=401)
+        return await _do_admin_unban(request, user, "/admin")
+
+    async def handle_admin_remove_bare(request: Request):
+        """POST /admin/remove — cookie-authed remove action."""
+        user = _resolve_user_from_cookie_or_header(request)
+        if not user:
+            return HTMLResponse(_html_page("Unauthorized", "<h1>Unauthorized</h1>"), status_code=401)
+        return await _do_admin_remove(request, user, "/admin")
 
     # --- Lifecycle ---
 
@@ -2390,21 +2550,35 @@ async function syncNow(e) {
         Route("/setup", endpoint=handle_setup_submit, methods=["POST"]),
         Route("/invite/{token}", endpoint=handle_invite_page),
         Route("/invite/{token}/redeem", endpoint=handle_invite_redeem, methods=["POST"]),
+        Route("/session/unlock", endpoint=handle_session_unlock_get),
+        Route("/session/unlock", endpoint=handle_session_unlock_post, methods=["POST"]),
+        Route("/session/clear", endpoint=handle_session_clear),
         Route("/feed/urls/{key}", endpoint=handle_feed_urls),
+        Route("/feed", endpoint=handle_feed_bare),
         Route("/feed/{key}", endpoint=handle_feed),
+        Route("/paste", endpoint=handle_paste_page_bare),
+        Route("/paste/submit", endpoint=handle_paste_submit_bare, methods=["POST"]),
         Route("/paste/{key}", endpoint=handle_paste_page),
         Route("/paste/{key}/submit", endpoint=handle_paste_submit, methods=["POST"]),
+        Route("/appeal", endpoint=handle_appeal_page_bare),
+        Route("/appeal/submit", endpoint=handle_appeal_submit_bare, methods=["POST"]),
+        Route("/appeal/status", endpoint=handle_appeal_status_bare),
         Route("/appeal/{key}", endpoint=handle_appeal_page),
         Route("/appeal/{key}/submit", endpoint=handle_appeal_submit, methods=["POST"]),
         Route("/appeal/{key}/status", endpoint=handle_appeal_status),
         Route("/r/{resource_id}", endpoint=handle_resource_page),
         Route("/r/{resource_id}/unlock", endpoint=handle_resource_unlock, methods=["POST"]),
+        Route("/publish-note", endpoint=handle_publish_note, methods=["POST"]),
         Route("/publish-note/{key}", endpoint=handle_publish_note, methods=["POST"]),
         Route("/rotate-key", endpoint=handle_rotate_key, methods=["POST"]),
         Route("/events/stream", endpoint=handle_events_stream),
         Route("/tools/{tool_name}", endpoint=handle_tools, methods=["POST"]),
         Route("/slack/command", endpoint=handle_slack_command, methods=["POST"]),
         Route("/slack/actions", endpoint=handle_slack_actions, methods=["POST"]),
+        Route("/admin", endpoint=handle_admin_page_bare),
+        Route("/admin/ban", endpoint=handle_admin_ban_bare, methods=["POST"]),
+        Route("/admin/unban", endpoint=handle_admin_unban_bare, methods=["POST"]),
+        Route("/admin/remove", endpoint=handle_admin_remove_bare, methods=["POST"]),
         Route("/admin/{key}", endpoint=handle_admin_page),
         Route("/admin/{key}/ban", endpoint=handle_admin_ban, methods=["POST"]),
         Route("/admin/{key}/unban", endpoint=handle_admin_unban, methods=["POST"]),
