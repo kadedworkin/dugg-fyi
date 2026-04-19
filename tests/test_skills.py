@@ -276,3 +276,40 @@ def test_skill_reactions_work_via_resource_id(db):
     reactions = db.get_reactions(skill_id, user["id"])
     assert reactions is not None
     assert reactions["total"] == 1
+
+
+def test_add_skill_emits_skill_added_event(db):
+    user, coll = _seed_user_and_collection(db)
+    skill_id = db.add_skill(
+        name="emitter",
+        body="b",
+        frontmatter={"name": "emitter", "description": "d"},
+        title="Emitter",
+        description="d",
+        author=user["name"],
+        collection_id=coll["id"],
+        submitted_by=user["id"],
+    )
+    rows = db.conn.execute(
+        "SELECT event_type, actor_id, collection_id FROM event_log WHERE event_type LIKE 'skill_%'"
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["event_type"] == "skill_added"
+    assert rows[0]["actor_id"] == user["id"]
+    assert rows[0]["collection_id"] == coll["id"]
+
+    fork_id = db.add_skill(
+        name="emitter",
+        body="b2",
+        frontmatter={"name": "emitter", "description": "d2"},
+        title="Emitter",
+        description="d2",
+        author=user["name"],
+        collection_id=coll["id"],
+        submitted_by=user["id"],
+        supersedes_id=skill_id,
+    )
+    rows = db.conn.execute(
+        "SELECT event_type FROM event_log WHERE event_type LIKE 'skill_%' ORDER BY created_at"
+    ).fetchall()
+    assert [r["event_type"] for r in rows] == ["skill_added", "skill_forked"]

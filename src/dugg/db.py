@@ -299,7 +299,7 @@ class DuggDB:
 
             CREATE TABLE IF NOT EXISTS event_log (
                 id TEXT PRIMARY KEY,
-                event_type TEXT NOT NULL CHECK(event_type IN ('resource_added', 'resource_published', 'resource_deleted', 'member_joined', 'member_banned', 'publish_delivered', 'invite_created', 'invite_redeemed', 'reaction_added')),
+                event_type TEXT NOT NULL CHECK(event_type IN ('resource_added', 'resource_published', 'resource_deleted', 'member_joined', 'member_banned', 'publish_delivered', 'invite_created', 'invite_redeemed', 'reaction_added', 'skill_added', 'skill_forked', 'skill_superseded', 'skill_deleted')),
                 instance_id TEXT REFERENCES dugg_instances(id),
                 collection_id TEXT REFERENCES collections(id),
                 actor_id TEXT REFERENCES users(id),
@@ -544,9 +544,33 @@ class DuggDB:
                     );
                 """)
 
+        # Migrate event_log CHECK constraint to include skill_* event types.
+        # SQLite can't ALTER a CHECK, so rebuild the table when the stored DDL
+        # lacks 'skill_added'. Preserves all existing rows.
+        ev_row = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='event_log'"
+        ).fetchone()
+        if ev_row and "skill_added" not in (ev_row[0] or ""):
+            self.conn.executescript("""
+                CREATE TABLE event_log_new (
+                    id TEXT PRIMARY KEY,
+                    event_type TEXT NOT NULL CHECK(event_type IN ('resource_added', 'resource_published', 'resource_deleted', 'member_joined', 'member_banned', 'publish_delivered', 'invite_created', 'invite_redeemed', 'reaction_added', 'skill_added', 'skill_forked', 'skill_superseded', 'skill_deleted')),
+                    instance_id TEXT REFERENCES dugg_instances(id),
+                    collection_id TEXT REFERENCES collections(id),
+                    actor_id TEXT REFERENCES users(id),
+                    payload TEXT DEFAULT '{}',
+                    created_at TEXT NOT NULL
+                );
+                INSERT INTO event_log_new (id, event_type, instance_id, collection_id, actor_id, payload, created_at)
+                    SELECT id, event_type, instance_id, collection_id, actor_id, payload, created_at FROM event_log;
+                DROP TABLE event_log;
+                ALTER TABLE event_log_new RENAME TO event_log;
+            """)
+
         self.conn.commit()
 
     def close(self):
+        self.wait_for_webhooks(timeout=5.0)
         self.conn.close()
 
     # --- Server Config ---
@@ -1010,8 +1034,20 @@ class DuggDB:
              1 if is_exportable else 0, now, now),
         )
         self.conn.commit()
-        # Event emission (skill_added etc.) lands with Phase 3 federation,
-        # together with the event_type CHECK migration and webhook wiring.
+        event_type = "skill_forked" if supersedes_id else "skill_added"
+        self.emit_event(
+            event_type,
+            actor_id=submitted_by,
+            collection_id=collection_id,
+            payload={
+                "resource_id": res_id,
+                "name": name,
+                "title": title,
+                "author": author,
+                "supersedes_id": supersedes_id,
+                "is_exportable": bool(is_exportable),
+            },
+        )
         return res_id
 
     def get_skill(
