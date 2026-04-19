@@ -23,6 +23,8 @@ from urllib.parse import parse_qs, urlparse
 import feedparser
 import httpx
 
+from dugg.skills import parse_skill_markdown
+
 logger = logging.getLogger("dugg.rss")
 
 
@@ -73,6 +75,7 @@ class FeedEntry:
     is_private: bool
     categories: list[str] = field(default_factory=list)
     updated_at: str = ""  # Server insertion date from <updated>, for replicating created_at
+    raw_content: str = ""
 
 
 @dataclass
@@ -152,6 +155,12 @@ def _entry_to_normalized(entry) -> Optional[FeedEntry]:
         if term:
             categories.append(term)
 
+    raw_content = ""
+    content_items = entry.get("content") or []
+    if content_items:
+        first_content = content_items[0] or {}
+        raw_content = str(first_content.get("value") or "")
+
     # Extract updated_at (server insertion date) separately from published_at.
     # Prefer raw string to avoid timezone bugs with time.mktime on UTC structs.
     updated_at = ""
@@ -177,6 +186,7 @@ def _entry_to_normalized(entry) -> Optional[FeedEntry]:
         is_private=is_private_link(url),
         categories=categories,
         updated_at=updated_at,
+        raw_content=raw_content,
     )
 
 
@@ -255,6 +265,7 @@ def ingest_entry(
     source_server: str = "",
 ) -> dict:
     """Add a single feed entry to Dugg as a resource."""
+    category_terms = {cat.lower() for cat in entry.categories}
     raw_metadata = {
         "source": "rss",
         "rss_entry_id": entry.entry_id,
@@ -270,6 +281,33 @@ def ingest_entry(
     for cat in entry.categories:
         if cat.lower() not in {t.lower() for t in tags}:
             tags.append(cat)
+
+    if "dugg:skill" in category_terms:
+        try:
+            frontmatter, body = parse_skill_markdown(entry.raw_content)
+        except ValueError:
+            if "skill-invalid" not in {t.lower() for t in tags}:
+                tags.append("skill-invalid")
+        else:
+            resource_id = db.add_skill(
+                name=frontmatter["name"],
+                body=body,
+                frontmatter=frontmatter,
+                title=entry.title,
+                description=entry.description,
+                author=entry.author or frontmatter.get("author", ""),
+                collection_id=collection_id,
+                submitted_by=submitted_by,
+            )
+            if tags:
+                db.tag_resource(resource_id, tags, source="agent")
+            if source_server:
+                db.conn.execute(
+                    "UPDATE resources SET source_server = ? WHERE id = ?",
+                    (source_server, resource_id),
+                )
+                db.conn.commit()
+            return db.get_resource(resource_id) or {"id": resource_id}
 
     result = db.add_resource(
         url=entry.url,
@@ -325,7 +363,11 @@ async def sync_feed(
     # Process tombstones FIRST — remove deleted resources before adding new ones
     deleted_count = 0
     for tomb in tombstones:
-        result = db.delete_resource_by_url(tomb.url, subscription["collection_id"])
+        resource = db.get_resource(tomb.ref)
+        if resource and resource.get("collection_id") == subscription["collection_id"] and resource.get("source_type") == "skill":
+            result = db.delete_resource_by_id(tomb.ref, subscription["collection_id"])
+        else:
+            result = db.delete_resource_by_url(tomb.url, subscription["collection_id"])
         if "deleted" in result:
             deleted_count += 1
             # Remove from seen set so we don't track stale IDs

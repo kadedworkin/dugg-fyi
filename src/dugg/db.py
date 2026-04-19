@@ -1620,6 +1620,24 @@ class DuggDB:
         self.conn.commit()
         return {"deleted": info["id"], "url": info["url"], "title": info.get("title", "")}
 
+    def delete_resource_by_id(self, resource_id: str, collection_id: str) -> dict:
+        """Delete a resource by ID within a collection without recording a tombstone.
+
+        Used by RSS tombstone processing when the upstream feed's entry link is
+        not the canonical local resource URL.
+        """
+        row = self.conn.execute(
+            "SELECT id, url, title FROM resources WHERE id = ? AND collection_id = ?",
+            (resource_id, collection_id),
+        ).fetchone()
+        if not row:
+            return {"error": "Resource not found"}
+        info = dict(row)
+        self.conn.execute("DELETE FROM publish_queue WHERE resource_id = ?", (info["id"],))
+        self.conn.execute("DELETE FROM resources WHERE id = ?", (info["id"],))
+        self.conn.commit()
+        return {"deleted": info["id"], "url": info["url"], "title": info.get("title", "")}
+
     def get_upstream_delete_targets(self, resource_id: str) -> list[dict]:
         """Get remote server details for a published resource, for upstream delete propagation.
 

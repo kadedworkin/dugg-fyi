@@ -34,6 +34,7 @@ from mcp.server.sse import SseServerTransport
 from dugg.db import DuggDB
 from dugg.sync import start_sync_daemon
 from dugg.rss import start_rss_daemon
+from dugg.skills import render_skill_markdown
 
 logger = logging.getLogger("dugg.http")
 
@@ -1025,6 +1026,65 @@ async function doSetup() {{
         page_title = f"{user['name']}'s Dugg"
         srv_url = d.get_config("server_url", "")
         accessible = d._accessible_collection_ids(user["id"])
+        def _skill_link(resource_id: str) -> str:
+            if srv_url:
+                return f"{srv_url.rstrip('/')}/s/{resource_id}"
+            return f"/s/{resource_id}"
+
+        def _xml_cdata(value: str) -> str:
+            safe = (value or "").replace("]]>", "]]]]><![CDATA[>")
+            return f"<![CDATA[{safe}]]>"
+
+        def _render_atom_entry(resource: dict) -> str:
+            title = resource.get("title") or resource["url"]
+            author_xml = ""
+            if resource.get("author"):
+                author_xml = f"\n  <author><name>{_xml_escape(resource['author'])}</name></author>"
+            pub_date = _resource_pub_date(resource)
+            published_xml = ""
+            if pub_date:
+                published_xml = f"\n  <published>{pub_date}T00:00:00Z</published>"
+            tags = resource.get("tags", [])
+            categories_xml = ""
+            if resource.get("source_type") == "skill":
+                skill = d.get_skill(resource["id"])
+                skill_markdown = render_skill_markdown(
+                    (skill or {}).get("frontmatter") or {},
+                    (skill or {}).get("body") or "",
+                )
+                categories_xml += '\n  <category term="dugg:skill"/>'
+                for t in tags:
+                    categories_xml += f'\n  <category term="{_xml_escape(t["label"])}"/>'
+                summary_xml = _xml_escape(resource.get("description", ""))
+                content_xml = f"\n  <content type=\"text\">{_xml_cdata(skill_markdown)}</content>"
+                link_href = _skill_link(resource["id"])
+            else:
+                desc = resource.get("description", "")
+                note = resource.get("note", "")
+                sibling_notes = d.list_resource_notes(resource["id"])
+                sibling_text = ""
+                if sibling_notes:
+                    parts = []
+                    for sn in sibling_notes:
+                        who = sn.get("submitter_name") or "someone"
+                        origin = sn.get("source_server") or ""
+                        label = f"{who}" + (f" (via {origin})" if origin else "")
+                        parts.append(f"— {label}: {sn['note']}")
+                    sibling_text = "\n\n".join(parts)
+                content = "\n\n".join(p for p in [desc, note, sibling_text] if p)
+                summary_xml = _xml_escape(content)
+                content_xml = ""
+                link_href = _resolve_display_url(resource["url"], srv_url)
+                for t in tags:
+                    categories_xml += f'\n  <category term="{_xml_escape(t["label"])}"/>'
+            return f"""<entry>
+  <title>{_xml_escape(title)}</title>
+  <link href="{_xml_escape(link_href)}"/>
+  <id>{_xml_escape(resource['id'])}</id>
+  <updated>{resource['created_at']}</updated>{published_xml}{author_xml}{categories_xml}
+  <summary>{summary_xml}</summary>{content_xml}
+</entry>\n"""
+
         tombstones_xml = ""
         for coll_id in accessible:
             for tomb in d.list_recent_deletions(coll_id):
@@ -1032,41 +1092,14 @@ async function doSetup() {{
   <at:comment>Removed: {_xml_escape(tomb.get('title') or tomb['url'])}</at:comment>
   <link href="{_xml_escape(tomb['url'])}"/>
 </at:deleted-entry>\n"""
+                if (tomb.get("url") or "").startswith("skill://"):
+                    tombstones_xml += f"""<at:deleted-entry ref="{_xml_escape(tomb['resource_id'])}" when="{tomb['deleted_at']}">
+  <at:comment>Skill removed: {_xml_escape(tomb.get('title') or tomb['resource_id'])}</at:comment>
+  <link href="{_xml_escape(_skill_link(tomb['resource_id']))}"/>
+</at:deleted-entry>\n"""
         entries = ""
         for r in feed:
-            title = r.get("title") or r["url"]
-            desc = r.get("description", "")
-            note = r.get("note", "")
-            sibling_notes = d.list_resource_notes(r["id"])
-            sibling_text = ""
-            if sibling_notes:
-                parts = []
-                for sn in sibling_notes:
-                    who = sn.get("submitter_name") or "someone"
-                    origin = sn.get("source_server") or ""
-                    label = f"{who}" + (f" (via {origin})" if origin else "")
-                    parts.append(f"— {label}: {sn['note']}")
-                sibling_text = "\n\n".join(parts)
-            content = "\n\n".join(p for p in [desc, note, sibling_text] if p)
-            display_url = _resolve_display_url(r["url"], srv_url)
-            author_xml = ""
-            if r.get("author"):
-                author_xml = f"\n  <author><name>{_xml_escape(r['author'])}</name></author>"
-            pub_date = _resource_pub_date(r)
-            published_xml = ""
-            if pub_date:
-                published_xml = f"\n  <published>{pub_date}T00:00:00Z</published>"
-            tags = r.get("tags", [])
-            categories_xml = ""
-            for t in tags:
-                categories_xml += f'\n  <category term="{_xml_escape(t["label"])}"/>'
-            entries += f"""<entry>
-  <title>{_xml_escape(title)}</title>
-  <link href="{_xml_escape(display_url)}"/>
-  <id>{_xml_escape(r['id'])}</id>
-  <updated>{r['created_at']}</updated>{published_xml}{author_xml}{categories_xml}
-  <summary>{_xml_escape(content)}</summary>
-</entry>\n"""
+            entries += _render_atom_entry(r)
         feed_path = f"/feed/{api_key}"
         self_url = f"{srv_url.rstrip('/')}{feed_path}" if srv_url else feed_path
         atom = f"""<?xml version="1.0" encoding="utf-8"?>
