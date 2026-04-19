@@ -517,8 +517,10 @@ async function doSetup() {{
         except json.JSONDecodeError:
             return _problem_response(400, "Invalid JSON")
 
-        # Inject the API key so the tool handler resolves the same user
-        args["api_key"] = request.headers.get("x-dugg-key", "")
+        # Inject the API key so the tool handler resolves the same user.
+        # Use the already-resolved user's key so cookie-auth (/feed search JS)
+        # and header-auth both land on the same identity in the tool layer.
+        args["api_key"] = user["api_key"]
 
         from dugg.server import server as mcp_server
         # Call the tool handler directly
@@ -1243,7 +1245,7 @@ searchInput.addEventListener('input', function() {
       const data = await res.json();
       const text = typeof data === 'string' ? data : (data.text || data.result || JSON.stringify(data));
       const matchIds = new Set();
-      const idRegex = /(?:\[|id[=: ]+)([a-f0-9]{12})/gi;
+      const idRegex = /(?:\\[|id[=: ]+)([a-f0-9]{12})/gi;
       let m;
       while ((m = idRegex.exec(String(text))) !== null) matchIds.add(m[1]);
 
