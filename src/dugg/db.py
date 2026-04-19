@@ -369,6 +369,24 @@ class DuggDB:
                 UNIQUE(user_id, collection_id, feed_url)
             );
 
+            -- Skill extension table: 1:1 with a `resources` row whose
+            -- source_type='skill'. Body + frontmatter + versioning pointer
+            -- live here so reactions, publish_targets, edges all continue
+            -- to key on resource_id unchanged.
+            CREATE TABLE IF NOT EXISTS skills (
+                resource_id TEXT PRIMARY KEY REFERENCES resources(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                body TEXT NOT NULL,
+                frontmatter TEXT DEFAULT '{}',
+                supersedes_id TEXT REFERENCES resources(id) ON DELETE SET NULL,
+                is_exportable INTEGER DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_skills_supersedes ON skills(supersedes_id);
+            CREATE INDEX IF NOT EXISTS idx_skills_name ON skills(name);
+
             CREATE VIRTUAL TABLE IF NOT EXISTS resources_fts USING fts5(
                 title, description, author, transcript, note, summary,
                 content='resources',
@@ -946,6 +964,142 @@ class DuggDB:
         for r in rows:
             d = dict(r)
             d["tags"] = self._get_tags(d["id"])
+            results.append(d)
+        return results
+
+    # --- Skills (SKILL.md procedures, resource.source_type='skill') ---
+
+    def add_skill(
+        self,
+        name: str,
+        body: str,
+        frontmatter: dict,
+        title: str,
+        description: str,
+        author: str,
+        collection_id: str,
+        submitted_by: str,
+        supersedes_id: Optional[str] = None,
+        is_exportable: bool = True,
+    ) -> str:
+        """Insert a new skill. Returns the new resource_id.
+
+        Creates a row in ``resources`` with source_type='skill' and the
+        canonical skill URL, plus a matching row in the ``skills`` extension
+        table carrying the body/frontmatter/versioning fields. Reactions and
+        publish targets key on resource_id unchanged.
+        """
+        now = _now()
+        res_id = _uuid()
+        url = f"skill://{collection_id}/{name}"
+        frontmatter_json = json.dumps(frontmatter or {})
+        self.conn.execute(
+            """INSERT INTO resources
+               (id, url, title, description, source_type, author, raw_metadata,
+                submitted_by, collection_id, created_at, updated_at)
+               VALUES (?, ?, ?, ?, 'skill', ?, ?, ?, ?, ?, ?)""",
+            (res_id, url, title, description, author, frontmatter_json,
+             submitted_by, collection_id, now, now),
+        )
+        self.conn.execute(
+            """INSERT INTO skills
+               (resource_id, name, body, frontmatter, supersedes_id,
+                is_exportable, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (res_id, name, body, frontmatter_json, supersedes_id,
+             1 if is_exportable else 0, now, now),
+        )
+        self.conn.commit()
+        # Event emission (skill_added etc.) lands with Phase 3 federation,
+        # together with the event_type CHECK migration and webhook wiring.
+        return res_id
+
+    def get_skill(
+        self,
+        id_or_name: str,
+        collection_id: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Look up a skill by resource id or by skill name.
+
+        When ``id_or_name`` is a skill name, ``collection_id`` should be
+        provided to disambiguate (skill names are unique-per-collection by
+        convention, not by DB constraint). Returns a merged dict of
+        resource fields plus ``body``, ``frontmatter`` (parsed dict),
+        ``supersedes_id``, and ``is_exportable``, or ``None`` if not found.
+        """
+        row = self.conn.execute(
+            """SELECT r.*, s.name AS skill_name, s.body, s.frontmatter AS skill_frontmatter,
+                      s.supersedes_id, s.is_exportable,
+                      s.created_at AS skill_created_at, s.updated_at AS skill_updated_at
+               FROM resources r JOIN skills s ON s.resource_id = r.id
+               WHERE r.id = ? AND r.source_type = 'skill'""",
+            (id_or_name,),
+        ).fetchone()
+        if not row and collection_id:
+            row = self.conn.execute(
+                """SELECT r.*, s.name AS skill_name, s.body, s.frontmatter AS skill_frontmatter,
+                          s.supersedes_id, s.is_exportable,
+                          s.created_at AS skill_created_at, s.updated_at AS skill_updated_at
+                   FROM resources r JOIN skills s ON s.resource_id = r.id
+                   WHERE s.name = ? AND r.collection_id = ? AND r.source_type = 'skill'""",
+                (id_or_name, collection_id),
+            ).fetchone()
+        elif not row:
+            row = self.conn.execute(
+                """SELECT r.*, s.name AS skill_name, s.body, s.frontmatter AS skill_frontmatter,
+                          s.supersedes_id, s.is_exportable,
+                          s.created_at AS skill_created_at, s.updated_at AS skill_updated_at
+                   FROM resources r JOIN skills s ON s.resource_id = r.id
+                   WHERE s.name = ? AND r.source_type = 'skill'""",
+                (id_or_name,),
+            ).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        result["name"] = result.pop("skill_name")
+        try:
+            result["frontmatter"] = json.loads(result.pop("skill_frontmatter") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            result["frontmatter"] = {}
+        result["is_exportable"] = bool(result.get("is_exportable", 1))
+        return result
+
+    def list_skills(
+        self,
+        collection_id: Optional[str] = None,
+        author_user_id: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict]:
+        """List skill metadata ordered by most-recent first.
+
+        Skill bodies are NOT included in list results; use ``get_skill``
+        for the full body. Filters are additive when provided.
+        """
+        clauses = ["r.source_type = 'skill'"]
+        params: list = []
+        if collection_id:
+            clauses.append("r.collection_id = ?")
+            params.append(collection_id)
+        if author_user_id:
+            clauses.append("r.submitted_by = ?")
+            params.append(author_user_id)
+        where = " AND ".join(clauses)
+        params.extend([limit, offset])
+        rows = self.conn.execute(
+            f"""SELECT r.id, r.title, r.description, r.author, r.collection_id,
+                       r.submitted_by, r.created_at, r.updated_at,
+                       s.name, s.supersedes_id, s.is_exportable
+                FROM resources r JOIN skills s ON s.resource_id = r.id
+                WHERE {where}
+                ORDER BY r.created_at DESC
+                LIMIT ? OFFSET ?""",
+            params,
+        ).fetchall()
+        results = []
+        for r in rows:
+            d = dict(r)
+            d["is_exportable"] = bool(d.get("is_exportable", 1))
             results.append(d)
         return results
 

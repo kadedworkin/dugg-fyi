@@ -1873,6 +1873,25 @@ def main():
     p_import.add_argument("--dry-run", action="store_true", help="Show what would be imported without writing")
     p_import.add_argument("--key", default=None, help="Your API key")
 
+    p_skill = sub.add_parser("skill", help="Manage skills (SKILL.md procedures)")
+    skill_sub = p_skill.add_subparsers(dest="skill_action")
+
+    ps_add = skill_sub.add_parser("add", help="Add a SKILL.md file to a collection")
+    ps_add.add_argument("file", help="Path to a SKILL.md file with YAML frontmatter")
+    ps_add.add_argument("--collection", default=None, help="Collection name or id (defaults to Default)")
+    ps_add.add_argument("--key", default=None, help="Your API key (uses local user if omitted)")
+
+    ps_list = skill_sub.add_parser("list", help="List skills")
+    ps_list.add_argument("--collection", default=None, help="Filter by collection name or id")
+    ps_list.add_argument("--author", default=None, help="Filter by author user id (or 'me')")
+    ps_list.add_argument("--limit", type=int, default=50, help="Max results (default: 50)")
+    ps_list.add_argument("--key", default=None, help="Your API key")
+
+    ps_get = skill_sub.add_parser("get", help="Show a skill as a SKILL.md document")
+    ps_get.add_argument("id_or_name", help="Resource id or skill name")
+    ps_get.add_argument("--collection", default=None, help="Collection id (required when looking up by name across collections)")
+    ps_get.add_argument("--key", default=None, help="Your API key")
+
     # If the first arg looks like a URL, treat it as `dugg add <url> ...`
     if len(sys.argv) > 1 and sys.argv[1].startswith(("http://", "https://")):
         sys.argv.insert(1, "add")
@@ -1956,6 +1975,8 @@ def main():
         cmd_export(args)
     elif args.command == "import":
         cmd_import(args)
+    elif args.command == "skill":
+        cmd_skill(args)
 
 
 def _resolve_collection(db, user_id: str, name_or_id: str) -> Optional[str]:
@@ -2183,6 +2204,149 @@ def cmd_email(args):
     db.close()
     print()
     print("Forward emails to any of these addresses to add them as resources.")
+
+
+def cmd_skill(args):
+    """Dispatch for `dugg skill <action>`."""
+    action = getattr(args, "skill_action", None)
+    if action == "add":
+        cmd_skill_add(args)
+    elif action == "list":
+        cmd_skill_list(args)
+    elif action == "get":
+        cmd_skill_get(args)
+    else:
+        print("Usage: dugg skill {add|list|get} ...")
+        sys.exit(1)
+
+
+def cmd_skill_add(args):
+    """Add a SKILL.md file to a collection."""
+    from pathlib import Path
+    from dugg.skills import parse_skill_markdown, validate_skill_name
+
+    try:
+        text = Path(args.file).read_text()
+    except OSError as exc:
+        print(f"Could not read {args.file}: {exc}")
+        sys.exit(1)
+
+    try:
+        frontmatter, body = parse_skill_markdown(text)
+        name = frontmatter["name"].strip()
+        validate_skill_name(name)
+    except ValueError as exc:
+        print(f"Invalid SKILL.md: {exc}")
+        sys.exit(1)
+
+    description = frontmatter["description"].strip()
+    title = str(frontmatter.get("title") or name).strip()
+
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+    user = _resolve_user(db, args)
+
+    if args.collection:
+        collection_id = _resolve_collection(db, user["id"], args.collection)
+        if not collection_id:
+            print(f"Collection not found: {args.collection}")
+            db.close()
+            sys.exit(1)
+    else:
+        collection_id = _ensure_default_collection(db, user["id"])
+
+    author = str(frontmatter.get("author") or user.get("name") or "").strip()
+
+    try:
+        resource_id = db.add_skill(
+            name=name,
+            body=body,
+            frontmatter=frontmatter,
+            title=title,
+            description=description,
+            author=author,
+            collection_id=collection_id,
+            submitted_by=user["id"],
+        )
+    except sqlite3.IntegrityError as exc:
+        print(f"Could not add skill: {exc}")
+        db.close()
+        sys.exit(1)
+
+    print(f"Added skill {name} ({resource_id[:8]}) to collection {collection_id[:8]}")
+    db.close()
+
+
+def cmd_skill_list(args):
+    """List skills with optional filters."""
+    from pathlib import Path
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+    user = _resolve_user(db, args)
+    names = _user_name_cache(db)
+
+    collection_id = None
+    if args.collection:
+        collection_id = _resolve_collection(db, user["id"], args.collection)
+        if not collection_id:
+            print(f"Collection not found: {args.collection}")
+            db.close()
+            sys.exit(1)
+
+    author_user_id = None
+    if args.author:
+        if args.author == "me":
+            author_user_id = user["id"]
+        else:
+            author_user_id = args.author
+
+    skills = db.list_skills(
+        collection_id=collection_id,
+        author_user_id=author_user_id,
+        limit=args.limit,
+    )
+
+    if not skills:
+        print("No skills found.")
+        db.close()
+        return
+
+    print(f"{'ID':<10} {'NAME':<24} {'TITLE':<32} {'AUTHOR':<16} CREATED")
+    for s in skills:
+        short_id = s["id"][:8]
+        name = (s.get("name") or "")[:24]
+        title = (s.get("title") or "")[:32]
+        author = names.get(s.get("submitted_by", ""), s.get("author") or "")[:16]
+        created = (s.get("created_at") or "")[:19]
+        print(f"{short_id:<10} {name:<24} {title:<32} {author:<16} {created}")
+
+    db.close()
+
+
+def cmd_skill_get(args):
+    """Print a skill as a full SKILL.md document."""
+    from pathlib import Path
+    from dugg.skills import render_skill_markdown
+
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+    _resolve_user(db, args)
+
+    collection_id = None
+    if args.collection:
+        row = db.conn.execute(
+            "SELECT id FROM collections WHERE id = ?", (args.collection,)
+        ).fetchone()
+        collection_id = row["id"] if row else args.collection
+
+    skill = db.get_skill(args.id_or_name, collection_id=collection_id)
+    if not skill:
+        print(f"Skill not found: {args.id_or_name}")
+        db.close()
+        sys.exit(1)
+
+    print(render_skill_markdown(skill["frontmatter"], skill["body"] or ""))
+    db.close()
 
 
 def cmd_export(args):
