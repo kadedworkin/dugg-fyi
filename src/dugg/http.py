@@ -34,7 +34,7 @@ from mcp.server.sse import SseServerTransport
 from dugg.db import DuggDB
 from dugg.sync import start_sync_daemon
 from dugg.rss import start_rss_daemon
-from dugg.skills import render_skill_markdown
+from dugg.skills import parse_skill_markdown, render_skill_markdown, validate_skill_name
 
 logger = logging.getLogger("dugg.http")
 
@@ -1939,6 +1939,171 @@ async function syncNow(e) {
 
     # --- Slack slash command ---
 
+    def _slack_resolve_user(slack_user: str) -> Optional[dict]:
+        rows = get_db().conn.execute("SELECT id, name, api_key FROM users").fetchall()
+        user = None
+        for row in rows:
+            if row["name"].lower() == slack_user.lower():
+                user = dict(row)
+                break
+        if not user and rows:
+            user = dict(rows[0])
+        return user
+
+    def _slack_skill_help() -> str:
+        return (
+            "Usage:\n"
+            "`/dugg skill` or `/dugg skill list [--limit N] [--collection NAME]`\n"
+            "`/dugg skill get <id_or_name> [--collection NAME]`\n"
+            "`/dugg skill search <query> [--collection NAME]`\n"
+            "`/dugg skill add <FULL SKILL.md>`"
+        )
+
+    def _slack_skill_usage_response() -> JSONResponse:
+        return JSONResponse({"response_type": "ephemeral", "text": _slack_skill_help()})
+
+    def _slack_skill_markdown(skill: dict) -> str:
+        return render_skill_markdown(skill.get("frontmatter") or {}, skill.get("body") or "")
+
+    def _slack_skill_codeblock(skill: dict, max_chars: Optional[int] = None) -> str:
+        markdown = _slack_skill_markdown(skill)
+        footer = ""
+        if max_chars and len(markdown) > max_chars:
+            markdown = markdown[: max_chars - 1].rstrip() + "…"
+            footer = f"\n…truncated, run `dugg skill get {skill['id']}` for full text"
+        return f"```markdown\n{markdown}\n```{footer}"
+
+    def _slack_skill_summary_lines(skill: dict) -> list[str]:
+        title = skill.get("title") or skill.get("name") or skill.get("id", "")
+        lines = [f"*{_xml_escape(title)}*"]
+        if skill.get("name"):
+            lines.append(f"`{_xml_escape(skill['name'])}`")
+        if skill.get("description"):
+            lines.append(_xml_escape(skill["description"]))
+        if skill.get("author"):
+            lines.append(f"by {_xml_escape(skill['author'])}")
+        return lines
+
+    def _slack_skill_actions(skill_id: str) -> dict:
+        return {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": ":open_book: View", "emoji": True},
+                    "action_id": "dugg_skill_view",
+                    "value": skill_id,
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": ":inbox_tray: Install", "emoji": True},
+                    "action_id": "dugg_skill_install",
+                    "value": skill_id,
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": ":fork_and_knife: Fork", "emoji": True},
+                    "action_id": "dugg_skill_fork",
+                    "value": skill_id,
+                },
+            ],
+        }
+
+    def _slack_skill_blocks(skills: list[dict], heading: str) -> tuple[list[dict], str]:
+        blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": heading}}]
+        text_lines = [heading, ""]
+        for skill in skills:
+            summary_lines = _slack_skill_summary_lines(skill)
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(summary_lines)}})
+            blocks.append(_slack_skill_actions(skill["id"]))
+            blocks.append({"type": "divider"})
+            text_lines.extend(summary_lines + [""])
+        return blocks, "\n".join(text_lines).strip()
+
+    def _slack_skill_limit_and_collection(rest: str, *, default_limit: int = 5) -> tuple[int, str]:
+        import re
+
+        limit = default_limit
+        collection_name = ""
+        if not rest:
+            return limit, collection_name
+        limit_match = re.search(r"--limit\s+(\d+)", rest)
+        if limit_match:
+            limit = min(int(limit_match.group(1)), 20)
+        collection_match = re.search(r"--collection\s+(.+?)(?=\s+--\w+|$)", rest)
+        if collection_match:
+            collection_name = collection_match.group(1).strip().strip("\"'")
+        return limit, collection_name
+
+    def _slack_skill_find(d: DuggDB, user_id: str, id_or_name: str, collection_name: str = "") -> tuple[Optional[dict], Optional[str]]:
+        from dugg.server import _find_skill
+
+        return _find_skill(d, user_id, id_or_name, collection_name)
+
+    def _slack_skill_list_rows(d: DuggDB, user_id: str, limit: int, collection_name: str = "") -> tuple[list[dict], Optional[str]]:
+        from dugg.server import _resolve_collection_for_user
+
+        accessible = d._accessible_collection_ids(user_id)
+        if not accessible:
+            return [], None
+        if collection_name:
+            coll_id = _resolve_collection_for_user(d, user_id, collection_name)
+            if not coll_id:
+                return [], f"Collection not found or not accessible: {collection_name}"
+            accessible = [coll_id]
+        placeholders = ",".join("?" for _ in accessible)
+        rows = d.conn.execute(
+            f"""SELECT r.id, r.title, r.description, r.author, r.collection_id, r.submitted_by,
+                       r.created_at, s.name, s.supersedes_id, s.is_exportable
+                FROM resources r
+                JOIN skills s ON s.resource_id = r.id
+                WHERE r.source_type = 'skill'
+                  AND r.collection_id IN ({placeholders})
+                ORDER BY r.created_at DESC
+                LIMIT ?""",
+            accessible + [limit],
+        ).fetchall()
+        return [dict(row) for row in rows], None
+
+    def _slack_skill_search_rows(d: DuggDB, user_id: str, query: str, limit: int, collection_name: str = "") -> tuple[list[dict], Optional[str]]:
+        from dugg.server import _resolve_collection_for_user
+
+        coll_id = None
+        if collection_name:
+            coll_id = _resolve_collection_for_user(d, user_id, collection_name)
+            if not coll_id:
+                return [], f"Collection not found or not accessible: {collection_name}"
+
+        combined: dict[str, dict] = {}
+        for result in d.search(query, user_id, collection_id=coll_id, limit=max(limit * 5, 50)):
+            if result.get("source_type") != "skill":
+                continue
+            skill = d.get_skill(result["id"])
+            if skill:
+                combined[skill["id"]] = skill
+
+        accessible = [coll_id] if coll_id else d._accessible_collection_ids(user_id)
+        if accessible:
+            placeholders = ",".join("?" for _ in accessible)
+            rows = d.conn.execute(
+                f"""SELECT r.id
+                    FROM resources r
+                    JOIN skills s ON s.resource_id = r.id
+                    WHERE r.source_type = 'skill'
+                      AND r.collection_id IN ({placeholders})
+                      AND LOWER(s.body) LIKE LOWER(?)
+                    ORDER BY r.created_at DESC
+                    LIMIT ?""",
+                accessible + [f"%{query}%", max(limit * 5, 50)],
+            ).fetchall()
+            for row in rows:
+                skill = d.get_skill(row["id"])
+                if skill:
+                    combined[skill["id"]] = skill
+
+        skills = sorted(combined.values(), key=lambda skill: skill.get("created_at") or "", reverse=True)[:limit]
+        return skills, None
+
     async def handle_slack_command(request: Request):
         """Handle Slack slash command: /dugg or /dugg <url> [note]"""
         d = get_db()
@@ -1961,17 +2126,91 @@ async function syncNow(e) {
 
         # Find or create a user for this Slack user
         # Look up by name match first; if not found, use the first admin user
-        rows = d.conn.execute("SELECT id, name, api_key FROM users").fetchall()
-        user = None
-        for r in rows:
-            if r["name"].lower() == slack_user.lower():
-                user = dict(r)
-                break
-        if not user and rows:
-            user = dict(rows[0])
+        user = _slack_resolve_user(slack_user)
 
         if not user:
             return JSONResponse({"response_type": "ephemeral", "text": "No users on this Dugg server yet."})
+
+        if text == "skill" or text.startswith("skill "):
+            rest = text[5:].strip() if text.startswith("skill ") else ""
+            if not rest or rest == "list" or rest.startswith("list "):
+                limit, collection_name = _slack_skill_limit_and_collection(rest[4:].strip() if rest.startswith("list ") else rest)
+                skills, error = _slack_skill_list_rows(d, user["id"], limit, collection_name)
+                if error:
+                    return JSONResponse({"response_type": "ephemeral", "text": error})
+                if not skills:
+                    return JSONResponse({"response_type": "ephemeral", "text": "No skills found. Add one with `/dugg skill add`."})
+                blocks, fallback = _slack_skill_blocks(skills, f"*Recent skills ({len(skills)}):*")
+                return JSONResponse({"response_type": "in_channel", "text": fallback, "blocks": blocks})
+
+            if rest.startswith("get "):
+                target = rest[4:].strip()
+                collection_name = ""
+                import re
+                collection_match = re.search(r"\s+--collection\s+(.+)$", target)
+                if collection_match:
+                    collection_name = collection_match.group(1).strip().strip("\"'")
+                    target = target[: collection_match.start()].strip()
+                if not target:
+                    return _slack_skill_usage_response()
+                skill, error = _slack_skill_find(d, user["id"], target, collection_name)
+                if error:
+                    return JSONResponse({"response_type": "ephemeral", "text": error})
+                return JSONResponse({"response_type": "ephemeral", "text": _slack_skill_codeblock(skill, max_chars=2800)})
+
+            if rest.startswith("search "):
+                query = rest[7:].strip()
+                collection_name = ""
+                import re
+                collection_match = re.search(r"\s+--collection\s+(.+)$", query)
+                if collection_match:
+                    collection_name = collection_match.group(1).strip().strip("\"'")
+                    query = query[: collection_match.start()].strip()
+                if not query:
+                    return _slack_skill_usage_response()
+                skills, error = _slack_skill_search_rows(d, user["id"], query, 5, collection_name)
+                if error:
+                    return JSONResponse({"response_type": "ephemeral", "text": error})
+                if not skills:
+                    return JSONResponse({"response_type": "ephemeral", "text": f'No skills found for "{_xml_escape(query)}".'})
+                blocks, fallback = _slack_skill_blocks(skills, f'*Skill results for "{_xml_escape(query)}":*')
+                return JSONResponse({"response_type": "in_channel", "text": fallback, "blocks": blocks})
+
+            if rest.startswith("add"):
+                markdown = rest[3:].lstrip()
+                if not markdown or not markdown.startswith("---\n"):
+                    return JSONResponse({
+                        "response_type": "ephemeral",
+                        "text": "Paste a full SKILL.md with frontmatter. For longer skills, use the CLI: `dugg skill add path/to/SKILL.md`.",
+                    })
+                try:
+                    frontmatter, body = parse_skill_markdown(markdown)
+                    name = frontmatter["name"].strip()
+                    validate_skill_name(name)
+                except ValueError as exc:
+                    return JSONResponse({
+                        "response_type": "ephemeral",
+                        "text": f"{exc}\n\nPaste a full SKILL.md with frontmatter. For longer skills, use the CLI: `dugg skill add path/to/SKILL.md`.",
+                    })
+                skill_id = d.add_skill(
+                    name=name,
+                    body=body,
+                    frontmatter=frontmatter,
+                    title=frontmatter.get("title") or name,
+                    description=frontmatter.get("description") or "",
+                    author=frontmatter.get("author") or user["name"],
+                    collection_id=_ensure_default_collection(d, user["id"]),
+                    submitted_by=user["id"],
+                )
+                d.wait_for_webhooks()
+                skill = d.get_skill(skill_id)
+                blocks, fallback = _slack_skill_blocks([skill], "*Added skill:*")
+                return JSONResponse({"response_type": "in_channel", "text": fallback, "blocks": blocks})
+
+            if rest == "help":
+                return _slack_skill_usage_response()
+
+            return _slack_skill_usage_response()
 
         # /dugg with no args or /dugg feed [--limit N] → show feed
         feed_limit = 5
@@ -2198,6 +2437,35 @@ async function syncNow(e) {
         action_id = action.get("action_id", "")
         resource_id = action.get("value", "")
 
+        skill_action_ids = {"dugg_skill_view", "dugg_skill_install", "dugg_skill_fork"}
+        if action_id in skill_action_ids:
+            slack_user = data.get("user", {}).get("username", "")
+            user = _slack_resolve_user(slack_user)
+            if not user:
+                return JSONResponse({"response_type": "ephemeral", "text": "No Dugg user found."})
+            skill, error = _slack_skill_find(d, user["id"], resource_id)
+            if error:
+                return JSONResponse({"response_type": "ephemeral", "text": error})
+            if action_id == "dugg_skill_view":
+                return JSONResponse({"response_type": "ephemeral", "replace_original": False, "text": _slack_skill_codeblock(skill)})
+            if action_id == "dugg_skill_install":
+                return JSONResponse({
+                    "response_type": "ephemeral",
+                    "replace_original": False,
+                    "text": (
+                        f"{_slack_skill_codeblock(skill)}\n"
+                        f"Use `dugg skill get {skill['id']} > skill.md` or the `dugg_skill_install` MCP tool to install it locally."
+                    ),
+                })
+            return JSONResponse({
+                "response_type": "ephemeral",
+                "replace_original": False,
+                "text": (
+                    f"Fork this skill with `dugg skill fork --source {skill['id']}` "
+                    f"or the `dugg_skill_fork` MCP tool."
+                ),
+            })
+
         # Map action_id to reaction type
         reaction_map = {
             "dugg_react_tap": "tap",
@@ -2210,14 +2478,7 @@ async function syncNow(e) {
 
         # Resolve Slack user to Dugg user
         slack_user = data.get("user", {}).get("username", "")
-        rows = d.conn.execute("SELECT id, name FROM users").fetchall()
-        user = None
-        for r in rows:
-            if r["name"].lower() == slack_user.lower():
-                user = dict(r)
-                break
-        if not user and rows:
-            user = dict(rows[0])
+        user = _slack_resolve_user(slack_user)
         if not user:
             return JSONResponse({"text": "No Dugg user found."})
 
