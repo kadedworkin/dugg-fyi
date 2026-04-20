@@ -559,6 +559,7 @@ class DuggDB:
             # correct behavior.
             self.conn.executescript("""
                 PRAGMA foreign_keys=OFF;
+                DROP TABLE IF EXISTS event_log_new;
                 CREATE TABLE event_log_new (
                     id TEXT PRIMARY KEY,
                     event_type TEXT NOT NULL CHECK(event_type IN ('resource_added', 'resource_published', 'resource_deleted', 'member_joined', 'member_banned', 'publish_delivered', 'invite_created', 'invite_redeemed', 'reaction_added', 'skill_added', 'skill_forked', 'skill_superseded', 'skill_deleted')),
