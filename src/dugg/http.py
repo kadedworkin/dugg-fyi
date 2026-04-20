@@ -26,7 +26,7 @@ from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.routing import Route
 
 from mcp.server.sse import SseServerTransport
@@ -1446,6 +1446,88 @@ async function syncNow(e) {
 {feed_js}"""
         return HTMLResponse(_html_page(page_title, body, wide=True))
 
+    def _skill_view_path(skill_id: str, server_url: str = "") -> str:
+        if server_url:
+            return f"{server_url.rstrip('/')}/s/{skill_id}"
+        return f"/s/{skill_id}"
+
+    def _skill_download_path(skill_id: str, server_url: str = "") -> str:
+        if server_url:
+            return f"{server_url.rstrip('/')}/s/{skill_id}.md"
+        return f"/s/{skill_id}.md"
+
+    def _accessible_skill_collections(d: DuggDB, user_id: str) -> dict[str, dict]:
+        return {c["id"]: c for c in d.list_collections(user_id)}
+
+    def _list_accessible_skills(d: DuggDB, user_id: str, limit: int = 50) -> list[dict]:
+        accessible = d._accessible_collection_ids(user_id)
+        if not accessible:
+            return []
+        placeholders = ",".join("?" for _ in accessible)
+        rows = d.conn.execute(
+            f"""SELECT r.id, r.title, r.description, r.author, r.collection_id,
+                       r.submitted_by, r.created_at, r.updated_at,
+                       s.name, s.supersedes_id, s.is_exportable
+                FROM resources r
+                JOIN skills s ON s.resource_id = r.id
+                WHERE r.source_type = 'skill'
+                  AND r.collection_id IN ({placeholders})
+                ORDER BY r.created_at DESC
+                LIMIT ?""",
+            [*accessible, limit],
+        ).fetchall()
+        skills = []
+        for row in rows:
+            skill = dict(row)
+            skill["is_exportable"] = bool(skill.get("is_exportable", 1))
+            skills.append(skill)
+        return skills
+
+    def _get_accessible_skill(d: DuggDB, user_id: str, skill_id: str) -> Optional[dict]:
+        skill = d.get_skill(skill_id)
+        if not skill:
+            return None
+        accessible = set(d._accessible_collection_ids(user_id))
+        if skill.get("collection_id") not in accessible:
+            return None
+        return skill
+
+    def _render_skills_feed_html(skills: list[dict], server_url: str, collection_names: dict[str, str]) -> str:
+        if not skills:
+            items_html = """<div class="card">
+  <div class="card-body">
+    <h3>No skills yet</h3>
+    <p class="card-desc" style="display:block;-webkit-line-clamp:unset;">Add one from MCP with <code>dugg_skill_add</code> or from the CLI with <code>dugg skill add path/to/SKILL.md</code>.</p>
+  </div>
+</div>"""
+        else:
+            items_html = ""
+            for skill in skills:
+                view_href = _skill_view_path(skill["id"], server_url)
+                download_html = (
+                    f'<a class="action-btn" href="{_xml_escape(_skill_download_path(skill["id"], server_url))}">Install</a>'
+                    if skill.get("is_exportable", True)
+                    else '<span class="action-btn" style="cursor:default;color:#888;">Server-only</span>'
+                )
+                items_html += f"""<div class="card" id="skill-{skill["id"]}">
+  <div class="card-body">
+    <p class="meta"><code>{_xml_escape(skill.get("name") or "")}</code></p>
+    <h3><a href="{_xml_escape(view_href)}">{_xml_escape(skill.get("title") or skill.get("name") or skill["id"])}</a></h3>
+    <p class="meta">{_xml_escape(skill.get("author") or "Unknown")} · {_xml_escape(collection_names.get(skill.get("collection_id", ""), skill.get("collection_id", "")))} · {_short_date(skill.get("created_at"))}</p>
+    <p class="card-desc" style="display:block;-webkit-line-clamp:2;">{_xml_escape((skill.get("description") or "").strip())}</p>
+    <div class="item-actions">
+      <a class="action-btn" href="{_xml_escape(view_href)}">View</a>
+      {download_html}
+    </div>
+    <p class="meta" style="margin-top:0.65rem;">Fork via CLI: <code>dugg skill fork {_xml_escape(skill["id"])}</code></p>
+  </div>
+</div>
+"""
+        body = f"""<h1>Skills</h1>
+<p class="topic">Every skill in your accessible collections, newest first.</p>
+{items_html}"""
+        return _html_page("Skills", body, wide=True)
+
     async def handle_feed(request: Request):
         """GET /feed/{key} — content-negotiated.
 
@@ -1702,6 +1784,43 @@ async function syncNow(e) {
 <div style="margin-top:1.5rem;line-height:1.6;font-size:0.9rem;color:#ccc;white-space:pre-wrap;word-break:break-word;">{content_html}</div>"""
         return _html_page(_xml_escape(title), body)
 
+    def _render_skill_page(
+        skill: dict,
+        server_url: str,
+        collection_names: dict[str, str],
+        supersedes_url: str = "",
+    ) -> str:
+        title = skill.get("title") or skill.get("name") or skill["id"]
+        supersedes_id = skill.get("supersedes_id") or ""
+        if supersedes_id and supersedes_url:
+            supersedes_html = f' · supersedes <a href="{_xml_escape(supersedes_url)}"><code>{_xml_escape(supersedes_id)}</code></a>'
+        elif supersedes_id:
+            supersedes_html = f" · supersedes <code>{_xml_escape(supersedes_id)}</code>"
+        else:
+            supersedes_html = ""
+        exportable_badge = (
+            '<span class="tag" style="margin-left:0.5rem;color:#4ade80;border-color:#166534;background:#052e16;">Exportable</span>'
+            if skill.get("is_exportable", True)
+            else '<span class="tag" style="margin-left:0.5rem;color:#fbbf24;border-color:#854d0e;background:#1c1917;">Server-only</span>'
+        )
+        download_html = (
+            f'<a class="action-btn" href="{_xml_escape(_skill_download_path(skill["id"], server_url))}">Download SKILL.md</a>'
+            if skill.get("is_exportable", True)
+            else '<p class="meta" style="margin-top:0.75rem;">This skill is not shareable — viewable on this server only.</p>'
+        )
+        body = f"""<div class="card" style="max-width:none;">
+  <div class="card-body">
+    <h1>{_xml_escape(title)}</h1>
+    <p class="meta">{_xml_escape(skill.get("author") or "Unknown")} · {_xml_escape(collection_names.get(skill.get("collection_id", ""), skill.get("collection_id", "")))} · {_short_date(skill.get("created_at"))}{supersedes_html} {exportable_badge}</p>
+    <div class="item-actions" style="margin-bottom:0.75rem;">
+      {download_html}
+    </div>
+    <p class="meta" style="margin-bottom:1rem;">Fork via CLI: <code>dugg skill fork {_xml_escape(skill["id"])}</code></p>
+    <pre class="skill-body" style="margin-top:1rem;padding:1rem;background:#111;border:1px solid #333;border-radius:8px;color:#ddd;white-space:pre-wrap;word-break:break-word;overflow:auto;font-size:0.85rem;line-height:1.6;">{_xml_escape(skill.get("body") or "")}</pre>
+  </div>
+</div>"""
+        return _html_page(_xml_escape(title), body, wide=True)
+
     async def handle_resource_page(request: Request):
         """GET /r/{resource_id} — render a resource if viewer has access.
 
@@ -1748,6 +1867,87 @@ async function syncNow(e) {
         resp = RedirectResponse(url=return_to, status_code=303)
         _set_session_cookie(resp, key, request)
         return resp
+
+    async def handle_skills_page(request: Request):
+        """GET /skills — cookie/header authed skill feed across accessible collections."""
+        d = get_db()
+        user = _resolve_user_from_cookie_or_header(request)
+        if not user:
+            return HTMLResponse(_unlock_form_html(return_to="/skills"), status_code=401)
+
+        d.touch_user(user["id"])
+        collections = _accessible_skill_collections(d, user["id"])
+        html = _render_skills_feed_html(
+            _list_accessible_skills(d, user["id"], limit=50),
+            d.get_config("server_url", ""),
+            {coll_id: coll.get("name", coll_id) for coll_id, coll in collections.items()},
+        )
+        return HTMLResponse(html)
+
+    async def handle_skill_page(request: Request):
+        """GET /s/{skill_id} — render a raw SKILL.md body viewer for an accessible skill."""
+        skill_id = request.path_params["skill_id"]
+        d = get_db()
+        user = _resolve_user_from_cookie_or_header(request)
+        if not user:
+            return HTMLResponse(_unlock_form_html(return_to=f"/s/{skill_id}"), status_code=401)
+
+        d.touch_user(user["id"])
+        skill = _get_accessible_skill(d, user["id"], skill_id)
+        if not skill:
+            return HTMLResponse(_html_page("Not Found", "<h1>Not found</h1>"), status_code=404)
+
+        server_url = d.get_config("server_url", "")
+        collections = _accessible_skill_collections(d, user["id"])
+        supersedes_url = ""
+        if skill.get("supersedes_id"):
+            if _get_accessible_skill(d, user["id"], skill["supersedes_id"]):
+                supersedes_url = _skill_view_path(skill["supersedes_id"], server_url)
+        html = _render_skill_page(
+            skill,
+            server_url,
+            {coll_id: coll.get("name", coll_id) for coll_id, coll in collections.items()},
+            supersedes_url=supersedes_url,
+        )
+        return HTMLResponse(html)
+
+    async def handle_skill_unlock(request: Request):
+        """POST /s/{skill_id}/unlock — legacy alias for /session/unlock with skill return_to."""
+        skill_id = request.path_params["skill_id"]
+        form = await request.form()
+        key = (form.get("key") or "").strip()
+        return_to = f"/s/{skill_id}"
+        d = get_db()
+        user = d.get_user_by_api_key(key) if key else None
+        if not user:
+            return HTMLResponse(_unlock_form_html(return_to, error="Invalid key."), status_code=401)
+        from starlette.responses import RedirectResponse
+        resp = RedirectResponse(url=return_to, status_code=303)
+        _set_session_cookie(resp, key, request)
+        return resp
+
+    async def handle_skill_download(request: Request):
+        """GET /s/{skill_id}.md — download rendered SKILL.md for accessible exportable skills."""
+        skill_id = request.path_params["skill_id"]
+        d = get_db()
+        user = _resolve_user_from_cookie_or_header(request)
+        if not user:
+            return HTMLResponse(_unlock_form_html(return_to=f"/s/{skill_id}.md"), status_code=401)
+
+        d.touch_user(user["id"])
+        skill = _get_accessible_skill(d, user["id"], skill_id)
+        if not skill:
+            return JSONResponse({"error": "Skill not found."}, status_code=404)
+        if not skill.get("is_exportable", True):
+            return JSONResponse({"error": "Skill is not exportable."}, status_code=403)
+
+        markdown = render_skill_markdown(skill.get("frontmatter") or {}, skill.get("body") or "")
+        filename = f'{skill.get("name") or skill["id"]}.md'
+        return Response(
+            markdown,
+            media_type="text/markdown; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
 
     # --- Ban Appeal Pages ---
 
@@ -2862,8 +3062,12 @@ async function syncNow(e) {
         Route("/appeal/{key}", endpoint=handle_appeal_page),
         Route("/appeal/{key}/submit", endpoint=handle_appeal_submit, methods=["POST"]),
         Route("/appeal/{key}/status", endpoint=handle_appeal_status),
+        Route("/skills", endpoint=handle_skills_page),
         Route("/r/{resource_id}", endpoint=handle_resource_page),
         Route("/r/{resource_id}/unlock", endpoint=handle_resource_unlock, methods=["POST"]),
+        Route("/s/{skill_id}.md", endpoint=handle_skill_download),
+        Route("/s/{skill_id}", endpoint=handle_skill_page),
+        Route("/s/{skill_id}/unlock", endpoint=handle_skill_unlock, methods=["POST"]),
         Route("/publish-note", endpoint=handle_publish_note, methods=["POST"]),
         Route("/publish-note/{key}", endpoint=handle_publish_note, methods=["POST"]),
         Route("/rotate-key", endpoint=handle_rotate_key, methods=["POST"]),
