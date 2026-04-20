@@ -299,7 +299,7 @@ class DuggDB:
 
             CREATE TABLE IF NOT EXISTS event_log (
                 id TEXT PRIMARY KEY,
-                event_type TEXT NOT NULL CHECK(event_type IN ('resource_added', 'resource_published', 'resource_deleted', 'member_joined', 'member_banned', 'publish_delivered', 'invite_created', 'invite_redeemed', 'reaction_added')),
+                event_type TEXT NOT NULL CHECK(event_type IN ('resource_added', 'resource_published', 'resource_deleted', 'member_joined', 'member_banned', 'publish_delivered', 'invite_created', 'invite_redeemed', 'reaction_added', 'skill_added', 'skill_forked', 'skill_superseded', 'skill_deleted')),
                 instance_id TEXT REFERENCES dugg_instances(id),
                 collection_id TEXT REFERENCES collections(id),
                 actor_id TEXT REFERENCES users(id),
@@ -368,6 +368,24 @@ class DuggDB:
                 created_at TEXT NOT NULL,
                 UNIQUE(user_id, collection_id, feed_url)
             );
+
+            -- Skill extension table: 1:1 with a `resources` row whose
+            -- source_type='skill'. Body + frontmatter + versioning pointer
+            -- live here so reactions, publish_targets, edges all continue
+            -- to key on resource_id unchanged.
+            CREATE TABLE IF NOT EXISTS skills (
+                resource_id TEXT PRIMARY KEY REFERENCES resources(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                body TEXT NOT NULL,
+                frontmatter TEXT DEFAULT '{}',
+                supersedes_id TEXT REFERENCES resources(id) ON DELETE SET NULL,
+                is_exportable INTEGER DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_skills_supersedes ON skills(supersedes_id);
+            CREATE INDEX IF NOT EXISTS idx_skills_name ON skills(name);
 
             CREATE VIRTUAL TABLE IF NOT EXISTS resources_fts USING fts5(
                 title, description, author, transcript, note, summary,
@@ -526,9 +544,33 @@ class DuggDB:
                     );
                 """)
 
+        # Migrate event_log CHECK constraint to include skill_* event types.
+        # SQLite can't ALTER a CHECK, so rebuild the table when the stored DDL
+        # lacks 'skill_added'. Preserves all existing rows.
+        ev_row = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='event_log'"
+        ).fetchone()
+        if ev_row and "skill_added" not in (ev_row[0] or ""):
+            self.conn.executescript("""
+                CREATE TABLE event_log_new (
+                    id TEXT PRIMARY KEY,
+                    event_type TEXT NOT NULL CHECK(event_type IN ('resource_added', 'resource_published', 'resource_deleted', 'member_joined', 'member_banned', 'publish_delivered', 'invite_created', 'invite_redeemed', 'reaction_added', 'skill_added', 'skill_forked', 'skill_superseded', 'skill_deleted')),
+                    instance_id TEXT REFERENCES dugg_instances(id),
+                    collection_id TEXT REFERENCES collections(id),
+                    actor_id TEXT REFERENCES users(id),
+                    payload TEXT DEFAULT '{}',
+                    created_at TEXT NOT NULL
+                );
+                INSERT INTO event_log_new (id, event_type, instance_id, collection_id, actor_id, payload, created_at)
+                    SELECT id, event_type, instance_id, collection_id, actor_id, payload, created_at FROM event_log;
+                DROP TABLE event_log;
+                ALTER TABLE event_log_new RENAME TO event_log;
+            """)
+
         self.conn.commit()
 
     def close(self):
+        self.wait_for_webhooks(timeout=5.0)
         self.conn.close()
 
     # --- Server Config ---
@@ -946,6 +988,194 @@ class DuggDB:
         for r in rows:
             d = dict(r)
             d["tags"] = self._get_tags(d["id"])
+            results.append(d)
+        return results
+
+    # --- Skills (SKILL.md procedures, resource.source_type='skill') ---
+
+    def add_skill(
+        self,
+        name: str,
+        body: str,
+        frontmatter: dict,
+        title: str,
+        description: str,
+        author: str,
+        collection_id: str,
+        submitted_by: str,
+        supersedes_id: Optional[str] = None,
+        is_exportable: bool = True,
+    ) -> str:
+        """Insert a new skill. Returns the new resource_id.
+
+        Creates a row in ``resources`` with source_type='skill' and the
+        canonical skill URL, plus a matching row in the ``skills`` extension
+        table carrying the body/frontmatter/versioning fields. Reactions and
+        publish targets key on resource_id unchanged.
+        """
+        now = _now()
+        res_id = _uuid()
+        url = f"skill://{collection_id}/{name}"
+        frontmatter_json = json.dumps(frontmatter or {})
+        self.conn.execute(
+            """INSERT INTO resources
+               (id, url, title, description, source_type, author, raw_metadata,
+                submitted_by, collection_id, created_at, updated_at)
+               VALUES (?, ?, ?, ?, 'skill', ?, ?, ?, ?, ?, ?)""",
+            (res_id, url, title, description, author, frontmatter_json,
+             submitted_by, collection_id, now, now),
+        )
+        self.conn.execute(
+            """INSERT INTO skills
+               (resource_id, name, body, frontmatter, supersedes_id,
+                is_exportable, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (res_id, name, body, frontmatter_json, supersedes_id,
+             1 if is_exportable else 0, now, now),
+        )
+        self.conn.commit()
+        event_type = "skill_forked" if supersedes_id else "skill_added"
+        self.emit_event(
+            event_type,
+            actor_id=submitted_by,
+            collection_id=collection_id,
+            payload={
+                "resource_id": res_id,
+                "name": name,
+                "title": title,
+                "author": author,
+                "supersedes_id": supersedes_id,
+                "is_exportable": bool(is_exportable),
+            },
+        )
+        return res_id
+
+    def get_skill(
+        self,
+        id_or_name: str,
+        collection_id: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Look up a skill by resource id or by skill name.
+
+        When ``id_or_name`` is a skill name, ``collection_id`` should be
+        provided to disambiguate (skill names are unique-per-collection by
+        convention, not by DB constraint). Returns a merged dict of
+        resource fields plus ``body``, ``frontmatter`` (parsed dict),
+        ``supersedes_id``, and ``is_exportable``, or ``None`` if not found.
+        """
+        row = self.conn.execute(
+            """SELECT r.*, s.name AS skill_name, s.body, s.frontmatter AS skill_frontmatter,
+                      s.supersedes_id, s.is_exportable,
+                      s.created_at AS skill_created_at, s.updated_at AS skill_updated_at
+               FROM resources r JOIN skills s ON s.resource_id = r.id
+               WHERE r.id = ? AND r.source_type = 'skill'""",
+            (id_or_name,),
+        ).fetchone()
+        if not row and collection_id:
+            row = self.conn.execute(
+                """SELECT r.*, s.name AS skill_name, s.body, s.frontmatter AS skill_frontmatter,
+                          s.supersedes_id, s.is_exportable,
+                          s.created_at AS skill_created_at, s.updated_at AS skill_updated_at
+                   FROM resources r JOIN skills s ON s.resource_id = r.id
+                   WHERE s.name = ? AND r.collection_id = ? AND r.source_type = 'skill'""",
+                (id_or_name, collection_id),
+            ).fetchone()
+        elif not row:
+            row = self.conn.execute(
+                """SELECT r.*, s.name AS skill_name, s.body, s.frontmatter AS skill_frontmatter,
+                          s.supersedes_id, s.is_exportable,
+                          s.created_at AS skill_created_at, s.updated_at AS skill_updated_at
+                   FROM resources r JOIN skills s ON s.resource_id = r.id
+                   WHERE s.name = ? AND r.source_type = 'skill'""",
+                (id_or_name,),
+            ).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        result["name"] = result.pop("skill_name")
+        try:
+            result["frontmatter"] = json.loads(result.pop("skill_frontmatter") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            result["frontmatter"] = {}
+        result["is_exportable"] = bool(result.get("is_exportable", 1))
+        return result
+
+    def get_skill_history(self, skill_id: str) -> list[dict]:
+        """Return a linear current->original supersedes chain for a skill id."""
+        history: list[dict] = []
+        seen: set[str] = set()
+        current_id = skill_id
+        while current_id and current_id not in seen:
+            seen.add(current_id)
+            skill = self.get_skill(current_id)
+            if not skill:
+                break
+            history.append(skill)
+            current_id = skill.get("supersedes_id") or ""
+        return history
+
+    def find_skill_version(
+        self,
+        *,
+        collection_id: str,
+        submitted_by: str,
+        name: str,
+        supersedes_id: str,
+    ) -> Optional[dict]:
+        """Find an existing versioned skill matching a fork/edit request."""
+        row = self.conn.execute(
+            """SELECT r.id
+               FROM resources r
+               JOIN skills s ON s.resource_id = r.id
+               WHERE r.source_type = 'skill'
+                 AND r.collection_id = ?
+                 AND r.submitted_by = ?
+                 AND s.name = ?
+                 AND s.supersedes_id = ?
+               ORDER BY r.created_at DESC
+               LIMIT 1""",
+            (collection_id, submitted_by, name, supersedes_id),
+        ).fetchone()
+        if not row:
+            return None
+        return self.get_skill(row["id"])
+
+    def list_skills(
+        self,
+        collection_id: Optional[str] = None,
+        author_user_id: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict]:
+        """List skill metadata ordered by most-recent first.
+
+        Skill bodies are NOT included in list results; use ``get_skill``
+        for the full body. Filters are additive when provided.
+        """
+        clauses = ["r.source_type = 'skill'"]
+        params: list = []
+        if collection_id:
+            clauses.append("r.collection_id = ?")
+            params.append(collection_id)
+        if author_user_id:
+            clauses.append("r.submitted_by = ?")
+            params.append(author_user_id)
+        where = " AND ".join(clauses)
+        params.extend([limit, offset])
+        rows = self.conn.execute(
+            f"""SELECT r.id, r.title, r.description, r.author, r.collection_id,
+                       r.submitted_by, r.created_at, r.updated_at,
+                       s.name, s.supersedes_id, s.is_exportable
+                FROM resources r JOIN skills s ON s.resource_id = r.id
+                WHERE {where}
+                ORDER BY r.created_at DESC
+                LIMIT ? OFFSET ?""",
+            params,
+        ).fetchall()
+        results = []
+        for r in rows:
+            d = dict(r)
+            d["is_exportable"] = bool(d.get("is_exportable", 1))
             results.append(d)
         return results
 
@@ -1421,6 +1651,24 @@ class DuggDB:
         row = self.conn.execute(
             "SELECT id, url, title, submitted_by FROM resources WHERE url = ? AND collection_id = ?",
             (url, collection_id),
+        ).fetchone()
+        if not row:
+            return {"error": "Resource not found"}
+        info = dict(row)
+        self.conn.execute("DELETE FROM publish_queue WHERE resource_id = ?", (info["id"],))
+        self.conn.execute("DELETE FROM resources WHERE id = ?", (info["id"],))
+        self.conn.commit()
+        return {"deleted": info["id"], "url": info["url"], "title": info.get("title", "")}
+
+    def delete_resource_by_id(self, resource_id: str, collection_id: str) -> dict:
+        """Delete a resource by ID within a collection without recording a tombstone.
+
+        Used by RSS tombstone processing when the upstream feed's entry link is
+        not the canonical local resource URL.
+        """
+        row = self.conn.execute(
+            "SELECT id, url, title FROM resources WHERE id = ? AND collection_id = ?",
+            (resource_id, collection_id),
         ).fetchone()
         if not row:
             return {"error": "Resource not found"}

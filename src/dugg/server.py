@@ -127,6 +127,100 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="dugg_skill_list",
+            description="List skills (SKILL.md procedures) available in a collection. Skills are explicitly-authored procedures another agent can install and run — distinct from stored links or synthesized lenses.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "collection": {"type": "string", "description": "Collection name or id to filter by", "default": ""},
+                    "author": {"type": "string", "description": "Filter to skills submitted by this user id or display name; use 'me' for yourself", "default": ""},
+                    "limit": {"type": "integer", "description": "Max results to return", "default": 50},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+            },
+        ),
+        Tool(
+            name="dugg_skill_get",
+            description="Fetch a skill's full SKILL.md body by id or name. Returns the canonical frontmatter + body so an MCP client can drop it into its own skills directory.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "id_or_name": {"type": "string", "description": "Skill resource id or skill name"},
+                    "collection": {"type": "string", "description": "Collection name or id to disambiguate lookups by name", "default": ""},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+                "required": ["id_or_name"],
+            },
+        ),
+        Tool(
+            name="dugg_skill_search",
+            description="Full-text search over skills in collections you can access. Matches title, description, author, and body.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"},
+                    "collection": {"type": "string", "description": "Limit search to a specific collection", "default": ""},
+                    "limit": {"type": "integer", "description": "Max results to return", "default": 20},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+                "required": ["query"],
+            },
+        ),
+        Tool(
+            name="dugg_skill_install",
+            description="Fetch a skill formatted for installation into the caller's SKILL.md directory. Returns {markdown, filename, name} ready to write to disk.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "id_or_name": {"type": "string", "description": "Skill resource id or skill name"},
+                    "collection": {"type": "string", "description": "Collection name or id to disambiguate lookups by name", "default": ""},
+                    "to_filename": {"type": "string", "description": "Output filename template; defaults to {name}/SKILL.md", "default": "{name}/SKILL.md"},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+                "required": ["id_or_name"],
+            },
+        ),
+        Tool(
+            name="dugg_skill_add",
+            description="Author a new skill by passing SKILL.md text. Parses frontmatter, validates the name, and stores it in a collection.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "markdown": {"type": "string", "description": "Full SKILL.md text with YAML frontmatter and body"},
+                    "collection": {"type": "string", "description": "Collection name or id; uses Default if omitted", "default": ""},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+                "required": ["markdown"],
+            },
+        ),
+        Tool(
+            name="dugg_skill_fork",
+            description="Fork a skill from one collection into your own collection for editing. The new skill keeps a supersedes pointer to the source.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "source_id": {"type": "string", "description": "Resource id of the skill to fork"},
+                    "target_collection": {"type": "string", "description": "Collection name or id for the fork; uses Default if omitted", "default": ""},
+                    "new_name": {"type": "string", "description": "Override the forked skill name if needed", "default": ""},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+                "required": ["source_id"],
+            },
+        ),
+        Tool(
+            name="dugg_skill_edit",
+            description="Create a new version of a skill by passing a full edited SKILL.md body. The new row supersedes the prior version.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Resource id of the skill to version"},
+                    "new_body": {"type": "string", "description": "Full edited SKILL.md text with YAML frontmatter and body"},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+                "required": ["id", "new_body"],
+            },
+        ),
+        Tool(
             name="dugg_feed",
             description="Get the latest resources across all collections you have access to. Respects share rules and tag filters.",
             inputSchema={
@@ -853,6 +947,20 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = await _handle_add(d, user_id, arguments)
         elif name == "dugg_search":
             result = _handle_search(d, user_id, arguments)
+        elif name == "dugg_skill_list":
+            result = _handle_skill_list(d, user_id, arguments)
+        elif name == "dugg_skill_get":
+            result = _handle_skill_get(d, user_id, arguments)
+        elif name == "dugg_skill_search":
+            result = _handle_skill_search(d, user_id, arguments)
+        elif name == "dugg_skill_install":
+            result = _handle_skill_install(d, user_id, arguments)
+        elif name == "dugg_skill_add":
+            result = _handle_skill_add(d, user_id, arguments)
+        elif name == "dugg_skill_fork":
+            result = _handle_skill_fork(d, user_id, arguments)
+        elif name == "dugg_skill_edit":
+            result = _handle_skill_edit(d, user_id, arguments)
         elif name == "dugg_feed":
             result = _handle_feed(d, user_id, arguments)
         elif name == "dugg_tag":
@@ -1400,6 +1508,431 @@ def _handle_email(d: DuggDB, user_id: str, user: dict) -> list[TextContent]:
     lines.append("")
     lines.append("Forward emails to any of these addresses to add them as resources.")
     return [TextContent(type="text", text="\n".join(lines))]
+
+
+def _json_result(payload: object) -> list[TextContent]:
+    return [TextContent(type="text", text=json.dumps(payload))]
+
+
+def _json_error(message: str) -> list[TextContent]:
+    return _json_result({"error": message})
+
+
+def _skill_metadata(skill: dict) -> dict:
+    return {
+        "id": skill["id"],
+        "name": skill["name"],
+        "title": skill.get("title") or "",
+        "description": skill.get("description") or "",
+        "author": skill.get("author") or "",
+        "collection_id": skill["collection_id"],
+        "created_at": skill.get("created_at") or "",
+        "supersedes_id": skill.get("supersedes_id"),
+        "is_exportable": bool(skill.get("is_exportable", True)),
+    }
+
+
+def _resolve_collection_for_user(
+    d: DuggDB,
+    user_id: str,
+    collection_name: str,
+) -> Optional[str]:
+    if not collection_name:
+        return d.ensure_default_collection(user_id)
+
+    row = d.conn.execute(
+        "SELECT id FROM collections WHERE id = ?",
+        (collection_name,),
+    ).fetchone()
+    if row:
+        coll_id = row["id"]
+        if coll_id in d._accessible_collection_ids(user_id):
+            return coll_id
+        return None
+
+    for collection in d.list_collections(user_id):
+        if collection["name"].lower() == collection_name.lower():
+            return collection["id"]
+
+    return None
+
+
+def _member_can_author(d: DuggDB, collection_id: str, user_id: str) -> bool:
+    row = d.conn.execute(
+        """SELECT member_type
+           FROM collection_members
+           WHERE collection_id = ? AND user_id = ? AND status = 'active'""",
+        (collection_id, user_id),
+    ).fetchone()
+    return bool(row) and row["member_type"] != "subscriber"
+
+
+def _can_version_skill(d: DuggDB, user_id: str, skill: dict) -> bool:
+    if not _member_can_author(d, skill["collection_id"], user_id):
+        return False
+    if skill.get("submitted_by") == user_id:
+        return True
+    member = d.get_member_status(skill["collection_id"], user_id)
+    return bool(member) and member.get("role") == "owner"
+
+
+def _find_skill(
+    d: DuggDB,
+    user_id: str,
+    id_or_name: str,
+    collection_name: str = "",
+) -> tuple[Optional[dict], Optional[str]]:
+    accessible = d._accessible_collection_ids(user_id)
+    if not accessible:
+        return None, "No accessible collections."
+
+    coll_id = None
+    if collection_name:
+        coll_id = _resolve_collection_for_user(d, user_id, collection_name)
+        if not coll_id:
+            return None, f"Collection not found or not accessible: {collection_name}"
+        accessible = [coll_id]
+
+    placeholders = ",".join("?" for _ in accessible)
+    row = d.conn.execute(
+        f"""SELECT r.*, s.name AS skill_name, s.body, s.frontmatter AS skill_frontmatter,
+                   s.supersedes_id, s.is_exportable
+            FROM resources r
+            JOIN skills s ON s.resource_id = r.id
+            WHERE r.id = ? AND r.source_type = 'skill'
+              AND r.collection_id IN ({placeholders})
+            LIMIT 1""",
+        [id_or_name] + accessible,
+    ).fetchone()
+    if row:
+        skill = dict(row)
+        skill["name"] = skill.pop("skill_name")
+        try:
+            skill["frontmatter"] = json.loads(skill.pop("skill_frontmatter") or "{}")
+        except (TypeError, ValueError):
+            skill["frontmatter"] = {}
+        skill["is_exportable"] = bool(skill.get("is_exportable", 1))
+        return skill, None
+
+    params = [id_or_name] + accessible
+    sql = f"""SELECT r.*, s.name AS skill_name, s.body, s.frontmatter AS skill_frontmatter,
+                     s.supersedes_id, s.is_exportable
+              FROM resources r
+              JOIN skills s ON s.resource_id = r.id
+              WHERE s.name = ? AND r.source_type = 'skill'
+                AND r.collection_id IN ({placeholders})
+              ORDER BY r.created_at DESC"""
+    rows = d.conn.execute(sql, params).fetchall()
+    if not rows:
+        return None, f"Skill not found: {id_or_name}"
+    if len(rows) > 1 and not coll_id:
+        return None, f"Skill name is ambiguous across collections: {id_or_name}"
+
+    skill = dict(rows[0])
+    skill["name"] = skill.pop("skill_name")
+    try:
+        skill["frontmatter"] = json.loads(skill.pop("skill_frontmatter") or "{}")
+    except (TypeError, ValueError):
+        skill["frontmatter"] = {}
+    skill["is_exportable"] = bool(skill.get("is_exportable", 1))
+    return skill, None
+
+
+def _handle_skill_list(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    limit = args.get("limit", 50)
+    collection_name = args.get("collection", "")
+    author_filter = (args.get("author", "") or "").strip()
+
+    accessible = d._accessible_collection_ids(user_id)
+    if not accessible:
+        return _json_result([])
+
+    if collection_name:
+        coll_id = _resolve_collection_for_user(d, user_id, collection_name)
+        if not coll_id:
+            return _json_error(f"Collection not found or not accessible: {collection_name}")
+        accessible = [coll_id]
+
+    placeholders = ",".join("?" for _ in accessible)
+    rows = d.conn.execute(
+        f"""SELECT r.id, r.title, r.description, r.author, r.collection_id, r.submitted_by,
+                   r.created_at, s.name, s.supersedes_id, s.is_exportable
+            FROM resources r
+            JOIN skills s ON s.resource_id = r.id
+            WHERE r.source_type = 'skill'
+              AND r.collection_id IN ({placeholders})
+            ORDER BY r.created_at DESC""",
+        accessible,
+    ).fetchall()
+
+    result = []
+    author_filter_lower = author_filter.lower()
+    for row in rows:
+        skill = dict(row)
+        if author_filter:
+            submitter = d.get_user(skill["submitted_by"]) if skill.get("submitted_by") else None
+            submitter_name = (submitter["name"] if submitter else "").strip()
+            if author_filter == "me":
+                if skill.get("submitted_by") != user_id:
+                    continue
+            elif (
+                skill.get("submitted_by") != author_filter
+                and (skill.get("author") or "").strip().lower() != author_filter_lower
+                and submitter_name.lower() != author_filter_lower
+            ):
+                continue
+        result.append(_skill_metadata(skill))
+        if len(result) >= limit:
+            break
+    return _json_result(result)
+
+
+def _handle_skill_get(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    from dugg.skills import render_skill_markdown
+
+    skill, error = _find_skill(d, user_id, args["id_or_name"], args.get("collection", ""))
+    if error:
+        return _json_error(error)
+
+    result = {
+        "id": skill["id"],
+        "name": skill["name"],
+        "title": skill.get("title") or "",
+        "description": skill.get("description") or "",
+        "author": skill.get("author") or "",
+        "collection_id": skill["collection_id"],
+        "submitted_by": skill.get("submitted_by") or "",
+        "created_at": skill.get("created_at") or "",
+        "updated_at": skill.get("updated_at") or "",
+        "supersedes_id": skill.get("supersedes_id"),
+        "is_exportable": bool(skill.get("is_exportable", True)),
+        "frontmatter": skill.get("frontmatter") or {},
+        "body": skill.get("body") or "",
+        "markdown": render_skill_markdown(skill.get("frontmatter") or {}, skill.get("body") or ""),
+    }
+    return _json_result(result)
+
+
+def _handle_skill_search(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    query = args["query"]
+    limit = args.get("limit", 20)
+    collection_name = args.get("collection", "")
+
+    coll_id = None
+    if collection_name:
+        coll_id = _resolve_collection_for_user(d, user_id, collection_name)
+        if not coll_id:
+            return _json_error(f"Collection not found or not accessible: {collection_name}")
+
+    fts_results = d.search(query, user_id, collection_id=coll_id, limit=max(limit * 5, 50))
+    combined: dict[str, dict] = {}
+    for result in fts_results:
+        if result.get("source_type") != "skill":
+            continue
+        skill = d.get_skill(result["id"])
+        if skill:
+            combined[skill["id"]] = skill
+
+    accessible = d._accessible_collection_ids(user_id)
+    if coll_id:
+        accessible = [coll_id]
+    if accessible:
+        placeholders = ",".join("?" for _ in accessible)
+        like_term = f"%{query}%"
+        body_rows = d.conn.execute(
+            f"""SELECT r.id
+                FROM resources r
+                JOIN skills s ON s.resource_id = r.id
+                WHERE r.source_type = 'skill'
+                  AND r.collection_id IN ({placeholders})
+                  AND LOWER(s.body) LIKE LOWER(?)
+                ORDER BY r.created_at DESC
+                LIMIT ?""",
+            accessible + [like_term, max(limit * 5, 50)],
+        ).fetchall()
+        for row in body_rows:
+            skill = d.get_skill(row["id"])
+            if skill:
+                combined[skill["id"]] = skill
+
+    skills = sorted(
+        (_skill_metadata(skill) for skill in combined.values()),
+        key=lambda skill: skill.get("created_at") or "",
+        reverse=True,
+    )[:limit]
+    return _json_result(skills)
+
+
+def _handle_skill_install(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    from dugg.skills import render_skill_markdown
+
+    skill, error = _find_skill(d, user_id, args["id_or_name"], args.get("collection", ""))
+    if error:
+        return _json_error(error)
+    if not skill.get("is_exportable", True):
+        return _json_error(f"Skill {skill['id']} is not exportable.")
+
+    filename_template = args.get("to_filename") or "{name}/SKILL.md"
+    result = {
+        "markdown": render_skill_markdown(skill.get("frontmatter") or {}, skill.get("body") or ""),
+        "filename": filename_template.format(name=skill["name"]),
+        "name": skill["name"],
+    }
+    return _json_result(result)
+
+
+def _handle_skill_add(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    from dugg.skills import parse_skill_markdown, validate_skill_name
+
+    markdown = args["markdown"]
+    try:
+        frontmatter, body = parse_skill_markdown(markdown)
+        name = frontmatter["name"].strip()
+        validate_skill_name(name)
+    except ValueError as exc:
+        return _json_error(f"Invalid SKILL.md: {exc}")
+
+    collection_name = args.get("collection", "")
+    coll_id = _resolve_collection_for_user(d, user_id, collection_name)
+    if not coll_id:
+        return _json_error(f"Collection not found or not accessible: {collection_name}")
+    if not _member_can_author(d, coll_id, user_id):
+        return _json_error(f"Write access denied for collection {coll_id}")
+
+    author = str(frontmatter.get("author") or d.get_user(user_id).get("name") or "").strip()
+    title = str(frontmatter.get("title") or name).strip()
+    description = str(frontmatter.get("description") or "").strip()
+
+    try:
+        resource_id = d.add_skill(
+            name=name,
+            body=body,
+            frontmatter=frontmatter,
+            title=title,
+            description=description,
+            author=author,
+            collection_id=coll_id,
+            submitted_by=user_id,
+        )
+    except Exception as exc:
+        return _json_error(f"Could not add skill: {exc}")
+
+    return _json_result({
+        "id": resource_id,
+        "name": name,
+        "collection_id": coll_id,
+    })
+
+
+def _handle_skill_fork(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    source_id = args["source_id"]
+    source_skill, error = _find_skill(d, user_id, source_id)
+    if error:
+        return _json_error(error)
+
+    target_collection_name = args.get("target_collection", "")
+    coll_id = _resolve_collection_for_user(d, user_id, target_collection_name)
+    if not coll_id:
+        return _json_error(f"Collection not found or not accessible: {target_collection_name}")
+    if not _member_can_author(d, coll_id, user_id):
+        return _json_error(f"Write access denied for collection {coll_id}")
+
+    fork_name = (args.get("new_name") or source_skill["name"]).strip()
+    try:
+        from dugg.skills import validate_skill_name
+        validate_skill_name(fork_name)
+    except ValueError as exc:
+        return _json_error(f"Invalid skill name: {exc}")
+
+    frontmatter = dict(source_skill.get("frontmatter") or {})
+    frontmatter["name"] = fork_name
+    if source_skill.get("author"):
+        frontmatter.setdefault("author", source_skill["author"])
+
+    existing = d.find_skill_version(
+        collection_id=coll_id,
+        submitted_by=user_id,
+        name=fork_name,
+        supersedes_id=source_id,
+    )
+    if existing:
+        return _json_result({
+            "id": existing["id"],
+            "name": existing["name"],
+            "supersedes_id": source_id,
+            "collection_id": coll_id,
+            "status": "exists",
+        })
+
+    try:
+        resource_id = d.add_skill(
+            name=fork_name,
+            body=source_skill.get("body") or "",
+            frontmatter=frontmatter,
+            title=source_skill.get("title") or fork_name,
+            description=source_skill.get("description") or "",
+            author=source_skill.get("author") or "",
+            collection_id=coll_id,
+            submitted_by=user_id,
+            supersedes_id=source_id,
+            is_exportable=bool(source_skill.get("is_exportable", True)),
+        )
+    except Exception as exc:
+        return _json_error(f"Could not fork skill: {exc}")
+
+    return _json_result({
+        "id": resource_id,
+        "name": fork_name,
+        "supersedes_id": source_id,
+        "collection_id": coll_id,
+    })
+
+
+def _handle_skill_edit(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    from dugg.skills import parse_skill_markdown, validate_skill_name
+
+    skill, error = _find_skill(d, user_id, args["id"])
+    if error:
+        return _json_error(error)
+    if not _can_version_skill(d, user_id, skill):
+        return _json_error(
+            f"Permission denied — you didn't submit this skill and aren't the collection owner."
+        )
+
+    markdown = args["new_body"]
+    try:
+        frontmatter, body = parse_skill_markdown(markdown)
+        name = frontmatter["name"].strip()
+        validate_skill_name(name)
+    except ValueError as exc:
+        return _json_error(f"Invalid SKILL.md: {exc}")
+
+    author = str(frontmatter.get("author") or d.get_user(user_id).get("name") or "").strip()
+    title = str(frontmatter.get("title") or name).strip()
+    description = str(frontmatter.get("description") or "").strip()
+
+    try:
+        resource_id = d.add_skill(
+            name=name,
+            body=body,
+            frontmatter=frontmatter,
+            title=title,
+            description=description,
+            author=author,
+            collection_id=skill["collection_id"],
+            submitted_by=user_id,
+            supersedes_id=skill["id"],
+            is_exportable=bool(skill.get("is_exportable", True)),
+        )
+    except Exception as exc:
+        return _json_error(f"Could not edit skill: {exc}")
+
+    return _json_result({
+        "id": resource_id,
+        "name": name,
+        "collection_id": skill["collection_id"],
+        "supersedes_id": skill["id"],
+    })
 
 
 def _handle_search(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
