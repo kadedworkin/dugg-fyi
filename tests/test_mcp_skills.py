@@ -9,6 +9,7 @@ import pytest
 from dugg.db import DuggDB
 from dugg.server import (
     _handle_skill_add,
+    _handle_skill_edit,
     _handle_skill_fork,
     _handle_skill_get,
     _handle_skill_install,
@@ -239,3 +240,75 @@ def test_skill_fork_sets_supersedes_and_rejects_subscriber_target(db, owner, def
     )
     rejected = _decode(_handle_skill_fork(db, subscriber["id"], {"source_id": source_id}))
     assert rejected == {"error": f"Write access denied for collection {default_collection['id']}"}
+
+
+def test_skill_fork_is_idempotent_for_same_target_and_submitter(db, owner, default_collection):
+    source_id = _add_skill(db, user=owner, collection=default_collection, name="fork-source")
+
+    first = _decode(_handle_skill_fork(db, owner["id"], {"source_id": source_id}))
+    second = _decode(_handle_skill_fork(db, owner["id"], {"source_id": source_id}))
+
+    assert second["status"] == "exists"
+    assert second["id"] == first["id"]
+
+
+def test_skill_edit_creates_new_version_for_submitter(db, owner, default_collection):
+    source_id = _add_skill(
+        db,
+        user=owner,
+        collection=default_collection,
+        name="editable-skill",
+        title="Editable Skill",
+        description="Original body",
+        body="# Editable\n\nOriginal body.\n",
+    )
+
+    edited = _decode(_handle_skill_edit(db, owner["id"], {
+        "id": source_id,
+        "new_body": """---
+name: editable-skill
+description: Edited body
+title: Editable Skill
+---
+# Editable
+
+Edited body.
+""",
+    }))
+
+    stored = db.get_skill(edited["id"])
+    assert stored is not None
+    assert stored["supersedes_id"] == source_id
+    assert stored["body"] == "# Editable\n\nEdited body.\n"
+
+
+def test_skill_edit_allows_collection_owner_and_rejects_other_members(db, owner, default_collection):
+    author = db.create_user("Author")
+    db.add_collection_member(default_collection["id"], author["id"])
+    source_id = _add_skill(db, user=author, collection=default_collection, name="owner-editable")
+
+    owner_edit = _decode(_handle_skill_edit(db, owner["id"], {
+        "id": source_id,
+        "new_body": """---
+name: owner-editable
+description: owner edit
+---
+owner body
+""",
+    }))
+    assert owner_edit["supersedes_id"] == source_id
+
+    member = db.create_user("Member")
+    db.add_collection_member(default_collection["id"], member["id"])
+    denied = _decode(_handle_skill_edit(db, member["id"], {
+        "id": source_id,
+        "new_body": """---
+name: owner-editable
+description: member edit
+---
+member body
+""",
+    }))
+    assert denied == {
+        "error": "Permission denied — you didn't submit this skill and aren't the collection owner."
+    }

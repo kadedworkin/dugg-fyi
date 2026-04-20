@@ -208,6 +208,19 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="dugg_skill_edit",
+            description="Create a new version of a skill by passing a full edited SKILL.md body. The new row supersedes the prior version.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Resource id of the skill to version"},
+                    "new_body": {"type": "string", "description": "Full edited SKILL.md text with YAML frontmatter and body"},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+                "required": ["id", "new_body"],
+            },
+        ),
+        Tool(
             name="dugg_feed",
             description="Get the latest resources across all collections you have access to. Respects share rules and tag filters.",
             inputSchema={
@@ -946,6 +959,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = _handle_skill_add(d, user_id, arguments)
         elif name == "dugg_skill_fork":
             result = _handle_skill_fork(d, user_id, arguments)
+        elif name == "dugg_skill_edit":
+            result = _handle_skill_edit(d, user_id, arguments)
         elif name == "dugg_feed":
             result = _handle_feed(d, user_id, arguments)
         elif name == "dugg_tag":
@@ -1552,6 +1567,13 @@ def _member_can_author(d: DuggDB, collection_id: str, user_id: str) -> bool:
     return bool(row) and row["member_type"] != "subscriber"
 
 
+def _can_version_skill(d: DuggDB, user_id: str, skill: dict) -> bool:
+    if skill.get("submitted_by") == user_id:
+        return True
+    member = d.get_member_status(skill["collection_id"], user_id)
+    return bool(member) and member.get("role") == "owner"
+
+
 def _find_skill(
     d: DuggDB,
     user_id: str,
@@ -1825,6 +1847,21 @@ def _handle_skill_fork(d: DuggDB, user_id: str, args: dict) -> list[TextContent]
     if source_skill.get("author"):
         frontmatter.setdefault("author", source_skill["author"])
 
+    existing = d.find_skill_version(
+        collection_id=coll_id,
+        submitted_by=user_id,
+        name=fork_name,
+        supersedes_id=source_id,
+    )
+    if existing:
+        return _json_result({
+            "id": existing["id"],
+            "name": existing["name"],
+            "supersedes_id": source_id,
+            "collection_id": coll_id,
+            "status": "exists",
+        })
+
     try:
         resource_id = d.add_skill(
             name=fork_name,
@@ -1845,6 +1882,54 @@ def _handle_skill_fork(d: DuggDB, user_id: str, args: dict) -> list[TextContent]
         "id": resource_id,
         "name": fork_name,
         "supersedes_id": source_id,
+        "collection_id": coll_id,
+    })
+
+
+def _handle_skill_edit(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    from dugg.skills import parse_skill_markdown, validate_skill_name
+
+    skill, error = _find_skill(d, user_id, args["id"])
+    if error:
+        return _json_error(error)
+    if not _can_version_skill(d, user_id, skill):
+        return _json_error(
+            f"Permission denied — you didn't submit this skill and aren't the collection owner."
+        )
+
+    markdown = args["new_body"]
+    try:
+        frontmatter, body = parse_skill_markdown(markdown)
+        name = frontmatter["name"].strip()
+        validate_skill_name(name)
+    except ValueError as exc:
+        return _json_error(f"Invalid SKILL.md: {exc}")
+
+    author = str(frontmatter.get("author") or d.get_user(user_id).get("name") or "").strip()
+    title = str(frontmatter.get("title") or name).strip()
+    description = str(frontmatter.get("description") or "").strip()
+
+    try:
+        resource_id = d.add_skill(
+            name=name,
+            body=body,
+            frontmatter=frontmatter,
+            title=title,
+            description=description,
+            author=author,
+            collection_id=skill["collection_id"],
+            submitted_by=user_id,
+            supersedes_id=skill["id"],
+            is_exportable=bool(skill.get("is_exportable", True)),
+        )
+    except Exception as exc:
+        return _json_error(f"Could not edit skill: {exc}")
+
+    return _json_result({
+        "id": resource_id,
+        "name": name,
+        "collection_id": skill["collection_id"],
+        "supersedes_id": skill["id"],
     })
 
 

@@ -229,6 +229,42 @@ def test_skill_supersedes_chain(db):
     v2_skill = db.get_skill(v2)
     assert v1_skill["supersedes_id"] is None
     assert v2_skill["supersedes_id"] == v1
+    assert [item["id"] for item in db.get_skill_history(v2)] == [v2, v1]
+
+
+def test_find_skill_version_matches_existing_versioned_row(db):
+    user, coll = _seed_user_and_collection(db)
+    source = db.add_skill(
+        name="chain",
+        body="v1",
+        frontmatter={"name": "chain", "description": "v1"},
+        title="Chain",
+        description="v1",
+        author=user["name"],
+        collection_id=coll["id"],
+        submitted_by=user["id"],
+    )
+    versioned = db.add_skill(
+        name="chain",
+        body="v2",
+        frontmatter={"name": "chain", "description": "v2"},
+        title="Chain",
+        description="v2",
+        author=user["name"],
+        collection_id=coll["id"],
+        submitted_by=user["id"],
+        supersedes_id=source,
+    )
+
+    found = db.find_skill_version(
+        collection_id=coll["id"],
+        submitted_by=user["id"],
+        name="chain",
+        supersedes_id=source,
+    )
+
+    assert found is not None
+    assert found["id"] == versioned
 
 
 def test_skill_name_unique_across_collections_allowed(db):

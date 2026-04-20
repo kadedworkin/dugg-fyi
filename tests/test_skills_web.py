@@ -155,6 +155,35 @@ def test_get_skill_authenticated_renders_raw_body_verbatim(client, db_path):
     assert "<h2>Raw Step</h2>" not in resp.text
 
 
+def test_get_skill_renders_version_history_chain(client, db_path):
+    c, user, default_collection = client
+    original_id = _add_skill(
+        db_path,
+        user=user,
+        collection=default_collection,
+        name="versioned-skill",
+        title="Versioned Skill",
+        body="original body\n",
+    )
+    current_id = _add_skill(
+        db_path,
+        user=user,
+        collection=default_collection,
+        name="versioned-skill",
+        title="Versioned Skill v2",
+        body="current body\n",
+        supersedes_id=original_id,
+    )
+    c.cookies.set("dugg_key", user["api_key"])
+
+    resp = c.get(f"/s/{current_id}")
+
+    assert resp.status_code == 200
+    assert "Version history" in resp.text
+    assert f'href="/s/{current_id}"' in resp.text
+    assert f'href="/s/{original_id}"' in resp.text
+
+
 def test_get_skill_markdown_download_returns_rendered_skill(client, db_path):
     c, user, default_collection = client
     body = "# Install\n\nProcedure body.\n"

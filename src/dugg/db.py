@@ -1100,6 +1100,46 @@ class DuggDB:
         result["is_exportable"] = bool(result.get("is_exportable", 1))
         return result
 
+    def get_skill_history(self, skill_id: str) -> list[dict]:
+        """Return a linear current->original supersedes chain for a skill id."""
+        history: list[dict] = []
+        seen: set[str] = set()
+        current_id = skill_id
+        while current_id and current_id not in seen:
+            seen.add(current_id)
+            skill = self.get_skill(current_id)
+            if not skill:
+                break
+            history.append(skill)
+            current_id = skill.get("supersedes_id") or ""
+        return history
+
+    def find_skill_version(
+        self,
+        *,
+        collection_id: str,
+        submitted_by: str,
+        name: str,
+        supersedes_id: str,
+    ) -> Optional[dict]:
+        """Find an existing versioned skill matching a fork/edit request."""
+        row = self.conn.execute(
+            """SELECT r.id
+               FROM resources r
+               JOIN skills s ON s.resource_id = r.id
+               WHERE r.source_type = 'skill'
+                 AND r.collection_id = ?
+                 AND r.submitted_by = ?
+                 AND s.name = ?
+                 AND s.supersedes_id = ?
+               ORDER BY r.created_at DESC
+               LIMIT 1""",
+            (collection_id, submitted_by, name, supersedes_id),
+        ).fetchone()
+        if not row:
+            return None
+        return self.get_skill(row["id"])
+
     def list_skills(
         self,
         collection_id: Optional[str] = None,

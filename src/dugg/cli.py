@@ -2,8 +2,12 @@
 
 import argparse
 import json
+import os
+import shlex
 import sqlite3
+import subprocess
 import sys
+import tempfile
 from typing import Optional
 
 from dugg.db import DuggDB, DEFAULT_DB_PATH, DEFAULT_API_KEY
@@ -1892,6 +1896,20 @@ def main():
     ps_get.add_argument("--collection", default=None, help="Collection id (required when looking up by name across collections)")
     ps_get.add_argument("--key", default=None, help="Your API key")
 
+    ps_fork = skill_sub.add_parser("fork", help="Fork a skill into your default collection")
+    ps_fork.add_argument("id", help="Resource id of the skill to fork")
+    ps_fork.add_argument("--collection", default=None, help="Target collection name or id (defaults to Default)")
+    ps_fork.add_argument("--name", default=None, help="Override the forked skill name")
+    ps_fork.add_argument("--key", default=None, help="Your API key")
+
+    ps_edit = skill_sub.add_parser("edit", help="Edit a skill by creating a new superseding version")
+    ps_edit.add_argument("id", help="Resource id of the skill to edit")
+    ps_edit.add_argument("--key", default=None, help="Your API key")
+
+    ps_history = skill_sub.add_parser("history", help="Show a skill's version history")
+    ps_history.add_argument("id", help="Resource id of the skill to inspect")
+    ps_history.add_argument("--key", default=None, help="Your API key")
+
     # If the first arg looks like a URL, treat it as `dugg add <url> ...`
     if len(sys.argv) > 1 and sys.argv[1].startswith(("http://", "https://")):
         sys.argv.insert(1, "add")
@@ -2215,9 +2233,33 @@ def cmd_skill(args):
         cmd_skill_list(args)
     elif action == "get":
         cmd_skill_get(args)
+    elif action == "fork":
+        cmd_skill_fork(args)
+    elif action == "edit":
+        cmd_skill_edit(args)
+    elif action == "history":
+        cmd_skill_history(args)
     else:
-        print("Usage: dugg skill {add|list|get} ...")
+        print("Usage: dugg skill {add|list|get|fork|edit|history} ...")
         sys.exit(1)
+
+
+def _load_skill_markdown_for_edit(skill: dict) -> str:
+    from dugg.skills import render_skill_markdown
+
+    return render_skill_markdown(skill.get("frontmatter") or {}, skill.get("body") or "")
+
+
+def _can_version_skill(db, user_id: str, skill: dict) -> bool:
+    if skill.get("submitted_by") == user_id:
+        return True
+    member = db.get_member_status(skill["collection_id"], user_id)
+    return bool(member) and member.get("role") == "owner"
+
+
+def _member_can_author(db, collection_id: str, user_id: str) -> bool:
+    member = db.get_member_status(collection_id, user_id)
+    return bool(member) and member.get("status") == "active" and member.get("member_type") != "subscriber"
 
 
 def cmd_skill_add(args):
@@ -2254,6 +2296,10 @@ def cmd_skill_add(args):
             sys.exit(1)
     else:
         collection_id = _ensure_default_collection(db, user["id"])
+    if not _member_can_author(db, collection_id, user["id"]):
+        print(f"Write access denied for collection {collection_id}")
+        db.close()
+        sys.exit(1)
 
     author = str(frontmatter.get("author") or user.get("name") or "").strip()
 
@@ -2346,6 +2392,172 @@ def cmd_skill_get(args):
         sys.exit(1)
 
     print(render_skill_markdown(skill["frontmatter"], skill["body"] or ""))
+    db.close()
+
+
+def cmd_skill_fork(args):
+    """Fork a skill into the caller's default collection."""
+    from pathlib import Path
+    from dugg.skills import validate_skill_name
+
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+    user = _resolve_user(db, args)
+
+    source_skill = db.get_skill(args.id)
+    if not source_skill:
+        print(f"Skill not found: {args.id}")
+        db.close()
+        sys.exit(1)
+    if source_skill.get("collection_id") not in set(db._accessible_collection_ids(user["id"])):
+        print(f"Skill not found: {args.id}")
+        db.close()
+        sys.exit(1)
+
+    if args.collection:
+        collection_id = _resolve_collection(db, user["id"], args.collection)
+        if not collection_id:
+            print(f"Collection not found: {args.collection}")
+            db.close()
+            sys.exit(1)
+    else:
+        collection_id = _ensure_default_collection(db, user["id"])
+
+    fork_name = (args.name or source_skill["name"]).strip()
+    try:
+        validate_skill_name(fork_name)
+    except ValueError as exc:
+        print(f"Invalid skill name: {exc}")
+        db.close()
+        sys.exit(1)
+
+    existing = db.find_skill_version(
+        collection_id=collection_id,
+        submitted_by=user["id"],
+        name=fork_name,
+        supersedes_id=source_skill["id"],
+    )
+    if existing:
+        print(f"Fork already exists: {fork_name} ({existing['id'][:8]})")
+        db.close()
+        return
+
+    frontmatter = dict(source_skill.get("frontmatter") or {})
+    frontmatter["name"] = fork_name
+    if source_skill.get("author"):
+        frontmatter.setdefault("author", source_skill["author"])
+
+    resource_id = db.add_skill(
+        name=fork_name,
+        body=source_skill.get("body") or "",
+        frontmatter=frontmatter,
+        title=source_skill.get("title") or fork_name,
+        description=source_skill.get("description") or "",
+        author=source_skill.get("author") or "",
+        collection_id=collection_id,
+        submitted_by=user["id"],
+        supersedes_id=source_skill["id"],
+        is_exportable=bool(source_skill.get("is_exportable", True)),
+    )
+    print(f"Forked skill {fork_name} ({resource_id[:8]}) from {source_skill['id'][:8]}")
+    db.close()
+
+
+def cmd_skill_edit(args):
+    """Open a skill in $EDITOR and save a superseding version."""
+    from pathlib import Path
+    from dugg.skills import parse_skill_markdown, validate_skill_name
+
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+    user = _resolve_user(db, args)
+    skill = db.get_skill(args.id)
+    if not skill:
+        print(f"Skill not found: {args.id}")
+        db.close()
+        sys.exit(1)
+    if skill.get("collection_id") not in set(db._accessible_collection_ids(user["id"])):
+        print(f"Skill not found: {args.id}")
+        db.close()
+        sys.exit(1)
+    if not _can_version_skill(db, user["id"], skill):
+        print("Permission denied — you didn't submit this skill and aren't the collection owner.")
+        db.close()
+        sys.exit(1)
+
+    editor = (os.environ.get("EDITOR") or "vi").strip() or "vi"
+    initial_markdown = _load_skill_markdown_for_edit(skill)
+    with tempfile.NamedTemporaryFile(mode="w+", suffix=".md", delete=False, encoding="utf-8") as tmp:
+        tmp.write(initial_markdown)
+        tmp.flush()
+        temp_path = Path(tmp.name)
+
+    try:
+        cmd = [*shlex.split(editor), str(temp_path)]
+        result = subprocess.run(cmd, check=False)
+        if result.returncode != 0:
+            db.close()
+            print(f"Editor exited with status {result.returncode}")
+            sys.exit(1)
+
+        edited = temp_path.read_text(encoding="utf-8")
+        frontmatter, body = parse_skill_markdown(edited)
+        name = frontmatter["name"].strip()
+        validate_skill_name(name)
+    except ValueError as exc:
+        print(f"Invalid SKILL.md: {exc}")
+        db.close()
+        sys.exit(1)
+    finally:
+        try:
+            temp_path.unlink()
+        except OSError:
+            pass
+
+    author = str(frontmatter.get("author") or user.get("name") or "").strip()
+    title = str(frontmatter.get("title") or name).strip()
+    description = str(frontmatter.get("description") or "").strip()
+    resource_id = db.add_skill(
+        name=name,
+        body=body,
+        frontmatter=frontmatter,
+        title=title,
+        description=description,
+        author=author,
+        collection_id=skill["collection_id"],
+        submitted_by=user["id"],
+        supersedes_id=skill["id"],
+        is_exportable=bool(skill.get("is_exportable", True)),
+    )
+    print(f"Edited skill {name} ({resource_id[:8]}) superseding {skill['id'][:8]}")
+    db.close()
+
+
+def cmd_skill_history(args):
+    """Print a skill's supersedes chain from current to original."""
+    from pathlib import Path
+
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+    user = _resolve_user(db, args)
+    skill = db.get_skill(args.id)
+    if not skill or skill.get("collection_id") not in set(db._accessible_collection_ids(user["id"])):
+        print(f"Skill not found: {args.id}")
+        db.close()
+        sys.exit(1)
+
+    history = db.get_skill_history(skill["id"])
+    if not history:
+        print(f"Skill not found: {args.id}")
+        db.close()
+        sys.exit(1)
+
+    print("Version history:")
+    for item in history:
+        print(
+            f"{item['id'][:8]}  {item.get('name') or ''}  "
+            f"{(item.get('created_at') or '')[:19]}  {(item.get('author') or '')}"
+        )
     db.close()
 
 

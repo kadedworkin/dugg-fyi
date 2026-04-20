@@ -1789,6 +1789,7 @@ async function syncNow(e) {
         server_url: str,
         collection_names: dict[str, str],
         supersedes_url: str = "",
+        history: list[dict] | None = None,
     ) -> str:
         title = skill.get("title") or skill.get("name") or skill["id"]
         supersedes_id = skill.get("supersedes_id") or ""
@@ -1808,6 +1809,23 @@ async function syncNow(e) {
             if skill.get("is_exportable", True)
             else '<p class="meta" style="margin-top:0.75rem;">This skill is not shareable — viewable on this server only.</p>'
         )
+        history_html = ""
+        if history:
+            items = []
+            for item in history:
+                item_title = item.get("title") or item.get("name") or item["id"]
+                item_url = _skill_view_path(item["id"], server_url)
+                items.append(
+                    f'<li><a href="{_xml_escape(item_url)}">{_xml_escape(item_title)}</a> '
+                    f'<code>{_xml_escape(item["id"])}</code> '
+                    f'<span class="meta">· {_short_date(item.get("created_at"))}</span></li>'
+                )
+            history_html = (
+                '<section style="margin-top:1.25rem;">'
+                '<h2 style="margin-bottom:0.5rem;">Version history</h2>'
+                f'<ol style="margin:0;padding-left:1.25rem;line-height:1.7;">{"".join(items)}</ol>'
+                '</section>'
+            )
         body = f"""<div class="card" style="max-width:none;">
   <div class="card-body">
     <h1>{_xml_escape(title)}</h1>
@@ -1817,6 +1835,7 @@ async function syncNow(e) {
     </div>
     <p class="meta" style="margin-bottom:1rem;">Fork via CLI: <code>dugg skill fork {_xml_escape(skill["id"])}</code></p>
     <pre class="skill-body" style="margin-top:1rem;padding:1rem;background:#111;border:1px solid #333;border-radius:8px;color:#ddd;white-space:pre-wrap;word-break:break-word;overflow:auto;font-size:0.85rem;line-height:1.6;">{_xml_escape(skill.get("body") or "")}</pre>
+    {history_html}
   </div>
 </div>"""
         return _html_page(_xml_escape(title), body, wide=True)
@@ -1903,11 +1922,16 @@ async function syncNow(e) {
         if skill.get("supersedes_id"):
             if _get_accessible_skill(d, user["id"], skill["supersedes_id"]):
                 supersedes_url = _skill_view_path(skill["supersedes_id"], server_url)
+        history = [
+            item for item in d.get_skill_history(skill["id"])
+            if item.get("collection_id") in collections
+        ]
         html = _render_skill_page(
             skill,
             server_url,
             {coll_id: coll.get("name", coll_id) for coll_id, coll in collections.items()},
             supersedes_url=supersedes_url,
+            history=history,
         )
         return HTMLResponse(html)
 
