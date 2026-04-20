@@ -551,7 +551,14 @@ class DuggDB:
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='event_log'"
         ).fetchone()
         if ev_row and "skill_added" not in (ev_row[0] or ""):
+            # Disable FK enforcement during the rebuild — SQLite's recommended
+            # pattern for ALTER-via-rebuild. Production DBs can have orphaned
+            # event_log rows (instance/collection/actor deleted over time) that
+            # would otherwise fail the INSERT. The per-row FK checks were never
+            # enforced on the original table, so preserving those rows is the
+            # correct behavior.
             self.conn.executescript("""
+                PRAGMA foreign_keys=OFF;
                 CREATE TABLE event_log_new (
                     id TEXT PRIMARY KEY,
                     event_type TEXT NOT NULL CHECK(event_type IN ('resource_added', 'resource_published', 'resource_deleted', 'member_joined', 'member_banned', 'publish_delivered', 'invite_created', 'invite_redeemed', 'reaction_added', 'skill_added', 'skill_forked', 'skill_superseded', 'skill_deleted')),
@@ -565,6 +572,7 @@ class DuggDB:
                     SELECT id, event_type, instance_id, collection_id, actor_id, payload, created_at FROM event_log;
                 DROP TABLE event_log;
                 ALTER TABLE event_log_new RENAME TO event_log;
+                PRAGMA foreign_keys=ON;
             """)
 
         self.conn.commit()
