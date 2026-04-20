@@ -1568,6 +1568,8 @@ def _member_can_author(d: DuggDB, collection_id: str, user_id: str) -> bool:
 
 
 def _can_version_skill(d: DuggDB, user_id: str, skill: dict) -> bool:
+    if not _member_can_author(d, skill["collection_id"], user_id):
+        return False
     if skill.get("submitted_by") == user_id:
         return True
     member = d.get_member_status(skill["collection_id"], user_id)

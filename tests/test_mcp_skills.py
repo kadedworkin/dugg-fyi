@@ -312,3 +312,27 @@ member body
     assert denied == {
         "error": "Permission denied — you didn't submit this skill and aren't the collection owner."
     }
+
+
+def test_skill_edit_rejects_demoted_submitter(db, owner, default_collection):
+    contributor = db.create_user("Contributor")
+    db.add_collection_member(default_collection["id"], contributor["id"])
+    source_id = _add_skill(db, user=contributor, collection=default_collection, name="demoted-submitter")
+    db.conn.execute(
+        "UPDATE collection_members SET member_type = 'subscriber' WHERE collection_id = ? AND user_id = ?",
+        (default_collection["id"], contributor["id"]),
+    )
+    db.conn.commit()
+
+    denied = _decode(_handle_skill_edit(db, contributor["id"], {
+        "id": source_id,
+        "new_body": """---
+name: demoted-submitter
+description: Attempted update
+---
+should not land
+""",
+    }))
+    assert denied == {
+        "error": "Permission denied — you didn't submit this skill and aren't the collection owner."
+    }

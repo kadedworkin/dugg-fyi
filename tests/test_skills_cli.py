@@ -116,6 +116,53 @@ new body
     assert "Edited skill editable" in output
 
 
+def test_cmd_skill_fork_rejects_non_member_target_collection(db_path, db, owner, default_collection, capsys):
+    outsider = db.create_user("Outsider")
+    outsider_collection = db.create_collection("Outsider's", outsider["id"])
+    source_id = _add_skill(db, user=outsider, collection=outsider_collection, name="plantable")
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_skill_fork(
+            _args(db_path, outsider, id=source_id, collection=default_collection["id"])
+        )
+
+    assert exc.value.code == 1
+    assert f"Collection not found: {default_collection['id']}" in capsys.readouterr().out
+    d = DuggDB(db_path)
+    try:
+        planted = d.find_skill_version(
+            collection_id=default_collection["id"],
+            submitted_by=outsider["id"],
+            name="plantable",
+            supersedes_id=source_id,
+        )
+        assert planted is None
+    finally:
+        d.close()
+
+
+def test_cmd_skill_edit_rejects_demoted_submitter(db_path, db, owner, default_collection, monkeypatch, capsys):
+    contributor = db.create_user("Contributor")
+    db.add_collection_member(default_collection["id"], contributor["id"])
+    source_id = _add_skill(db, user=contributor, collection=default_collection, name="demoted")
+    db.conn.execute(
+        "UPDATE collection_members SET member_type = 'subscriber' WHERE collection_id = ? AND user_id = ?",
+        (default_collection["id"], contributor["id"]),
+    )
+    db.conn.commit()
+
+    def _fail_editor(cmd, check):
+        raise AssertionError("Editor should not be invoked when permission is denied")
+
+    monkeypatch.setattr("dugg.cli.subprocess.run", _fail_editor)
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_skill_edit(_args(db_path, contributor, id=source_id))
+
+    assert exc.value.code == 1
+    assert "Permission denied" in capsys.readouterr().out
+
+
 def test_cmd_skill_history_prints_chain(db_path, db, owner, default_collection, capsys):
     original_id = _add_skill(db, user=owner, collection=default_collection, name="history-skill")
     current_id = _add_skill(

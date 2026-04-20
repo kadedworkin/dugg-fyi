@@ -2250,16 +2250,18 @@ def _load_skill_markdown_for_edit(skill: dict) -> str:
     return render_skill_markdown(skill.get("frontmatter") or {}, skill.get("body") or "")
 
 
+def _member_can_author(db, collection_id: str, user_id: str) -> bool:
+    member = db.get_member_status(collection_id, user_id)
+    return bool(member) and member.get("status") == "active" and member.get("member_type") != "subscriber"
+
+
 def _can_version_skill(db, user_id: str, skill: dict) -> bool:
+    if not _member_can_author(db, skill["collection_id"], user_id):
+        return False
     if skill.get("submitted_by") == user_id:
         return True
     member = db.get_member_status(skill["collection_id"], user_id)
     return bool(member) and member.get("role") == "owner"
-
-
-def _member_can_author(db, collection_id: str, user_id: str) -> bool:
-    member = db.get_member_status(collection_id, user_id)
-    return bool(member) and member.get("status") == "active" and member.get("member_type") != "subscriber"
 
 
 def cmd_skill_add(args):
@@ -2417,6 +2419,10 @@ def cmd_skill_fork(args):
     if args.collection:
         collection_id = _resolve_collection(db, user["id"], args.collection)
         if not collection_id:
+            print(f"Collection not found: {args.collection}")
+            db.close()
+            sys.exit(1)
+        if not _member_can_author(db, collection_id, user["id"]):
             print(f"Collection not found: {args.collection}")
             db.close()
             sys.exit(1)
