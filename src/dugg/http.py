@@ -1598,6 +1598,132 @@ async function syncNow(e) {
 
         return JSONResponse({"urls": entries, "count": len(entries)})
 
+    # --- Structured JSON API (mobile / typed clients) ---
+    #
+    # The /tools/{tool_name} endpoint returns MCP text blobs intended for
+    # agent consumption. Mobile clients need structured records they can
+    # decode into models, so these endpoints return the raw dicts directly
+    # from DuggDB rather than formatted text. Auth is X-Dugg-Key header
+    # (same as /tools/*), resolved via resolve_user_from_request.
+
+    def _serialize_resource(d: DuggDB, r: dict, submitter_cache: dict[str, str]) -> dict:
+        """Map a DB resource row to the JSON shape the iOS client decodes."""
+        sub_id = r.get("submitted_by", "") or ""
+        if sub_id and sub_id not in submitter_cache:
+            u = d.get_user(sub_id)
+            submitter_cache[sub_id] = u["name"] if u else sub_id
+
+        # Pull published_at from raw_metadata (matches _mcp_pub_date logic).
+        published_at = ""
+        raw = r.get("raw_metadata")
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (ValueError, TypeError):
+                raw = None
+        if isinstance(raw, dict):
+            val = raw.get("published_at") or raw.get("updated_at") or ""
+            s = str(val).strip()
+            if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+                published_at = s[:10]
+
+        tags = [t["label"] for t in r.get("tags", []) if isinstance(t, dict) and t.get("label")]
+
+        return {
+            "id": r["id"],
+            "url": r["url"],
+            "title": r.get("title") or "",
+            "description": r.get("description") or "",
+            "body": r.get("transcript") or "",
+            "note": r.get("note") or "",
+            "tags": tags,
+            "submitter": submitter_cache.get(sub_id, ""),
+            "added_at": r.get("created_at") or "",
+            "published_at": published_at,
+            "source_label": r.get("source_server") or "",
+        }
+
+    async def handle_api_feed(request: Request):
+        """GET /api/feed — structured JSON feed for typed clients (iOS, etc.).
+
+        Auth: X-Dugg-Key header (or dugg_key cookie).
+        Query: ?limit=N (default 50, max 500).
+        Response: {"resources": [{id, url, title, description, note, tags, submitter, added_at, published_at, source_label}, ...]}
+        """
+        try:
+            user = resolve_user_from_request(request)
+        except ValueError as e:
+            return _problem_response(401, str(e))
+
+        try:
+            limit = int(request.query_params.get("limit", "50"))
+        except ValueError:
+            limit = 50
+        limit = max(1, min(limit, 500))
+
+        d = get_db()
+        d.mark_invite_onboarded(user["id"])
+        feed = d.get_feed(user["id"], limit=limit)
+
+        submitter_cache: dict[str, str] = {}
+        resources = [_serialize_resource(d, r, submitter_cache) for r in feed]
+        return JSONResponse({"resources": resources, "count": len(resources)})
+
+    async def handle_api_search(request: Request):
+        """GET /api/search?q=... — structured JSON search for typed clients.
+
+        Auth: X-Dugg-Key header (or dugg_key cookie).
+        Query: ?q=...&limit=N (default 20, max 100).
+        Response: {"resources": [...same shape as /api/feed...]}
+        """
+        try:
+            user = resolve_user_from_request(request)
+        except ValueError as e:
+            return _problem_response(401, str(e))
+
+        query = (request.query_params.get("q") or "").strip()
+        if not query:
+            return JSONResponse({"resources": [], "count": 0})
+
+        try:
+            limit = int(request.query_params.get("limit", "20"))
+        except ValueError:
+            limit = 20
+        limit = max(1, min(limit, 100))
+
+        d = get_db()
+        d.mark_invite_onboarded(user["id"])
+        hits = d.search(query, user["id"], limit=limit)
+
+        submitter_cache: dict[str, str] = {}
+        resources = [_serialize_resource(d, r, submitter_cache) for r in hits]
+        return JSONResponse({"resources": resources, "count": len(resources)})
+
+    async def handle_api_resource(request: Request):
+        """GET /api/resource/{id} — structured JSON for a single resource.
+
+        Auth: X-Dugg-Key header (or dugg_key cookie). 404 if the caller can't
+        see the resource via accessible collections.
+        Response: {"resource": {id, url, title, description, body, note, tags, submitter, added_at, published_at, source_label}}
+        """
+        try:
+            user = resolve_user_from_request(request)
+        except ValueError as e:
+            return _problem_response(401, str(e))
+
+        resource_id = request.path_params["id"]
+        d = get_db()
+        r = d.get_resource(resource_id)
+        if not r:
+            return _problem_response(404, "Resource not found")
+
+        accessible = d._accessible_collection_ids(user["id"])
+        if r.get("collection_id") not in accessible:
+            return _problem_response(404, "Resource not found")
+
+        submitter_cache: dict[str, str] = {}
+        return JSONResponse({"resource": _serialize_resource(d, r, submitter_cache)})
+
     # --- Note Publishing (upstream federation) ---
 
     async def handle_publish_note(request: Request):
@@ -3076,6 +3202,9 @@ async function syncNow(e) {
         Route("/feed/urls/{key}", endpoint=handle_feed_urls),
         Route("/feed", endpoint=handle_feed_bare),
         Route("/feed/{key}", endpoint=handle_feed),
+        Route("/api/feed", endpoint=handle_api_feed),
+        Route("/api/search", endpoint=handle_api_search),
+        Route("/api/resource/{id}", endpoint=handle_api_resource),
         Route("/paste", endpoint=handle_paste_page_bare),
         Route("/paste/submit", endpoint=handle_paste_submit_bare, methods=["POST"]),
         Route("/paste/{key}", endpoint=handle_paste_page),

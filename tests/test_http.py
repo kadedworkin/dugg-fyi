@@ -272,6 +272,113 @@ def test_tool_dispatch_feed(client):
     assert resp.status_code == 200
 
 
+# --- Structured JSON API (/api/*) ---
+
+def _seed_resource(db_path, user, *, url="https://example.com/post",
+                   title="Hello", note="my note", description="desc"):
+    from dugg.db import DuggDB
+    d = DuggDB(db_path)
+    coll_id = d.ensure_default_collection(user["id"])
+    res = d.add_resource(
+        url=url,
+        collection_id=coll_id,
+        submitted_by=user["id"],
+        title=title,
+        note=note,
+        description=description,
+        source_type="article",
+    )
+    d.close()
+    return res["id"]
+
+
+def test_api_feed_requires_auth(client):
+    c, _ = client
+    resp = c.get("/api/feed")
+    assert resp.status_code == 401
+
+
+def test_api_feed_returns_structured_resources(client, db_path, user):
+    c, _ = client
+    _seed_resource(db_path, user)
+    resp = c.get("/api/feed", headers={"X-Dugg-Key": user["api_key"]})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "resources" in data
+    assert data["count"] == 1
+    r = data["resources"][0]
+    assert r["url"] == "https://example.com/post"
+    assert r["title"] == "Hello"
+    assert r["note"] == "my note"
+    assert r["description"] == "desc"
+    assert r["submitter"] == user["name"]
+    assert isinstance(r["tags"], list)
+    assert r["added_at"]
+
+
+def test_api_feed_respects_limit(client, db_path, user):
+    c, _ = client
+    for i in range(3):
+        _seed_resource(db_path, user, url=f"https://example.com/r{i}", title=f"R{i}")
+    resp = c.get("/api/feed?limit=2", headers={"X-Dugg-Key": user["api_key"]})
+    assert resp.status_code == 200
+    assert resp.json()["count"] == 2
+
+
+def test_api_resource_requires_auth(client, db_path, user):
+    c, _ = client
+    res_id = _seed_resource(db_path, user)
+    resp = c.get(f"/api/resource/{res_id}")
+    assert resp.status_code == 401
+
+
+def test_api_resource_returns_structured_row(client, db_path, user):
+    c, _ = client
+    res_id = _seed_resource(db_path, user)
+    resp = c.get(f"/api/resource/{res_id}", headers={"X-Dugg-Key": user["api_key"]})
+    assert resp.status_code == 200
+    r = resp.json()["resource"]
+    assert r["id"] == res_id
+    assert r["title"] == "Hello"
+    assert r["note"] == "my note"
+
+
+def test_api_resource_hides_inaccessible(client, db_path, user):
+    """User without access to a resource's collection should see 404."""
+    c, _ = client
+    from dugg.db import DuggDB
+    d = DuggDB(db_path)
+    other = d.create_user("Outsider")
+    private_coll = d.create_collection("Private", other["id"], visibility="private")
+    res = d.add_resource(
+        url="https://private.example.com",
+        collection_id=private_coll["id"],
+        submitted_by=other["id"],
+        title="Secret",
+    )
+    d.close()
+    resp = c.get(f"/api/resource/{res['id']}", headers={"X-Dugg-Key": user["api_key"]})
+    assert resp.status_code == 404
+
+
+def test_api_search_returns_structured_resources(client, db_path, user):
+    c, _ = client
+    _seed_resource(db_path, user, url="https://example.com/rust", title="rust performance")
+    _seed_resource(db_path, user, url="https://example.com/py", title="python tricks")
+    resp = c.get("/api/search?q=rust", headers={"X-Dugg-Key": user["api_key"]})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["count"] >= 1
+    assert any("rust" in r["title"].lower() for r in data["resources"])
+
+
+def test_api_search_empty_query(client):
+    c, user = client
+    resp = c.get("/api/search?q=", headers={"X-Dugg-Key": user["api_key"]})
+    assert resp.status_code == 200
+    assert resp.json() == {"resources": [], "count": 0}
+
+
 # --- Events stream ---
 
 def test_events_stream_requires_auth(client):
