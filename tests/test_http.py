@@ -312,6 +312,7 @@ def test_api_feed_returns_structured_resources(client, db_path, user):
     assert r["note"] == "my note"
     assert r["description"] == "desc"
     assert r["submitter"] == user["name"]
+    assert r["source_type"] == "article"
     assert isinstance(r["tags"], list)
     assert r["added_at"]
 

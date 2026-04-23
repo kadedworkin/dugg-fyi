@@ -1640,6 +1640,7 @@ async function syncNow(e) {
             "submitter": submitter_cache.get(sub_id, ""),
             "added_at": r.get("created_at") or "",
             "published_at": published_at,
+            "source_type": r.get("source_type") or "",
             "source_label": r.get("source_server") or "",
         }
 
