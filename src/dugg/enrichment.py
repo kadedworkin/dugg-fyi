@@ -221,6 +221,10 @@ def detect_source_type(url: str) -> str:
         return "reddit"
     if any(h in host for h in ("podcasts.apple.com", "spotify.com", "overcast.fm")):
         return "podcast"
+    # Bare domain (no path, or just "/") — the homepage of a site rather
+    # than a specific article on it.
+    if (parsed.path or "").strip("/") == "":
+        return "website"
     return "article"
 
 

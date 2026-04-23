@@ -50,6 +50,7 @@ REGISTRY: dict[str, SourceSpec] = {
         primary_label="Open in YouTube",
     ),
     "article":  SourceSpec(badge=Badge("Article",  "#2563EB")),
+    "website":  SourceSpec(badge=Badge("Website",  "#475569")),
     "tweet":    SourceSpec(badge=Badge("Tweet",    "#1DA1F2")),
     "github":   SourceSpec(badge=Badge("GitHub",   "#24292E")),
     "reddit":   SourceSpec(badge=Badge("Reddit",   "#FF4500")),
