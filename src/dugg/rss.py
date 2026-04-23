@@ -23,6 +23,7 @@ from urllib.parse import parse_qs, urlparse
 import feedparser
 import httpx
 
+from dugg.enrichment import detect_source_type, extract_youtube_id
 from dugg.skills import parse_skill_markdown
 
 logger = logging.getLogger("dugg.rss")
@@ -309,6 +310,13 @@ def ingest_entry(
                 db.conn.commit()
             return db.get_resource(resource_id) or {"id": resource_id}
 
+    source_type = detect_source_type(entry.url)
+    thumbnail = ""
+    if source_type == "youtube":
+        video_id = extract_youtube_id(entry.url)
+        if video_id:
+            thumbnail = f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg"
+
     result = db.add_resource(
         url=entry.url,
         collection_id=collection_id,
@@ -316,7 +324,8 @@ def ingest_entry(
         title=entry.title,
         description=entry.description,
         author=entry.author,
-        source_type="article",
+        source_type=source_type,
+        thumbnail=thumbnail,
         raw_metadata=raw_metadata,
         tags=tags,
         tag_source="agent",

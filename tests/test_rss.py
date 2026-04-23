@@ -164,6 +164,29 @@ def test_ingest_entry_adds_resource_with_metadata(db, user_and_collection):
     assert "rss" in [t["label"] if isinstance(t, dict) else t for t in full.get("tags") or []]
 
 
+def test_ingest_entry_infers_source_type_from_url(db, user_and_collection):
+    """Source type should be detected from the URL, not hardcoded to 'article'.
+    Regression: cross-server sync (Private subscribing to chino-bandido's Atom)
+    was tagging YouTube entries as 'article'."""
+    user, coll_id = user_and_collection
+    cases = [
+        ("https://www.youtube.com/watch?v=dQw4w9WgXcQ", "youtube",
+         "https://img.youtube.com/vi/dQw4w9WgXcQ/maxresdefault.jpg"),
+        ("https://youtu.be/dQw4w9WgXcQ", "youtube",
+         "https://img.youtube.com/vi/dQw4w9WgXcQ/maxresdefault.jpg"),
+        ("https://github.com/kadedworkin/dugg-fyi", "github", ""),
+        ("https://example.com/", "website", ""),
+        ("https://example.com/some/article", "article", ""),
+    ]
+    for i, (url, expected_type, expected_thumb) in enumerate(cases):
+        entry = FeedEntry(entry_id=f"e-{i}", url=url, title="t", description="",
+                          published_at="", author="", is_private=False)
+        res = ingest_entry(db, entry, collection_id=coll_id, submitted_by=user["id"])
+        full = db.get_resource(res["id"])
+        assert full["source_type"] == expected_type, f"{url} → {full['source_type']} (want {expected_type})"
+        assert full["thumbnail"] == expected_thumb, f"{url} thumb → {full['thumbnail']!r} (want {expected_thumb!r})"
+
+
 def test_ingest_entry_flags_private_link(db, user_and_collection):
     user, coll_id = user_and_collection
     entry = FeedEntry(
