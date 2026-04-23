@@ -1644,6 +1644,7 @@ async function syncNow(e) {
             "published_at": published_at,
             "source_type": source_type,
             "source_label": r.get("source_server") or "",
+            "thumbnail": r.get("thumbnail") or "",
         }
         hints = hints_for(source_type, r["url"])
         if hints is not None:

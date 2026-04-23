@@ -276,7 +276,7 @@ def test_tool_dispatch_feed(client):
 
 def _seed_resource(db_path, user, *, url="https://example.com/post",
                    title="Hello", note="my note", description="desc",
-                   source_type="article"):
+                   source_type="article", thumbnail=""):
     from dugg.db import DuggDB
     d = DuggDB(db_path)
     coll_id = d.ensure_default_collection(user["id"])
@@ -288,6 +288,7 @@ def _seed_resource(db_path, user, *, url="https://example.com/post",
         note=note,
         description=description,
         source_type=source_type,
+        thumbnail=thumbnail,
     )
     d.close()
     return res["id"]
@@ -319,6 +320,17 @@ def test_api_feed_returns_structured_resources(client, db_path, user):
     # article badge hint but no deep link
     assert r["source_hints"]["badge"] == {"label": "Article", "color": "#2563EB"}
     assert r["source_hints"]["primary"] == {"label": "Open in Safari"}
+
+
+def test_api_feed_includes_thumbnail(client, db_path, user):
+    c, _ = client
+    _seed_resource(
+        db_path, user,
+        url="https://example.com/with-image",
+        thumbnail="https://example.com/og.jpg",
+    )
+    resp = c.get("/api/feed", headers={"X-Dugg-Key": user["api_key"]})
+    assert resp.json()["resources"][0]["thumbnail"] == "https://example.com/og.jpg"
 
 
 def test_api_feed_includes_youtube_deep_link(client, db_path, user):
