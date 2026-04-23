@@ -275,7 +275,8 @@ def test_tool_dispatch_feed(client):
 # --- Structured JSON API (/api/*) ---
 
 def _seed_resource(db_path, user, *, url="https://example.com/post",
-                   title="Hello", note="my note", description="desc"):
+                   title="Hello", note="my note", description="desc",
+                   source_type="article"):
     from dugg.db import DuggDB
     d = DuggDB(db_path)
     coll_id = d.ensure_default_collection(user["id"])
@@ -286,7 +287,7 @@ def _seed_resource(db_path, user, *, url="https://example.com/post",
         title=title,
         note=note,
         description=description,
-        source_type="article",
+        source_type=source_type,
     )
     d.close()
     return res["id"]
@@ -315,6 +316,27 @@ def test_api_feed_returns_structured_resources(client, db_path, user):
     assert r["source_type"] == "article"
     assert isinstance(r["tags"], list)
     assert r["added_at"]
+    # article badge hint but no deep link
+    assert r["source_hints"]["badge"] == {"label": "Article", "color": "#2563EB"}
+    assert r["source_hints"]["primary"] == {"label": "Open in Safari"}
+
+
+def test_api_feed_includes_youtube_deep_link(client, db_path, user):
+    c, _ = client
+    _seed_resource(
+        db_path, user,
+        url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        source_type="youtube",
+    )
+    resp = c.get("/api/feed", headers={"X-Dugg-Key": user["api_key"]})
+    assert resp.status_code == 200
+    r = resp.json()["resources"][0]
+    assert r["source_hints"]["badge"] == {"label": "YouTube", "color": "#DC2626"}
+    assert r["source_hints"]["primary"] == {
+        "label": "Open in YouTube",
+        "scheme": "youtube",
+        "deep_link": "youtube://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    }
 
 
 def test_api_feed_respects_limit(client, db_path, user):

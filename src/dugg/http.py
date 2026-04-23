@@ -32,6 +32,7 @@ from starlette.routing import Route
 from mcp.server.sse import SseServerTransport
 
 from dugg.db import DuggDB
+from dugg.source_registry import hints_for
 from dugg.sync import start_sync_daemon
 from dugg.rss import start_rss_daemon
 from dugg.skills import parse_skill_markdown, render_skill_markdown, validate_skill_name
@@ -1629,7 +1630,8 @@ async function syncNow(e) {
 
         tags = [t["label"] for t in r.get("tags", []) if isinstance(t, dict) and t.get("label")]
 
-        return {
+        source_type = r.get("source_type") or ""
+        payload = {
             "id": r["id"],
             "url": r["url"],
             "title": r.get("title") or "",
@@ -1640,9 +1642,13 @@ async function syncNow(e) {
             "submitter": submitter_cache.get(sub_id, ""),
             "added_at": r.get("created_at") or "",
             "published_at": published_at,
-            "source_type": r.get("source_type") or "",
+            "source_type": source_type,
             "source_label": r.get("source_server") or "",
         }
+        hints = hints_for(source_type, r["url"])
+        if hints is not None:
+            payload["source_hints"] = hints
+        return payload
 
     async def handle_api_feed(request: Request):
         """GET /api/feed — structured JSON feed for typed clients (iOS, etc.).
