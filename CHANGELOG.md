@@ -2,6 +2,27 @@
 
 Dugg follows date-versioned releases: `vYYYY.MM.DD` on each shipped day, with `.N` suffixes if a day ships multiple times. Each release ships from `main` with the commit tagged at release time.
 
+## v2026.04.24.1
+
+Per-note edit and delete. The .0 release let users edit the resource row but not individual notes attached to it — if a second user dropped a sibling note on someone else's entry, there was no way to revise or remove it. Long-press on a note now surfaces Edit/Delete for notes the viewer authored.
+
+### Added
+
+- **`POST /api/note/edit`.** Author-gated text edit on a sibling note. Logs `resource_edits` with `field='note'` so note-swap shows up in the audit trail alongside URL-swap.
+- **`POST /api/note/delete`.** Author-gated hard-delete. Records the deletion in the audit trail (old=text, new="") so moderators can still see what was removed.
+- **Per-note `id` / `can_edit` / `can_delete` on `/api/*` payloads.** Primary note has `id=""` and routes through `/api/edit`; sibling notes have real ids and route through the new endpoints. iOS uses the flags to gate the long-press context menu.
+
+### iOS
+
+Matching ship in `dugg-ios`:
+- `NoteBlock` gets a `.contextMenu` with Edit / Delete, shown only for notes the viewer authored.
+- `EditNoteSheet` for inline note editing.
+- **Bug fix (merged feed):** `EditResourceSheet` and `EditNoteSheet` previously computed their target server as `activeServer ?? firstServer`, ignoring the origin-server pin from the merged "All" feed. Tapping a chino-bandido item while the active server was private routed the edit POST to private Dugg with a chino-bandido resource id — 403/404 from iOS's perspective, and editing appeared to work only against the active server. Both sheets now take `targetServerID` from the detail view and resolve the viewer's key on the right server.
+
+### Tests
+
+366 passing (+4 this release): sibling-note edit by author round-trips and audits; non-author edit is 403; sibling-note delete by author removes the row and records the deletion; per-note can_edit/can_delete shape (own primary true, other's sibling false, own sibling true).
+
 ## v2026.04.24
 
 Edit, delete, and audit trail for resources. iOS clients (and any API caller) can now add sibling notes, edit URL / title / description / note, delete submitter-or-owner entries, and view a full per-field history of mutations — with a strict separation between human-driven edits (audited) and machine enrichment (not).
