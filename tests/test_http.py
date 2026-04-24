@@ -997,6 +997,68 @@ def test_ingest_leaves_sibling_note_unattributed_when_name_does_not_match(client
     assert n["can_delete"] is False
 
 
+def test_feed_html_shows_per_note_edit_buttons_on_own_notes(client, db_path, user):
+    """The browser feed must render inline edit/delete buttons on notes the
+    viewer authored, and NOT on notes attributed to others. Regression for
+    the note-swap UX: previously the card-level 'edit' button replaced the
+    primary note regardless of who submitted it."""
+    from dugg.db import DuggDB
+    c, _ = client
+    d = DuggDB(db_path)
+    other = d.create_user("Other")
+    coll = d.create_collection("Shared", user["id"], visibility="shared")
+    d.invite_member(coll["id"], user["id"], other["id"])
+    res = d.add_resource(url="https://example.com/x", collection_id=coll["id"],
+                         submitted_by=user["id"], title="Shared",
+                         note="my primary")
+    other_note = d.add_resource_note(res["id"], "Other's take",
+                                     submitter_user_id=other["id"],
+                                     submitter_name=other["name"])
+    my_note = d.add_resource_note(res["id"], "my sibling",
+                                  submitter_user_id=user["id"],
+                                  submitter_name=user["name"])
+    d.close()
+
+    # Authed via cookie-style: the HTML feed reads the key from cookie, so
+    # we attach it as a cookie for the test client.
+    c.cookies.set("dugg_key", user["api_key"])
+    resp = c.get(f"/feed/{user['api_key']}", follow_redirects=True)
+    assert resp.status_code == 200
+    html = resp.text
+    # Primary note (viewer is submitter) — row carries kind=primary and
+    # ownership buttons are present.
+    assert 'data-note-kind="primary"' in html
+    assert f'data-resource-id="{res["id"]}"' in html
+    # Sibling notes: viewer's own sibling row includes edit buttons.
+    assert f'data-note-id="{my_note["id"]}"' in html
+    # Use a slice focused on the viewer's sibling row to assert buttons.
+    my_row_start = html.find(f'data-note-id="{my_note["id"]}"')
+    my_row_end = html.find('</div>', my_row_start)
+    my_row = html[my_row_start:my_row_end + 6]
+    assert 'beginNoteEdit' in my_row
+    assert 'deleteNoteRow' in my_row
+    # Other's sibling row must NOT carry edit/delete buttons for this viewer.
+    other_row_start = html.find(f'data-note-id="{other_note["id"]}"')
+    other_row_end = html.find('</div>', other_row_start)
+    other_row = html[other_row_start:other_row_end + 6]
+    assert 'beginNoteEdit' not in other_row
+    assert 'deleteNoteRow' not in other_row
+
+
+def test_feed_html_has_add_note_button_on_every_card(client, db_path, user):
+    """Every card must surface an 'add note' affordance — siblings are the
+    only way a non-submitter can contribute to a shared entry."""
+    c, _ = client
+    res_id = _seed_resource(db_path, user)
+    c.cookies.set("dugg_key", user["api_key"])
+    resp = c.get(f"/feed/{user['api_key']}", follow_redirects=True)
+    assert resp.status_code == 200
+    html = resp.text
+    assert 'add-note-btn' in html
+    assert f'data-resource-id="{res_id}"' in html
+    assert 'beginAddNote' in html
+
+
 def test_api_resource_exposes_per_note_can_edit_delete(client, db_path, user):
     """iOS's per-note context menu keys off can_edit/can_delete on each
     note entry. Viewer gets true only for their own notes."""

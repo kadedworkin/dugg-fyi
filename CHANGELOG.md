@@ -2,6 +2,25 @@
 
 Dugg follows date-versioned releases: `vYYYY.MM.DD` on each shipped day, with `.N` suffixes if a day ships multiple times. Each release ships from `main` with the commit tagged at release time.
 
+## v2026.04.24.3
+
+Browser feed catches up to iOS for per-note editing. Previously the card-level "edit" button rewrote the resource's primary note regardless of who clicked it, which is why Kade's "secondary browser note" landed unattributed and uneditable — he was actually replacing the primary note (attributed to the resource submitter), not creating his own.
+
+### Changed
+
+- **Per-note edit/delete buttons in `/feed`.** Each rendered note (primary + every sibling) now carries `data-note-id` / `data-note-kind` / `data-resource-id` and renders inline `edit` / `delete` micro-buttons. Buttons are *only* rendered server-side for the note's actual author, so non-owners never see them and the markup itself is the gate.
+- **Routing per kind.** Primary notes (kind=`primary`, empty note-id) route through `/api/edit` with `{resource_id, note}`; sibling notes route through `/api/note/edit` and `/api/note/delete` with the sibling's id. Both surfaces share the same audit-trail and soft-delete plumbing as iOS.
+- **Add-note button on every card.** `add note` opens an inline composer that POSTs `/api/note` to attach a sibling — the only way a non-submitter can contribute. The card-level `delete` button (formerly "delete") is now `delete item` so the destructive scope is clear vs. per-note delete.
+
+### Removed
+
+- The single card-level `edit` button that called `/tools/dugg_edit` and replaced the primary note. Its job is now split across per-note edit (correctly attributed) and the add-note composer (creates a sibling).
+- The publish-on-edit shortcut (`publishNote`) — it depended on the old card-level edit form. Federation publishing has its own paths and didn't need to be wedged into the inline edit flow.
+
+### Tests
+
+372 passing (+2 this release): GET `/feed` HTML renders edit/delete buttons only on the viewer's own notes; every card carries the add-note affordance.
+
 ## v2026.04.24.2
 
 Three fixes Kade surfaced while stress-testing per-note edit across home + federated servers:

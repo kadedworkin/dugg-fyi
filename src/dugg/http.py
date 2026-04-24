@@ -623,7 +623,17 @@ async function doSetup() {{
   .card-desc {{ font-size: 0.85rem; color: #999; margin: 0.5rem 0; line-height: 1.5;
                 display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }}
   .card .note {{ font-size: 0.85rem; color: #aaa; margin-top: 0.5rem; padding: 0.6rem 0.8rem;
-                border-radius: 6px; border-left: 3px solid #333; background: #111; }}
+                border-radius: 6px; border-left: 3px solid #333; background: #111;
+                display: flex; align-items: flex-start; gap: 0.5rem; flex-wrap: wrap; }}
+  .card .note-body {{ flex: 1 1 auto; min-width: 0; word-break: break-word; }}
+  .card .note-actions {{ flex: 0 0 auto; display: flex; gap: 0.25rem; opacity: 0.4; transition: opacity 0.15s; }}
+  .card .note:hover .note-actions {{ opacity: 1; }}
+  .card .note-action-btn {{ font-size: 0.7rem; padding: 0.1rem 0.4rem; background: transparent;
+                           border: 1px solid #333; color: #888; border-radius: 3px; cursor: pointer; width: auto; }}
+  .card .note-action-btn:hover {{ color: #ccc; border-color: #555; background: #1a1a1a; }}
+  .card .note-action-btn.note-action-del:hover {{ color: #f87171; border-color: #7f1d1d; }}
+  .card .note-edit-form, .card .add-note-form {{ flex: 1 1 100%; margin-top: 0.4rem; }}
+  .card .add-note-form {{ margin-top: 0.6rem; padding: 0.5rem; border: 1px dashed #333; border-radius: 6px; }}
   .card .note-local-mine {{ border-left-color: #6366f1; background: rgba(99, 102, 241, 0.08); color: #c7c8ff; }}
   .card .note-remote-mine {{ border-left-color: #3b82f6; background: rgba(59, 130, 246, 0.08); color: #93c5fd; }}
   .card .note-other {{ border-left-color: #f59e0b; background: rgba(245, 158, 11, 0.06); color: #fcd34d; }}
@@ -1150,19 +1160,6 @@ async function doSetup() {{
             for r in feed:
                 title = r.get("title") or r["url"]
                 sibling_notes = d.list_resource_notes(r["id"])
-                siblings_html = ""
-                if sibling_notes:
-                    sib_parts = []
-                    for sn in sibling_notes:
-                        who = _xml_escape(sn.get("submitter_name") or "someone")
-                        origin = sn.get("source_server") or ""
-                        origin_label = f' <span class="sib-origin">via {_xml_escape(origin)}</span>' if origin else ""
-                        sib_is_mine = sn.get("submitted_by") == user["id"]
-                        sib_class = "note sibling note-remote-mine" if sib_is_mine else "note sibling note-other"
-                        sib_parts.append(
-                            f'<p class="{sib_class}"><span class="sib-who">{who}{origin_label}:</span> {_xml_escape(sn["note"])}</p>'
-                        )
-                    siblings_html = "".join(sib_parts)
                 # Submitter name
                 sub_id = r.get("submitted_by", "")
                 if sub_id and sub_id not in submitter_cache:
@@ -1180,15 +1177,61 @@ async function doSetup() {{
                     url = "/r/" + url.removeprefix("dugg://content/")
                 coll_id = r.get("collection_id", "")
                 source_srv = r.get("source_server") or ""
-                note_escaped = _xml_escape(r.get("note") or "")
-                # Note color: local-mine (indigo), remote-mine (blue), others (neutral)
-                is_mine = sub_id == user["id"]
+                is_submitter = sub_id == user["id"]
                 is_local = not source_srv
+
+                # Render notes (primary + siblings) as individual rows with
+                # per-note edit/delete buttons gated on ownership. The JS
+                # side routes primary (data-note-kind=primary) through
+                # /api/edit and siblings through /api/note/edit.
+                def _render_note_row(note_id: str, kind: str,
+                                     who: str, text: str, origin: str,
+                                     can_mutate: bool, color_class: str) -> str:
+                    who_html = ""
+                    if kind == "sibling":
+                        origin_label = f' <span class="sib-origin">via {_xml_escape(origin)}</span>' if origin else ""
+                        who_html = f'<span class="sib-who">{_xml_escape(who)}{origin_label}:</span> '
+                    actions = ""
+                    if can_mutate:
+                        actions = (
+                            '<span class="note-actions">'
+                            '<button class="note-action-btn" onclick="beginNoteEdit(this)">edit</button>'
+                            '<button class="note-action-btn note-action-del" onclick="deleteNoteRow(this)">delete</button>'
+                            '</span>'
+                        )
+                    return (
+                        f'<div class="note {color_class}" '
+                        f'data-note-id="{_xml_escape(note_id)}" '
+                        f'data-note-kind="{kind}" '
+                        f'data-resource-id="{r["id"]}">'
+                        f'<span class="note-body">{who_html}<span class="note-text">{_xml_escape(text)}</span></span>'
+                        f'{actions}'
+                        f'</div>'
+                    )
+
+                notes_html_parts: list[str] = []
                 if r.get("note"):
-                    note_class = "note note-local-mine" if is_mine and is_local else ("note note-remote-mine" if is_mine else "note note-other")
-                    note_display = f'<p class="{note_class}" id="note-{r["id"]}">{note_escaped}</p>'
-                else:
-                    note_display = f'<p class="note" id="note-{r["id"]}" style="display:none;"></p>'
+                    primary_class = "note-local-mine" if is_submitter and is_local else ("note-remote-mine" if is_submitter else "note-other")
+                    notes_html_parts.append(_render_note_row(
+                        note_id="", kind="primary",
+                        who=submitter_name, text=r["note"],
+                        origin="", can_mutate=is_submitter,
+                        color_class=primary_class,
+                    ))
+                for sn in sibling_notes:
+                    sib_author_id = sn.get("submitter_user_id") or ""
+                    sib_is_mine = bool(sib_author_id and sib_author_id == user["id"])
+                    sib_class = "sibling note-local-mine" if sib_is_mine else "sibling note-other"
+                    notes_html_parts.append(_render_note_row(
+                        note_id=sn.get("id", ""), kind="sibling",
+                        who=sn.get("submitter_name") or "someone",
+                        text=sn.get("note") or "",
+                        origin=sn.get("source_server") or "",
+                        can_mutate=sib_is_mine,
+                        color_class=sib_class,
+                    ))
+                notes_html = "".join(notes_html_parts)
+
                 # Thumbnail
                 thumb = r.get("thumbnail") or ""
                 thumb_html = f'<img src="{_xml_escape(thumb)}" alt="" class="card-thumb" loading="lazy">' if thumb else ""
@@ -1214,12 +1257,11 @@ async function doSetup() {{
     <h3><a href="{url}" target="_blank" rel="noopener">{_xml_escape(title)}</a> {type_badge}</h3>
     <p class="meta">{author_html}{by_html} · {added_date}{pub_html}</p>
     {desc_html}
-    {note_display}
-    {siblings_html}
+    <div class="notes-block">{notes_html}</div>
     {tags_html}
     <div class="item-actions">
-      <button class="action-btn edit-btn" onclick="editNote('{r["id"]}')">edit</button>
-      <button class="action-btn delete-btn" onclick="deleteItem('{r["id"]}')">delete</button>
+      <button class="action-btn add-note-btn" onclick="beginAddNote(this)" data-resource-id="{r["id"]}">add note</button>
+      <button class="action-btn delete-btn" onclick="deleteItem('{r["id"]}')">delete item</button>
     </div>
   </div>
 </div>\n"""
@@ -1315,80 +1357,155 @@ searchInput.addEventListener('input', function() {
   }, 400);
 });
 
-function editNote(id) {
-  const noteEl = document.getElementById('note-' + id);
-  const current = noteEl.textContent || '';
-  const actionsEl = noteEl.parentElement.querySelector('.item-actions');
-  const sourceServer = document.getElementById('item-' + id).dataset.sourceServer || '';
+// --- Per-note edit/delete (primary + siblings) ---
+//
+// Notes render as `<div class="note" data-note-id="…" data-note-kind="primary|sibling" data-resource-id="…">`.
+// Primary notes carry empty note-id and route edits through /api/edit; sibling notes carry a real id
+// and route through /api/note/edit and /api/note/delete. Ownership was already decided server-side;
+// non-owners never see the buttons.
+
+function _findNoteRow(btn) {
+  return btn.closest('.note');
+}
+
+function beginNoteEdit(btn) {
+  const row = _findNoteRow(btn);
+  if (!row) return;
+  const textEl = row.querySelector('.note-text');
+  const current = textEl ? textEl.textContent : '';
+  // Stash the original so cancel restores it verbatim.
+  row.dataset.originalText = current;
+  const bodyEl = row.querySelector('.note-body');
+  const actionsEl = row.querySelector('.note-actions');
   const editor = document.createElement('div');
-  editor.className = 'edit-form';
-  const publishBtn = sourceServer
-    ? `<button class="action-btn publish-btn" onclick="publishNote('${id}')">publish</button>`
-    : '';
-  editor.innerHTML = `<textarea class="edit-input" id="edit-${id}">${current}</textarea>
-    <div class="edit-buttons">
-      <button class="action-btn save-btn" onclick="saveNote('${id}')">save</button>
-      ${publishBtn}
-      <button class="action-btn" onclick="cancelEdit('${id}', '${current.replace(/'/g, "\\\\'")}')">cancel</button>
-    </div>`;
-  noteEl.style.display = 'none';
-  actionsEl.style.display = 'none';
-  noteEl.parentElement.insertBefore(editor, actionsEl);
+  editor.className = 'note-edit-form';
+  const ta = document.createElement('textarea');
+  ta.className = 'edit-input';
+  ta.value = current;
+  const btnRow = document.createElement('div');
+  btnRow.className = 'edit-buttons';
+  const save = document.createElement('button');
+  save.className = 'action-btn save-btn';
+  save.textContent = 'save';
+  save.onclick = () => saveNoteEdit(row, ta);
+  const cancel = document.createElement('button');
+  cancel.className = 'action-btn';
+  cancel.textContent = 'cancel';
+  cancel.onclick = () => cancelNoteEdit(row);
+  btnRow.appendChild(save);
+  btnRow.appendChild(cancel);
+  editor.appendChild(ta);
+  editor.appendChild(btnRow);
+  if (bodyEl) bodyEl.style.display = 'none';
+  if (actionsEl) actionsEl.style.display = 'none';
+  row.appendChild(editor);
+  ta.focus();
 }
 
-function cancelEdit(id, original) {
-  const form = document.querySelector('#item-' + id + ' .edit-form');
+function cancelNoteEdit(row) {
+  const form = row.querySelector('.note-edit-form');
   if (form) form.remove();
-  const noteEl = document.getElementById('note-' + id);
-  const actionsEl = document.querySelector('#item-' + id + ' .item-actions');
-  if (original) noteEl.style.display = '';
-  actionsEl.style.display = '';
+  const body = row.querySelector('.note-body');
+  const actions = row.querySelector('.note-actions');
+  if (body) body.style.display = '';
+  if (actions) actions.style.display = '';
 }
 
-async function saveNote(id) {
-  const textarea = document.getElementById('edit-' + id);
-  const newNote = textarea.value.trim();
+async function saveNoteEdit(row, ta) {
+  const newText = (ta.value || '').trim();
+  if (!newText) { alert('Note cannot be empty. Use delete instead.'); return; }
+  const kind = row.dataset.noteKind;
+  const noteId = row.dataset.noteId || '';
+  const resourceId = row.dataset.resourceId;
   try {
-    const res = await fetch(BASE + '/tools/dugg_edit', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ resource_id: id, note: newNote }),
-    });
-    if (!res.ok) { alert('Failed to save'); return; }
-    const noteEl = document.getElementById('note-' + id);
-    noteEl.textContent = newNote;
-    noteEl.style.display = newNote ? '' : 'none';
-    const form = document.querySelector('#item-' + id + ' .edit-form');
-    if (form) form.remove();
-    document.querySelector('#item-' + id + ' .item-actions').style.display = '';
+    let res;
+    if (kind === 'primary') {
+      res = await fetch(BASE + '/api/edit', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ resource_id: resourceId, note: newText }),
+      });
+    } else {
+      res = await fetch(BASE + '/api/note/edit', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ note_id: noteId, text: newText }),
+      });
+    }
+    if (!res.ok) { alert('Failed to save (' + res.status + ')'); return; }
+    const textEl = row.querySelector('.note-text');
+    if (textEl) textEl.textContent = newText;
+    cancelNoteEdit(row);
   } catch (e) { alert('Error: ' + e.message); }
 }
 
-async function publishNote(id) {
-  const textarea = document.getElementById('edit-' + id);
-  const note = textarea.value.trim();
-  if (!note) { alert('Write a note before publishing'); return; }
-  await saveNote(id);
-  const btn = document.querySelector('#item-' + id + ' .publish-btn');
-  if (btn) { btn.textContent = 'publishing...'; btn.disabled = true; }
+async function deleteNoteRow(btn) {
+  const row = _findNoteRow(btn);
+  if (!row) return;
+  if (!confirm('Delete this note?')) return;
+  const kind = row.dataset.noteKind;
+  const noteId = row.dataset.noteId || '';
+  const resourceId = row.dataset.resourceId;
   try {
-    const res = await fetch(BASE + '/publish-note', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ resource_id: id, note: note }),
-    });
-    if (res.ok) {
-      if (btn) btn.textContent = 'published!';
-      setTimeout(() => { if (btn) { btn.textContent = 'publish'; btn.disabled = false; } }, 2000);
+    let res;
+    if (kind === 'primary') {
+      res = await fetch(BASE + '/api/edit', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ resource_id: resourceId, note: '' }),
+      });
     } else {
-      const data = await res.json().catch(() => ({}));
-      alert('Publish failed: ' + (data.error || res.status));
-      if (btn) { btn.textContent = 'publish'; btn.disabled = false; }
+      res = await fetch(BASE + '/api/note/delete', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ note_id: noteId }),
+      });
     }
-  } catch (e) {
-    alert('Publish error: ' + e.message);
-    if (btn) { btn.textContent = 'publish'; btn.disabled = false; }
-  }
+    if (!res.ok) { alert('Failed to delete (' + res.status + ')'); return; }
+    row.style.opacity = '0.3';
+    setTimeout(() => row.remove(), 250);
+  } catch (e) { alert('Error: ' + e.message); }
+}
+
+function beginAddNote(btn) {
+  const resourceId = btn.dataset.resourceId;
+  const card = document.getElementById('item-' + resourceId);
+  if (!card) return;
+  if (card.querySelector('.add-note-form')) return; // already open
+  const notesBlock = card.querySelector('.notes-block');
+  const form = document.createElement('div');
+  form.className = 'add-note-form';
+  const ta = document.createElement('textarea');
+  ta.className = 'edit-input';
+  ta.placeholder = 'Your note…';
+  const btnRow = document.createElement('div');
+  btnRow.className = 'edit-buttons';
+  const post = document.createElement('button');
+  post.className = 'action-btn save-btn';
+  post.textContent = 'post note';
+  post.onclick = () => submitNewNote(resourceId, ta, form, card);
+  const cancel = document.createElement('button');
+  cancel.className = 'action-btn';
+  cancel.textContent = 'cancel';
+  cancel.onclick = () => form.remove();
+  btnRow.appendChild(post);
+  btnRow.appendChild(cancel);
+  form.appendChild(ta);
+  form.appendChild(btnRow);
+  notesBlock.appendChild(form);
+  ta.focus();
+}
+
+async function submitNewNote(resourceId, ta, form, card) {
+  const text = (ta.value || '').trim();
+  if (!text) return;
+  try {
+    const res = await fetch(BASE + '/api/note', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ resource_id: resourceId, note: text }),
+    });
+    if (!res.ok) { alert('Failed to post (' + res.status + ')'); return; }
+    // Soft-reload the card by navigating — easier than re-rendering the
+    // sibling row client-side from the returned payload (we'd need the
+    // viewer's name and the ownership class logic).
+    window.location.reload();
+  } catch (e) { alert('Error: ' + e.message); }
 }
 
 async function deleteItem(id) {
