@@ -1607,11 +1607,21 @@ async function syncNow(e) {
     # from DuggDB rather than formatted text. Auth is X-Dugg-Key header
     # (same as /tools/*), resolved via resolve_user_from_request.
 
+    def _can_mutate_resource(d: DuggDB, r: dict, user_id: str) -> bool:
+        """Submitter-or-owner gate shared by edit/delete authorization."""
+        if r.get("submitted_by") == user_id:
+            return True
+        member = d.get_member_status(r.get("collection_id", ""), user_id)
+        return bool(member and member["role"] == "owner")
+
     def _serialize_resource(
         d: DuggDB,
         r: dict,
         submitter_cache: dict[str, str],
         sibling_notes: Optional[list[dict]] = None,
+        *,
+        viewer_id: str = "",
+        edit_count: Optional[int] = None,
     ) -> dict:
         """Map a DB resource row to the JSON shape the iOS client decodes.
 
@@ -1680,6 +1690,14 @@ async function syncNow(e) {
         hints = hints_for(source_type, r["url"])
         if hints is not None:
             payload["source_hints"] = hints
+
+        if viewer_id:
+            can_mutate = _can_mutate_resource(d, r, viewer_id)
+            payload["can_edit"] = can_mutate
+            payload["can_delete"] = can_mutate
+        if edit_count is not None:
+            payload["edit_count"] = edit_count
+
         return payload
 
     async def handle_api_feed(request: Request):
@@ -1774,7 +1792,169 @@ async function syncNow(e) {
 
         submitter_cache: dict[str, str] = {}
         sibs = d.list_resource_notes(resource_id)
-        return JSONResponse({"resource": _serialize_resource(d, r, submitter_cache, sibs)})
+        edit_count = len(d.list_resource_edits(resource_id))
+        return JSONResponse({"resource": _serialize_resource(
+            d, r, submitter_cache, sibs,
+            viewer_id=user["id"], edit_count=edit_count,
+        )})
+
+    async def handle_api_note(request: Request):
+        """POST /api/note — attach a sibling note to an existing resource.
+
+        Auth: X-Dugg-Key header (or dugg_key cookie).
+        Body: {"resource_id": "...", "note": "..."}
+        Any authenticated user who can see the resource (via accessible
+        collections) can add their own sibling note. The note is attributed
+        to the caller's user id + display name. Idempotent via the
+        resource_notes UNIQUE constraint — the same author posting the same
+        text silently no-ops.
+
+        Response: {"note": {author, note, added_at, source_server}} — the
+        serialized note in the same shape the feed/search/resource endpoints
+        emit inside their `notes[]` arrays.
+        """
+        try:
+            user = resolve_user_from_request(request)
+        except ValueError as e:
+            return _problem_response(401, str(e))
+
+        try:
+            body = await request.json()
+        except Exception:
+            return _problem_response(400, "Invalid JSON payload")
+
+        resource_id = (body.get("resource_id") or "").strip()
+        note_text = (body.get("note") or "").strip()
+        if not resource_id:
+            return _problem_response(400, "Missing resource_id")
+        if not note_text:
+            return _problem_response(400, "Missing note")
+
+        d = get_db()
+        resource = d.get_resource(resource_id)
+        if not resource:
+            return _problem_response(404, "Resource not found")
+
+        accessible = d._accessible_collection_ids(user["id"])
+        if resource.get("collection_id") not in accessible:
+            return _problem_response(404, "Resource not found")
+
+        result = d.add_resource_note(
+            resource_id,
+            note_text,
+            submitter_user_id=user["id"],
+            submitter_name=user.get("name", ""),
+        )
+        if not result:
+            return _problem_response(400, "Empty note")
+
+        return JSONResponse({
+            "note": {
+                "author": user.get("name", ""),
+                "note": note_text,
+                "added_at": result.get("added_at", ""),
+                "source_server": "",
+            }
+        }, status_code=201)
+
+    async def handle_api_edit(request: Request):
+        """POST /api/edit — modify a resource the caller owns (or owns the
+        collection of).
+
+        Auth: X-Dugg-Key header (or dugg_key cookie).
+        Body: {"resource_id": "...", "url"?, "title"?, "description"?,
+               "note"?, "source_type"?, "author"?, "tags"? }
+        Unknown fields are ignored. Only the submitter or collection owner
+        may edit; everyone else gets 403. Every user-visible field change
+        is written to `resource_edits` so the community can audit content
+        mutations (link-swap, note-swap) after the fact.
+
+        Response: {"resource": {...updated serialization...}}
+        """
+        try:
+            user = resolve_user_from_request(request)
+        except ValueError as e:
+            return _problem_response(401, str(e))
+
+        try:
+            body = await request.json()
+        except Exception:
+            return _problem_response(400, "Invalid JSON payload")
+
+        resource_id = (body.get("resource_id") or "").strip()
+        if not resource_id:
+            return _problem_response(400, "Missing resource_id")
+
+        d = get_db()
+        resource = d.get_resource(resource_id)
+        if not resource:
+            return _problem_response(404, "Resource not found")
+
+        accessible = d._accessible_collection_ids(user["id"])
+        if resource.get("collection_id") not in accessible:
+            return _problem_response(404, "Resource not found")
+
+        if not _can_mutate_resource(d, resource, user["id"]):
+            return _problem_response(403, "Only the submitter or collection owner can edit this resource")
+
+        editable = {"url", "title", "description", "note", "source_type", "author"}
+        update_fields = {k: body[k] for k in editable if k in body and body[k] is not None}
+
+        tags = body.get("tags")
+        if isinstance(tags, list):
+            for tag in tags:
+                if isinstance(tag, str) and tag.strip():
+                    d._add_tag(resource_id, tag.strip(), "user", _now())
+            d.conn.commit()
+
+        if update_fields:
+            d.update_resource(resource_id, actor_id=user["id"], **update_fields)
+
+        updated = d.get_resource(resource_id)
+        submitter_cache: dict[str, str] = {}
+        sibs = d.list_resource_notes(resource_id)
+        edit_count = len(d.list_resource_edits(resource_id))
+        return JSONResponse({"resource": _serialize_resource(
+            d, updated, submitter_cache, sibs,
+            viewer_id=user["id"], edit_count=edit_count,
+        )})
+
+    async def handle_api_resource_edits(request: Request):
+        """GET /api/resource/{id}/edits — audit trail for a resource.
+
+        Auth: any authenticated caller who can see the resource via their
+        accessible collections. Transparency default: if you can view a
+        resource, you can see whether its content has been rewritten.
+
+        Response: {"edits": [{id, actor, actor_id, field, old_value,
+                              new_value, edited_at}, ...]} newest first.
+        """
+        try:
+            user = resolve_user_from_request(request)
+        except ValueError as e:
+            return _problem_response(401, str(e))
+
+        resource_id = request.path_params["id"]
+        d = get_db()
+        resource = d.get_resource(resource_id)
+        if not resource:
+            return _problem_response(404, "Resource not found")
+
+        accessible = d._accessible_collection_ids(user["id"])
+        if resource.get("collection_id") not in accessible:
+            return _problem_response(404, "Resource not found")
+
+        rows = d.list_resource_edits(resource_id)
+        edits = [{
+            "id": r["id"],
+            "actor_id": r["actor_id"],
+            "actor": r.get("actor_name") or "",
+            "field": r["field"],
+            "old_value": r["old_value"],
+            "new_value": r["new_value"],
+            "edited_at": r["edited_at"],
+        } for r in rows]
+        return JSONResponse({"edits": edits, "count": len(edits)})
 
     # --- Note Publishing (upstream federation) ---
 
@@ -3257,6 +3437,9 @@ async function syncNow(e) {
         Route("/api/feed", endpoint=handle_api_feed),
         Route("/api/search", endpoint=handle_api_search),
         Route("/api/resource/{id}", endpoint=handle_api_resource),
+        Route("/api/note", endpoint=handle_api_note, methods=["POST"]),
+        Route("/api/edit", endpoint=handle_api_edit, methods=["POST"]),
+        Route("/api/resource/{id}/edits", endpoint=handle_api_resource_edits),
         Route("/paste", endpoint=handle_paste_page_bare),
         Route("/paste/submit", endpoint=handle_paste_submit_bare, methods=["POST"]),
         Route("/paste/{key}", endpoint=handle_paste_page),

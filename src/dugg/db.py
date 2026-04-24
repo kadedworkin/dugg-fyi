@@ -353,6 +353,26 @@ class DuggDB:
                 deleted_by TEXT NOT NULL
             );
 
+            -- Edit audit trail. One row per field mutation so a collection
+            -- owner can reconstruct the progression of a resource's content
+            -- and catch link-swap / note-swap attacks (submitter posts a
+            -- clean URL, later edits it to point at malware). Cascades on
+            -- resource delete — the tombstone in resource_deletions records
+            -- the fact of deletion; edit history for a deleted resource is
+            -- not useful after the row is gone. Visible to any collection
+            -- member for transparency; write is submitter-or-owner.
+            CREATE TABLE IF NOT EXISTS resource_edits (
+                id TEXT PRIMARY KEY,
+                resource_id TEXT NOT NULL REFERENCES resources(id) ON DELETE CASCADE,
+                actor_id TEXT NOT NULL,
+                field TEXT NOT NULL,
+                old_value TEXT NOT NULL DEFAULT '',
+                new_value TEXT NOT NULL DEFAULT '',
+                edited_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_resource_edits_resource
+                ON resource_edits(resource_id, edited_at DESC);
+
             CREATE TABLE IF NOT EXISTS rss_subscriptions (
                 id TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL REFERENCES users(id),
@@ -987,11 +1007,44 @@ class DuggDB:
                                  "collection_publish_scope": collection_publish_scope})
         return result
 
-    def update_resource(self, resource_id: str, **fields) -> Optional[dict]:
+    # Fields whose mutations are logged to `resource_edits` when a user
+    # initiates the change. Machine-driven fields (raw_metadata, thumbnail,
+    # enriched_at, summary, transcript, content_*) are not logged — they're
+    # automated enrichment noise, not content attestations the community
+    # needs to audit.
+    _USER_VISIBLE_EDIT_FIELDS = {"url", "title", "description", "note",
+                                 "source_type", "author"}
+
+    def update_resource(self, resource_id: str, *, actor_id: str = "",
+                        **fields) -> Optional[dict]:
+        """Update mutable resource fields.
+
+        When ``actor_id`` is supplied and a user-visible field actually
+        changes, the before/after values are logged to ``resource_edits``.
+        Automated callers (enrichment, eviction, housekeeping) pass an
+        empty ``actor_id`` so routine machine updates don't pollute the
+        audit trail a moderator reads to spot link-swap attacks.
+        """
         allowed = {"url", "title", "description", "thumbnail", "source_type", "author", "transcript", "raw_metadata", "note", "enriched_at", "summary", "content_evicted"}
         updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
         if not updates:
             return self.get_resource(resource_id)
+
+        # Capture pre-edit values for the audit log before we mutate.
+        history_rows: list[tuple] = []
+        if actor_id:
+            current = self.get_resource(resource_id) or {}
+            now = _now()
+            for field in self._USER_VISIBLE_EDIT_FIELDS:
+                if field not in updates:
+                    continue
+                old = current.get(field) or ""
+                new = updates[field] or ""
+                if str(old) == str(new):
+                    continue
+                history_rows.append((_uuid(), resource_id, actor_id, field,
+                                     str(old), str(new), now))
+
         updates["updated_at"] = _now()
         if "raw_metadata" in updates and isinstance(updates["raw_metadata"], dict):
             updates["raw_metadata"] = json.dumps(updates["raw_metadata"])
@@ -1006,8 +1059,34 @@ class DuggDB:
         set_clause = ", ".join(f"{k} = ?" for k in updates)
         values = list(updates.values()) + [resource_id]
         self.conn.execute(f"UPDATE resources SET {set_clause} WHERE id = ?", values)
+        if history_rows:
+            self.conn.executemany(
+                """INSERT INTO resource_edits
+                   (id, resource_id, actor_id, field, old_value, new_value, edited_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                history_rows,
+            )
         self.conn.commit()
         return self.get_resource(resource_id)
+
+    def list_resource_edits(self, resource_id: str) -> list[dict]:
+        """Return edit history for a resource, newest first.
+
+        Each row: ``{id, actor_id, actor_name, field, old_value, new_value, edited_at}``.
+        Any collection member who can see the resource can read its history
+        (transparency default) — authorization is enforced at the HTTP /
+        MCP layer before this is called.
+        """
+        rows = self.conn.execute(
+            """SELECT e.id, e.actor_id, e.field, e.old_value, e.new_value, e.edited_at,
+                      COALESCE(u.name, '') AS actor_name
+               FROM resource_edits e
+               LEFT JOIN users u ON u.id = e.actor_id
+               WHERE e.resource_id = ?
+               ORDER BY e.edited_at DESC""",
+            (resource_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def get_resource(self, resource_id: str) -> Optional[dict]:
         row = self.conn.execute("SELECT * FROM resources WHERE id = ?", (resource_id,)).fetchone()
@@ -1583,20 +1662,30 @@ class DuggDB:
         return results
 
     def delete_resource(self, resource_id: str, collection_id: str, requester_id: str) -> dict:
-        """Permanently delete a resource. Only the collection owner can delete.
+        """Permanently delete a resource.
 
-        Cascades: removes tags, reactions, publish_targets, publish_queue entries,
-        resource_edges, and the resource itself.
+        Authorization: the submitter of the resource OR the collection
+        owner may delete. Community-knowledge-base default — contributors
+        own their own contributions; collection owners retain moderation
+        authority over everything. Edit-history in ``resource_edits``
+        cascades away with the row; the ``resource_deletions`` tombstone
+        records the fact of deletion for Atom feed propagation.
+
+        Cascades: removes tags, reactions, publish_targets, publish_queue
+        entries, resource_edges, resource_edits, resource_notes, and the
+        resource itself.
         """
-        member = self.get_member_status(collection_id, requester_id)
-        if not member or member["role"] != "owner":
-            return {"error": "Only the collection owner can delete resources"}
         row = self.conn.execute(
             "SELECT id, url, title, submitted_by FROM resources WHERE id = ? AND collection_id = ?",
             (resource_id, collection_id),
         ).fetchone()
         if not row:
             return {"error": "Resource not found in this collection"}
+        member = self.get_member_status(collection_id, requester_id)
+        is_owner = bool(member and member["role"] == "owner")
+        is_submitter = row["submitted_by"] == requester_id
+        if not is_owner and not is_submitter:
+            return {"error": "Only the submitter or collection owner can delete this resource"}
         info = dict(row)
         now = _now()
         # CASCADE handles tags, reactions, publish_targets, resource_edges via FK

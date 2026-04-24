@@ -1283,12 +1283,21 @@ def _handle_edit(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
     if resource["collection_id"] not in accessible:
         return [TextContent(type="text", text=f"Access denied to resource {resource_id}")]
 
+    # Only the submitter or a collection owner can edit. Matches the
+    # governance rule enforced by delete_resource — contributors own their
+    # own contributions; owners retain moderation authority.
+    member = d.get_member_status(resource["collection_id"], user_id)
+    is_owner = bool(member and member["role"] == "owner")
+    is_submitter = resource.get("submitted_by") == user_id
+    if not is_owner and not is_submitter:
+        return [TextContent(type="text", text="Only the submitter or collection owner can edit this resource")]
+
     tags = args.pop("tags", None)
     args.pop("resource_id", None)
     update_fields = {k: v for k, v in args.items() if v is not None and v != ""}
 
     if update_fields:
-        updated = d.update_resource(resource_id, **update_fields)
+        updated = d.update_resource(resource_id, actor_id=user_id, **update_fields)
     else:
         updated = resource
 
@@ -1298,6 +1307,7 @@ def _handle_edit(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
         d.conn.commit()
 
     if update_fields.get("summary") or update_fields.get("description"):
+        # Machine-driven enriched_at bump — no actor_id so this doesn't log.
         d.update_resource(resource_id, enriched_at=_now())
 
     result = d.get_resource(resource_id)

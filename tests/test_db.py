@@ -2004,14 +2004,32 @@ def test_delete_resource_by_owner(db):
     assert db.get_resource(r["id"]) is None
 
 
-def test_delete_resource_non_owner_denied(db):
-    """Non-owner cannot delete resources."""
+def test_delete_resource_by_submitter(db):
+    """Submitter can delete their own resource even when not a collection owner.
+
+    Governance rule (2026-04-24): contributors own their own contributions.
+    """
     kade = db.create_user("Kade")
     member = db.create_user("Member")
     coll = db.create_collection("Shared", kade["id"], visibility="shared")
     db.invite_member(coll["id"], kade["id"], member["id"])
     r = db.add_resource(url="https://example.com/safe", collection_id=coll["id"], submitted_by=member["id"], title="Safe")
     result = db.delete_resource(r["id"], coll["id"], member["id"])
+    assert result.get("deleted") == r["id"]
+    assert db.get_resource(r["id"]) is None
+
+
+def test_delete_resource_non_submitter_non_owner_denied(db):
+    """A collection member who is neither submitter nor owner cannot delete."""
+    kade = db.create_user("Kade")
+    submitter = db.create_user("Submitter")
+    bystander = db.create_user("Bystander")
+    coll = db.create_collection("Shared", kade["id"], visibility="shared")
+    db.invite_member(coll["id"], kade["id"], submitter["id"])
+    db.invite_member(coll["id"], kade["id"], bystander["id"])
+    r = db.add_resource(url="https://example.com/safe", collection_id=coll["id"],
+                        submitted_by=submitter["id"], title="Safe")
+    result = db.delete_resource(r["id"], coll["id"], bystander["id"])
     assert "error" in result
     assert db.get_resource(r["id"]) is not None
 

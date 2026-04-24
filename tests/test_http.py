@@ -442,6 +442,267 @@ def test_api_feed_includes_notes_for_each_resource(client, db_path, user):
     assert [n["note"] for n in notes] == ["original", "later note"]
 
 
+def test_api_note_requires_auth(client):
+    c, _ = client
+    resp = c.post("/api/note", json={"resource_id": "x", "note": "y"})
+    assert resp.status_code == 401
+
+
+def test_api_note_rejects_empty_body(client, db_path, user):
+    c, _ = client
+    res_id = _seed_resource(db_path, user, note="")
+    resp = c.post(
+        "/api/note",
+        json={"resource_id": res_id, "note": ""},
+        headers={"X-Dugg-Key": user["api_key"]},
+    )
+    assert resp.status_code == 400
+
+
+def test_api_note_rejects_missing_resource_id(client, user):
+    c, _ = client
+    resp = c.post(
+        "/api/note",
+        json={"note": "hello"},
+        headers={"X-Dugg-Key": user["api_key"]},
+    )
+    assert resp.status_code == 400
+
+
+def test_api_note_rejects_unknown_resource(client, user):
+    c, _ = client
+    resp = c.post(
+        "/api/note",
+        json={"resource_id": "nonexistent-id", "note": "hi"},
+        headers={"X-Dugg-Key": user["api_key"]},
+    )
+    assert resp.status_code == 404
+
+
+def test_api_note_attaches_sibling_note_visible_on_resource(client, db_path, user):
+    """Posting /api/note attaches a sibling note that shows up in the
+    resource's `notes[]` array with the caller as author."""
+    c, _ = client
+    res_id = _seed_resource(db_path, user, note="primary")
+
+    resp = c.post(
+        "/api/note",
+        json={"resource_id": res_id, "note": "and one more thought"},
+        headers={"X-Dugg-Key": user["api_key"]},
+    )
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["note"]["author"] == user["name"]
+    assert body["note"]["note"] == "and one more thought"
+
+    get = c.get(f"/api/resource/{res_id}", headers={"X-Dugg-Key": user["api_key"]})
+    notes = get.json()["resource"]["notes"]
+    assert [n["note"] for n in notes] == ["primary", "and one more thought"]
+    assert notes[1]["author"] == user["name"]
+
+
+def test_api_note_is_idempotent_for_same_author_same_text(client, db_path, user):
+    """UNIQUE (resource_id, source_server, submitter_user_id, note) means a
+    duplicate post silently no-ops — duplicate clients retrying the same
+    payload should not produce a second entry."""
+    c, _ = client
+    res_id = _seed_resource(db_path, user, note="")
+    for _ in range(3):
+        resp = c.post(
+            "/api/note",
+            json={"resource_id": res_id, "note": "same text"},
+            headers={"X-Dugg-Key": user["api_key"]},
+        )
+        assert resp.status_code == 201
+
+    get = c.get(f"/api/resource/{res_id}", headers={"X-Dugg-Key": user["api_key"]})
+    notes = get.json()["resource"]["notes"]
+    assert sum(1 for n in notes if n["note"] == "same text") == 1
+
+
+def test_api_note_denies_resource_outside_accessible_collections(client, db_path, user):
+    """A resource in a collection the caller cannot see must 404, not
+    leak a write path to arbitrary resource_ids."""
+    from dugg.db import DuggDB
+    c, _ = client
+    d = DuggDB(db_path)
+    other = d.create_user("Other")
+    other_coll = d.create_collection("Private", other["id"], visibility="private")
+    res = d.add_resource(url="https://other.example/x", collection_id=other_coll["id"],
+                         submitted_by=other["id"], title="hidden")
+    d.close()
+
+    resp = c.post(
+        "/api/note",
+        json={"resource_id": res["id"], "note": "sneaky"},
+        headers={"X-Dugg-Key": user["api_key"]},
+    )
+    assert resp.status_code == 404
+
+
+def test_api_edit_requires_auth(client):
+    c, _ = client
+    resp = c.post("/api/edit", json={"resource_id": "x", "note": "y"})
+    assert resp.status_code == 401
+
+
+def test_api_edit_updates_note_and_returns_serialized_resource(client, db_path, user):
+    c, _ = client
+    res_id = _seed_resource(db_path, user, note="initial")
+
+    resp = c.post(
+        "/api/edit",
+        json={"resource_id": res_id, "note": "revised", "title": "New Title"},
+        headers={"X-Dugg-Key": user["api_key"]},
+    )
+    assert resp.status_code == 200
+    r = resp.json()["resource"]
+    assert r["note"] == "revised"
+    assert r["title"] == "New Title"
+    assert r["edit_count"] == 2
+    assert r["can_edit"] is True
+    assert r["can_delete"] is True
+
+
+def test_api_edit_non_submitter_non_owner_forbidden(client, db_path, user):
+    """A collection member who is neither submitter nor owner cannot edit."""
+    from dugg.db import DuggDB
+    c, _ = client
+    d = DuggDB(db_path)
+    owner = d.create_user("Owner")
+    bystander = d.create_user("Bystander")
+    coll = d.create_collection("Shared", owner["id"], visibility="shared")
+    d.invite_member(coll["id"], owner["id"], user["id"])
+    d.invite_member(coll["id"], owner["id"], bystander["id"])
+    res = d.add_resource(url="https://example.com/other", collection_id=coll["id"],
+                         submitted_by=user["id"], title="user's")
+    d.close()
+
+    resp = c.post(
+        "/api/edit",
+        json={"resource_id": res["id"], "note": "sneaky overwrite"},
+        headers={"X-Dugg-Key": bystander["api_key"]},
+    )
+    assert resp.status_code == 403
+
+
+def test_api_edit_history_records_url_change(client, db_path, user):
+    """Link-swap attack surface — the primary reason edit history exists.
+    A URL mutation must land in resource_edits so moderators can audit it."""
+    c, _ = client
+    res_id = _seed_resource(db_path, user, url="https://clean.example/post")
+
+    resp = c.post(
+        "/api/edit",
+        json={"resource_id": res_id, "url": "https://malware.example/post"},
+        headers={"X-Dugg-Key": user["api_key"]},
+    )
+    assert resp.status_code == 200
+
+    hist = c.get(
+        f"/api/resource/{res_id}/edits",
+        headers={"X-Dugg-Key": user["api_key"]},
+    )
+    assert hist.status_code == 200
+    edits = hist.json()["edits"]
+    assert len(edits) == 1
+    assert edits[0]["field"] == "url"
+    assert edits[0]["old_value"] == "https://clean.example/post"
+    assert edits[0]["new_value"] == "https://malware.example/post"
+    assert edits[0]["actor"] == user["name"]
+
+
+def test_api_edit_noop_for_unchanged_value_does_not_log(client, db_path, user):
+    """Submitting the same value must not create a phantom audit entry."""
+    c, _ = client
+    res_id = _seed_resource(db_path, user, note="same")
+
+    resp = c.post(
+        "/api/edit",
+        json={"resource_id": res_id, "note": "same"},
+        headers={"X-Dugg-Key": user["api_key"]},
+    )
+    assert resp.status_code == 200
+
+    hist = c.get(
+        f"/api/resource/{res_id}/edits",
+        headers={"X-Dugg-Key": user["api_key"]},
+    )
+    assert hist.json()["count"] == 0
+
+
+def test_api_resource_edits_visible_to_any_collection_member(client, db_path, user):
+    """Transparency default — any collection member, not just the owner,
+    can read edit history. A bystander's read of history must succeed."""
+    from dugg.db import DuggDB
+    c, _ = client
+    res_id = _seed_resource(db_path, user, note="original")
+    # record an edit so history is non-empty
+    c.post("/api/edit", json={"resource_id": res_id, "note": "updated"},
+           headers={"X-Dugg-Key": user["api_key"]})
+
+    d = DuggDB(db_path)
+    bystander = d.create_user("Bystander")
+    # put the bystander in the same collection as user
+    res = d.get_resource(res_id)
+    d.invite_member(res["collection_id"], user["id"], bystander["id"])
+    d.close()
+
+    resp = c.get(f"/api/resource/{res_id}/edits",
+                 headers={"X-Dugg-Key": bystander["api_key"]})
+    assert resp.status_code == 200
+    assert resp.json()["count"] == 1
+
+
+def test_api_resource_edits_hidden_from_non_members(client, db_path, user):
+    """Edit history must not leak to users who can't see the resource."""
+    from dugg.db import DuggDB
+    c, _ = client
+    res_id = _seed_resource(db_path, user, note="secret")
+    c.post("/api/edit", json={"resource_id": res_id, "note": "still secret"},
+           headers={"X-Dugg-Key": user["api_key"]})
+    d = DuggDB(db_path)
+    outsider = d.create_user("Outsider")
+    d.close()
+
+    resp = c.get(f"/api/resource/{res_id}/edits",
+                 headers={"X-Dugg-Key": outsider["api_key"]})
+    assert resp.status_code == 404
+
+
+def test_api_delete_by_submitter_succeeds(client, db_path, user):
+    """Regression: previously the HTTP /delete route authorized submitters
+    but the DB layer refused them, so submitter-delete round-tripped as a
+    500. Verify the loosening lets a submitter remove their own post."""
+    c, _ = client
+    res_id = _seed_resource(db_path, user)
+    url = "https://example.com/post"
+
+    resp = c.post(
+        "/delete",
+        json={"url": url, "source_instance_id": ""},
+        headers={"X-Dugg-Key": user["api_key"]},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["id"] == res_id
+
+    get = c.get(f"/api/resource/{res_id}", headers={"X-Dugg-Key": user["api_key"]})
+    assert get.status_code == 404
+
+
+def test_api_resource_exposes_can_edit_and_can_delete(client, db_path, user):
+    """iOS relies on server-computed can_edit/can_delete flags to decide
+    whether to render the edit/delete buttons. Own resource → true."""
+    c, _ = client
+    res_id = _seed_resource(db_path, user)
+    resp = c.get(f"/api/resource/{res_id}", headers={"X-Dugg-Key": user["api_key"]})
+    assert resp.status_code == 200
+    r = resp.json()["resource"]
+    assert r["can_edit"] is True
+    assert r["can_delete"] is True
+    assert r["edit_count"] == 0
+
+
 def test_api_search_returns_structured_resources(client, db_path, user):
     c, _ = client
     _seed_resource(db_path, user, url="https://example.com/rust", title="rust performance")
