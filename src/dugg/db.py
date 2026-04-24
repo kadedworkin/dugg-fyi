@@ -512,6 +512,23 @@ class DuggDB:
         if "deleted_at" not in rn_cols:
             self.conn.execute("ALTER TABLE resource_notes ADD COLUMN deleted_at TEXT DEFAULT NULL")
 
+        # Backfill orphan attributions: rows added before the v2026.04.24.2
+        # attribution fix have submitter_user_id='' even when a local user
+        # of that name exists. Pre-fix paths that produced these include
+        # the dugg_add URL-collision branch and pre-fix federation ingest.
+        # Conservative match: claim the row only when EXACTLY ONE local
+        # user shares the name -- a duplicate-name scenario is ambiguous
+        # and we leave it for manual triage rather than guess.
+        self.conn.execute("""
+            UPDATE resource_notes
+               SET submitter_user_id = (
+                   SELECT u.id FROM users u WHERE u.name = resource_notes.submitter_name
+               )
+             WHERE submitter_user_id = ''
+               AND submitter_name != ''
+               AND (SELECT COUNT(*) FROM users u WHERE u.name = resource_notes.submitter_name) = 1
+        """)
+
         cm_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(collection_members)").fetchall()}
         if "member_type" not in cm_cols:
             self.conn.execute("ALTER TABLE collection_members ADD COLUMN member_type TEXT DEFAULT 'contributor'")

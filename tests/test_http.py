@@ -997,6 +997,52 @@ def test_ingest_leaves_sibling_note_unattributed_when_name_does_not_match(client
     assert n["can_delete"] is False
 
 
+def test_migration_backfills_orphan_note_attribution(db_path):
+    """Notes created before v2026.04.24.2 carry submitter_user_id='' even
+    when a matching local user exists. The migration backfills the
+    attribution on startup *only* when the name is unambiguous (single
+    matching local user); duplicate-name rows stay orphaned and require
+    manual triage.
+    """
+    from dugg.db import DuggDB
+    d = DuggDB(db_path)
+    kade = d.create_user("Kade")
+    coll = d.create_collection("Default", kade["id"])
+    res = d.add_resource(url="https://example.com/orphan", collection_id=coll["id"],
+                         submitted_by=kade["id"], title="Orphan host")
+    # Simulate a pre-v2.2 orphan row: empty submitter_user_id but matching name.
+    d.conn.execute(
+        """INSERT INTO resource_notes
+           (id, resource_id, source_server, source_instance_id,
+            submitter_user_id, submitter_name, note, added_at)
+           VALUES ('orphan-id', ?, '', '', '', 'Kade', 'orphan note', '2026-01-01T00:00:00Z')""",
+        (res["id"],),
+    )
+    # Also seed a duplicate-name scenario: two users named "Twin" + a row
+    # with submitter_name='Twin'. The migration must NOT claim it for either.
+    twin1 = d.create_user("Twin")
+    twin2 = d.create_user("Twin")
+    d.conn.execute(
+        """INSERT INTO resource_notes
+           (id, resource_id, source_server, source_instance_id,
+            submitter_user_id, submitter_name, note, added_at)
+           VALUES ('twin-id', ?, '', '', '', 'Twin', 'twin orphan', '2026-01-02T00:00:00Z')""",
+        (res["id"],),
+    )
+    d.conn.commit()
+    d.close()
+
+    # Re-open the DB; _migrate runs in __init__, which is the production
+    # entry point that fires the backfill on every boot.
+    d2 = DuggDB(db_path)
+    rows = {r["id"]: dict(r) for r in d2.conn.execute(
+        "SELECT id, submitter_user_id, submitter_name FROM resource_notes WHERE id IN ('orphan-id','twin-id')"
+    ).fetchall()}
+    d2.close()
+    assert rows["orphan-id"]["submitter_user_id"] == kade["id"]
+    assert rows["twin-id"]["submitter_user_id"] == ""  # ambiguous, untouched
+
+
 def test_feed_html_shows_per_note_edit_buttons_on_own_notes(client, db_path, user):
     """The browser feed must render inline edit/delete buttons on notes the
     viewer authored, and NOT on notes attributed to others. Regression for
