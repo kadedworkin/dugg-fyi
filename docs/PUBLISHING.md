@@ -2,6 +2,37 @@
 
 Dugg instances federate through a publish/subscribe model. Your private Dugg is the source of truth — publishing pushes selected content to remote instances.
 
+## Home server: enrich once, federate pre-cooked
+
+Every Dugg resource flows through a single *home server* — typically your private Dugg, running on your machine's residential IP. The home server enriches on add (YouTube transcript, OG metadata, summary, tags). When it federates, the publish payload carries the enriched fields (`title`, `description`, `thumbnail`, `source_type`, `author`, `transcript`, `tags`, `enriched_at`). Destination servers store them verbatim — no re-enrichment on the cloud.
+
+This is why YouTube-style content works at all: cloud IPs can't fetch YouTube, but your home server can. The agent (`agent/dugg_agent.py`) marks one server as `home` in its config; that's where new adds land and where federation originates.
+
+```json
+{
+  "servers": [
+    {"name": "private", "url": "http://localhost:8411", "api_key": "...", "home": true},
+    {"name": "chino-bandido", "url": "https://...", "api_key": "..."}
+  ]
+}
+```
+
+## Collection publish_scope
+
+Each collection has a `publish_scope`:
+
+- `auto` (default) — the agent may auto-federate matching items to other Dugg servers on topic match.
+- `none` — items in this collection stay on this server. The agent skips federation even if topics overlap.
+
+Set at creation or later:
+
+```
+dugg_create_collection(name="drafts", publish_scope="none")
+dugg_set_collection_scope(collection="drafts", publish_scope="none")
+```
+
+Use `none` for drafts, sensitive notes, or any collection you never want reaching another server. It's a collection-level guarantee — nothing routes out, regardless of what the scorer thinks.
+
 ## Publishing
 
 ```
@@ -26,11 +57,20 @@ dugg_routing_manifest()
 #           {name: "AI Dugg", topic: "AI, agents..."}]
 ```
 
-**User flow:**
-1. `/dugg [link] [note]` — that's it
-2. Agent enriches, auto-tags, scores against subscribed instance topics
-3. Agent calls `dugg_publish` with the targets it picked
-4. User verifies/overrides after the fact if needed
+**Default user flow:**
+1. `/dugg [link] [note]` — sent to the home server
+2. Home server enriches (title, description, transcript, tags)
+3. Agent scores against the home server's routing manifest
+4. Agent calls `dugg_publish` with the targets it picked — destinations receive fully enriched content (no re-enrichment)
+5. User verifies/overrides after the fact if needed
+
+**Explicit target override:**
+
+If the user already knows where content belongs, they can POST to the agent's `/dugg/ingest` with `targets: ["chino-bandido"]`. The home server still enriches, but scoring is skipped and the resource is published to exactly those targets. Honors `publish_scope` — a `none` collection never federates, even with explicit targets.
+
+**Private-only:**
+
+Put the resource in a collection with `publish_scope: "none"`. Home enriches, nothing leaves.
 
 ## Silent reactions
 

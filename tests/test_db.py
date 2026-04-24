@@ -2268,3 +2268,117 @@ def test_export_import_round_trip(db):
     tag_labels = [t["label"] for t in imported["tags"]]
     assert "test" in tag_labels
     assert "roundtrip" in tag_labels
+
+
+# --- publish_scope (agent federation gate) ---
+
+
+def test_create_collection_default_publish_scope_is_auto(db):
+    user = db.create_user("Kade")
+    coll = db.create_collection("AI", user["id"])
+    assert coll["publish_scope"] == "auto"
+    # list_collections should surface it too
+    listed = db.list_collections(user["id"])
+    assert listed[0]["publish_scope"] == "auto"
+
+
+def test_create_collection_with_publish_scope_none(db):
+    user = db.create_user("Kade")
+    coll = db.create_collection("Drafts", user["id"], publish_scope="none")
+    assert coll["publish_scope"] == "none"
+
+
+def test_create_collection_rejects_invalid_publish_scope(db):
+    user = db.create_user("Kade")
+    with pytest.raises(ValueError):
+        db.create_collection("Bad", user["id"], publish_scope="sometimes")
+
+
+def test_set_collection_publish_scope(db):
+    user = db.create_user("Kade")
+    coll = db.create_collection("AI", user["id"])
+    assert db.set_collection_publish_scope(coll["id"], "none") is True
+    fresh = db.get_collection(coll["id"])
+    assert fresh["publish_scope"] == "none"
+    # Flip back
+    db.set_collection_publish_scope(coll["id"], "auto")
+    assert db.get_collection(coll["id"])["publish_scope"] == "auto"
+
+
+def test_set_collection_publish_scope_rejects_invalid(db):
+    user = db.create_user("Kade")
+    coll = db.create_collection("AI", user["id"])
+    with pytest.raises(ValueError):
+        db.set_collection_publish_scope(coll["id"], "maybe")
+
+
+def test_resource_added_event_includes_publish_scope(db):
+    """The agent reads collection_publish_scope from the event to decide
+    whether to federate. Make sure we actually emit it."""
+    user = db.create_user("Kade")
+    coll = db.create_collection("Drafts", user["id"], publish_scope="none")
+    db.add_resource(
+        url="https://example.com/draft",
+        collection_id=coll["id"],
+        submitted_by=user["id"],
+        title="Draft",
+    )
+    events = db.get_events(user["id"], event_types=["resource_added"])
+    assert events, "resource_added event should fire"
+    import json as _json
+    payload = events[0]["payload"]
+    if isinstance(payload, str):
+        payload = _json.loads(payload)
+    assert payload["collection_publish_scope"] == "none"
+    assert payload["collection_id"] == coll["id"]
+
+
+def test_resource_added_event_auto_scope_when_default(db):
+    user = db.create_user("Kade")
+    coll = db.create_collection("AI", user["id"])
+    db.add_resource(
+        url="https://example.com/post",
+        collection_id=coll["id"],
+        submitted_by=user["id"],
+    )
+    events = db.get_events(user["id"], event_types=["resource_added"])
+    import json as _json
+    payload = events[0]["payload"]
+    if isinstance(payload, str):
+        payload = _json.loads(payload)
+    assert payload["collection_publish_scope"] == "auto"
+
+
+def test_publish_scope_migration_adds_column_to_existing_db():
+    """Simulate an existing Dugg install predating publish_scope: create a DB
+    without the column, then reopen — migration should add it with default
+    'auto' and preserve existing collections."""
+    import sqlite3
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "legacy.db"
+        # First open — run the full init (which now includes publish_scope in
+        # the CREATE TABLE).  To simulate the legacy schema we drop the column
+        # after init, then reopen to trigger _migrate.
+        d = DuggDB(path)
+        user = d.create_user("Legacy")
+        coll = d.create_collection("OldStuff", user["id"])
+        d.close()
+
+        # Drop the publish_scope column directly to simulate pre-migration state.
+        conn = sqlite3.connect(str(path))
+        conn.execute("CREATE TABLE collections_legacy (id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT DEFAULT '', created_by TEXT NOT NULL, visibility TEXT DEFAULT 'private', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)")
+        conn.execute("INSERT INTO collections_legacy (id, name, description, created_by, visibility, created_at, updated_at) SELECT id, name, description, created_by, visibility, created_at, updated_at FROM collections")
+        conn.execute("DROP TABLE collections")
+        conn.execute("ALTER TABLE collections_legacy RENAME TO collections")
+        conn.commit()
+        # Confirm column is gone.
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(collections)").fetchall()}
+        assert "publish_scope" not in cols
+        conn.close()
+
+        # Reopen — _migrate should add publish_scope with default 'auto'.
+        d2 = DuggDB(path)
+        fresh = d2.get_collection(coll["id"])
+        assert fresh is not None
+        assert fresh["publish_scope"] == "auto"
+        d2.close()

@@ -49,6 +49,8 @@ class ServerConfig:
     url: str
     api_key: str
     user_id: Optional[str] = None  # if set, used directly for Option B event filtering
+    home: bool = False  # marks this server as the enrichment/ingest hub (typically the user's
+                        # private server on a residential IP that can reach YouTube etc.)
 
 
 def load_config() -> tuple[list[ServerConfig], int, Optional[str]]:
@@ -304,6 +306,9 @@ class DuggAgent:
         self.clients = {s.name: DuggClient(s) for s in servers}
         self.anthropic_key = anthropic_key
         self.user_ids: dict[str, str] = {}  # server_name -> user_id
+        # Pick the home server: first one marked home=True, else first server.
+        home = next((s for s in servers if s.home), None) or (servers[0] if servers else None)
+        self.home_server: Optional[str] = home.name if home else None
 
     async def init_user_ids(self):
         for name, client in self.clients.items():
@@ -323,8 +328,20 @@ class DuggAgent:
                 log.warning("could not identify user on %s: %s", name, e)
 
     async def enrich_and_publish(self, server_name: str, url: str, note: str = "",
-                                  pre_title: str = "") -> dict:
-        """Option A flow: fetch, enrich, add to local server, federate."""
+                                  pre_title: str = "",
+                                  explicit_targets: Optional[list[str]] = None) -> dict:
+        """Option A flow: fetch, enrich, add to local server, federate.
+
+        `server_name` is the *enrichment hub* (usually the user's home/private
+        server — residential IP, can reach YouTube). After enrichment the
+        resource is already tagged + summarized, so any downstream publish
+        just copies the enriched fields across the wire (no re-enrichment).
+
+        If `explicit_targets` is set, publish to exactly those targets.
+        Otherwise, score the routing manifest and auto-pick. Either way,
+        federation is skipped when the source collection's publish_scope
+        is 'none' (enforced by the server via event payload).
+        """
         client = self.clients[server_name]
         log.info("[%s] direct ingest: %s", server_name, url)
 
@@ -348,12 +365,26 @@ class DuggAgent:
         resource_id = parsed.get("id") or result.get("id") or (result.get("resource") or {}).get("id")
         log.info("[%s] added resource %s with tags %s", server_name, resource_id, enriched.get("tags"))
 
-        await self._federate(server_name, resource_id, content + " " + (enriched.get("summary") or ""))
-        return {"ok": True, "resource_id": resource_id, "tags": enriched.get("tags", [])}
+        await self._federate(server_name, resource_id, content + " " + (enriched.get("summary") or ""),
+                              explicit_targets=explicit_targets)
+        return {"ok": True, "resource_id": resource_id, "tags": enriched.get("tags", []),
+                "home_server": server_name, "targets": explicit_targets or "auto"}
 
-    async def _federate(self, source_server: str, resource_id: str, scoring_text: str):
+    async def _federate(self, source_server: str, resource_id: str, scoring_text: str,
+                         explicit_targets: Optional[list[str]] = None):
+        """Federate a resource from source_server to other Dugg instances.
+
+        If `explicit_targets` is provided, publish to exactly those targets
+        (the home server did the enrichment, user already decided where it
+        goes). Otherwise, score topics against the routing manifest and
+        auto-pick.
+        """
         client = self.clients[source_server]
         try:
+            if explicit_targets:
+                log.info("[%s] explicit publish %s -> %s", source_server, resource_id, explicit_targets)
+                await client.publish(resource_id, explicit_targets)
+                return
             manifest = await client.routing_manifest()
             instances = manifest.get("instances", manifest if isinstance(manifest, list) else [])
             targets = score_routing(scoring_text, instances)
@@ -382,13 +413,18 @@ class DuggAgent:
         if event.get("event_type") != "resource_added":
             return
 
-        resource_id = event.get("resource_id") or (event.get("data") or {}).get("resource_id")
+        # SSE wraps fields in `payload`; older shapes used `data` or flat. Try all.
+        payload = event.get("payload") or event.get("data") or {}
+        resource_id = payload.get("resource_id") or event.get("resource_id")
         if not resource_id:
             return
 
         my_uid = self.user_ids.get(server_name)
-        actor = event.get("user_id") or event.get("submitted_by") or event.get("actor_id")
+        actor = (payload.get("submitted_by") or payload.get("user_id") or payload.get("actor_id")
+                 or event.get("actor_id") or event.get("submitted_by") or event.get("user_id"))
         is_mine = my_uid and actor == my_uid
+
+        publish_scope = (payload.get("collection_publish_scope") or "auto").lower()
 
         client = self.clients[server_name]
         try:
@@ -427,7 +463,10 @@ class DuggAgent:
                 tags=enriched.get("tags", []),
                 raw_metadata={"agent_enriched": True},
             )
-            await self._federate(server_name, resource_id, content + " " + (enriched.get("summary") or ""))
+            if publish_scope == "none":
+                log.info("[%s] skipping federation for %s — collection publish_scope=none", server_name, resource_id)
+            else:
+                await self._federate(server_name, resource_id, content + " " + (enriched.get("summary") or ""))
         elif yt_enriched:
             log.info("[%s] YouTube backfill complete for %s", server_name, resource_id)
 
@@ -438,7 +477,8 @@ class IngestRequest(BaseModel):
     url: str
     note: str = ""
     title: str = ""
-    server: Optional[str] = None  # which configured server to add to
+    server: Optional[str] = None  # which configured server to add to; defaults to home
+    targets: Optional[list[str]] = None  # explicit federation targets; bypasses topic scoring
 
 
 def make_app(agent: DuggAgent) -> FastAPI:
@@ -464,11 +504,21 @@ def make_app(agent: DuggAgent) -> FastAPI:
 
     @app.post("/dugg/ingest")
     async def ingest(req: IngestRequest):
-        server_name = req.server or next(iter(agent.clients))
+        # Default to the home server — the one that can enrich (residential IP).
+        server_name = req.server or agent.home_server or next(iter(agent.clients))
         if server_name not in agent.clients:
             raise HTTPException(404, f"unknown server {server_name}")
+        # If caller specified targets, validate they're all known to the agent.
+        if req.targets:
+            unknown = [t for t in req.targets if t not in agent.clients and t != server_name]
+            # Targets can be remote Dugg instances the home server knows about
+            # via its routing manifest — the home server's publish call will
+            # resolve them. So we don't hard-fail on unknown, just warn.
+            if unknown:
+                log.info("[%s] targets %s not in local agent config; home server will resolve", server_name, unknown)
         try:
-            return await agent.enrich_and_publish(server_name, req.url, req.note, req.title)
+            return await agent.enrich_and_publish(server_name, req.url, req.note, req.title,
+                                                   explicit_targets=req.targets)
         except httpx.HTTPStatusError as e:
             raise HTTPException(e.response.status_code, str(e))
 
@@ -492,8 +542,9 @@ async def main():
     import uvicorn
     config = uvicorn.Config(make_app(agent), host="0.0.0.0", port=port, log_level="info")
     server = uvicorn.Server(config)
-    log.info("Dugg agent listening on 0.0.0.0:%d for %d server(s); LLM=%s",
-             port, len(servers), "anthropic" if anthropic_key else "heuristic")
+    log.info("Dugg agent listening on 0.0.0.0:%d for %d server(s); home=%s; LLM=%s",
+             port, len(servers), agent.home_server or "none",
+             "anthropic" if anthropic_key else "heuristic")
     await server.serve()
     for t in listeners:
         t.cancel()
