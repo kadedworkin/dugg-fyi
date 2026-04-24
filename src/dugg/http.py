@@ -1607,8 +1607,22 @@ async function syncNow(e) {
     # from DuggDB rather than formatted text. Auth is X-Dugg-Key header
     # (same as /tools/*), resolved via resolve_user_from_request.
 
-    def _serialize_resource(d: DuggDB, r: dict, submitter_cache: dict[str, str]) -> dict:
-        """Map a DB resource row to the JSON shape the iOS client decodes."""
+    def _serialize_resource(
+        d: DuggDB,
+        r: dict,
+        submitter_cache: dict[str, str],
+        sibling_notes: Optional[list[dict]] = None,
+    ) -> dict:
+        """Map a DB resource row to the JSON shape the iOS client decodes.
+
+        `sibling_notes` is the list from ``resource_notes`` for this resource
+        (pass-through so callers can batch the lookup). When provided, the
+        serializer emits a `notes` array that merges the primary submitter's
+        note with any sibling notes in chronological order. Cross-server
+        ingest stores the incoming note as a sibling note (quarantined from
+        re-federation), so this is the only way iOS sees notes on resources
+        that arrived via /ingest.
+        """
         sub_id = r.get("submitted_by", "") or ""
         if sub_id and sub_id not in submitter_cache:
             u = d.get_user(sub_id)
@@ -1630,6 +1644,22 @@ async function syncNow(e) {
 
         tags = [t["label"] for t in r.get("tags", []) if isinstance(t, dict) and t.get("label")]
 
+        notes: list[dict] = []
+        if r.get("note"):
+            notes.append({
+                "author": submitter_cache.get(sub_id, ""),
+                "note": r["note"],
+                "added_at": r.get("created_at") or "",
+                "source_server": r.get("source_server") or "",
+            })
+        for sn in sibling_notes or []:
+            notes.append({
+                "author": sn.get("submitter_name") or "",
+                "note": sn.get("note") or "",
+                "added_at": sn.get("added_at") or "",
+                "source_server": sn.get("source_server") or "",
+            })
+
         source_type = r.get("source_type") or ""
         payload = {
             "id": r["id"],
@@ -1638,6 +1668,7 @@ async function syncNow(e) {
             "description": r.get("description") or "",
             "body": r.get("transcript") or "",
             "note": r.get("note") or "",
+            "notes": notes,
             "tags": tags,
             "submitter": submitter_cache.get(sub_id, ""),
             "added_at": r.get("created_at") or "",
@@ -1656,7 +1687,11 @@ async function syncNow(e) {
 
         Auth: X-Dugg-Key header (or dugg_key cookie).
         Query: ?limit=N (default 50, max 500).
-        Response: {"resources": [{id, url, title, description, note, tags, submitter, added_at, published_at, source_label}, ...]}
+        Response: {"resources": [{id, url, title, description, note, notes, tags, submitter, added_at, published_at, source_label}, ...]}
+
+        `notes` is an array of `{author, note, added_at, source_server}` merging
+        the primary submitter's note with any sibling notes from cross-server
+        ingest. Clients should prefer `notes` over the single `note` field.
         """
         try:
             user = resolve_user_from_request(request)
@@ -1674,7 +1709,11 @@ async function syncNow(e) {
         feed = d.get_feed(user["id"], limit=limit)
 
         submitter_cache: dict[str, str] = {}
-        resources = [_serialize_resource(d, r, submitter_cache) for r in feed]
+        notes_by_id = d.batch_resource_notes([r["id"] for r in feed])
+        resources = [
+            _serialize_resource(d, r, submitter_cache, notes_by_id.get(r["id"]))
+            for r in feed
+        ]
         return JSONResponse({"resources": resources, "count": len(resources)})
 
     async def handle_api_search(request: Request):
@@ -1704,7 +1743,11 @@ async function syncNow(e) {
         hits = d.search(query, user["id"], limit=limit)
 
         submitter_cache: dict[str, str] = {}
-        resources = [_serialize_resource(d, r, submitter_cache) for r in hits]
+        notes_by_id = d.batch_resource_notes([r["id"] for r in hits])
+        resources = [
+            _serialize_resource(d, r, submitter_cache, notes_by_id.get(r["id"]))
+            for r in hits
+        ]
         return JSONResponse({"resources": resources, "count": len(resources)})
 
     async def handle_api_resource(request: Request):
@@ -1730,7 +1773,8 @@ async function syncNow(e) {
             return _problem_response(404, "Resource not found")
 
         submitter_cache: dict[str, str] = {}
-        return JSONResponse({"resource": _serialize_resource(d, r, submitter_cache)})
+        sibs = d.list_resource_notes(resource_id)
+        return JSONResponse({"resource": _serialize_resource(d, r, submitter_cache, sibs)})
 
     # --- Note Publishing (upstream federation) ---
 

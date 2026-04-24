@@ -396,6 +396,52 @@ def test_api_resource_hides_inaccessible(client, db_path, user):
     assert resp.status_code == 404
 
 
+def test_api_resource_merges_sibling_notes_into_notes_array(client, db_path, user):
+    """Resources ingested from a remote server store the incoming note as a
+    sibling note (quarantined from outbound re-publish). The /api/resource/*
+    serializer must surface those sibling notes to the iOS client via the
+    `notes` array; otherwise cross-server notes silently disappear in native
+    clients even though the browser feed renders them fine."""
+    from dugg.db import DuggDB
+    c, _ = client
+    res_id = _seed_resource(db_path, user, note="")
+    d = DuggDB(db_path)
+    d.add_resource_note(
+        res_id, "Kade's note from private",
+        source_server="https://private.example",
+        submitter_name="Kade",
+    )
+    d.close()
+
+    resp = c.get(f"/api/resource/{res_id}", headers={"X-Dugg-Key": user["api_key"]})
+    assert resp.status_code == 200
+    r = resp.json()["resource"]
+    assert r["note"] == ""
+    assert len(r["notes"]) == 1
+    assert r["notes"][0]["author"] == "Kade"
+    assert r["notes"][0]["note"] == "Kade's note from private"
+    assert r["notes"][0]["source_server"] == "https://private.example"
+
+
+def test_api_feed_includes_notes_for_each_resource(client, db_path, user):
+    """Feed endpoint should emit a `notes` array on each resource so card UIs
+    can thread multi-contributor notes without a per-resource follow-up fetch."""
+    from dugg.db import DuggDB
+    c, _ = client
+    res_id = _seed_resource(db_path, user, note="original")
+    d = DuggDB(db_path)
+    d.add_resource_note(
+        res_id, "later note", source_server="https://other.example",
+        submitter_name="Other",
+    )
+    d.close()
+
+    resp = c.get("/api/feed", headers={"X-Dugg-Key": user["api_key"]})
+    assert resp.status_code == 200
+    notes = resp.json()["resources"][0]["notes"]
+    assert [n["note"] for n in notes] == ["original", "later note"]
+
+
 def test_api_search_returns_structured_resources(client, db_path, user):
     c, _ = client
     _seed_resource(db_path, user, url="https://example.com/rust", title="rust performance")
