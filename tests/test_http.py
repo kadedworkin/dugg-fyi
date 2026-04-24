@@ -851,6 +851,152 @@ def test_api_note_delete_by_author_succeeds_and_audits(client, db_path, user):
     assert edits[0]["new_value"] == ""
 
 
+def test_api_note_delete_is_soft_delete_preserves_tombstone(client, db_path, user):
+    """Delete tombstones the row instead of hard-removing it. The note
+    disappears from the viewer's /api/* payloads (so the Notes section
+    doesn't show it), but the underlying row stays in resource_notes with
+    deleted_at set so owner/admin moderation surfaces can reconstruct
+    what was removed and by whom.
+    """
+    from dugg.db import DuggDB
+    c, _ = client
+    d = DuggDB(db_path)
+    coll_id = d.ensure_default_collection(user["id"])
+    res = d.add_resource(url="https://example.com/soft-delete", collection_id=coll_id,
+                         submitted_by=user["id"], title="Soft")
+    note = d.add_resource_note(res["id"], "will be tombstoned",
+                               submitter_user_id=user["id"],
+                               submitter_name=user["name"])
+    d.close()
+
+    resp = c.post(
+        "/api/note/delete",
+        json={"note_id": note["id"]},
+        headers={"X-Dugg-Key": user["api_key"]},
+    )
+    assert resp.status_code == 200
+
+    # Underlying row still exists with deleted_at stamped.
+    d = DuggDB(db_path)
+    row = d.conn.execute(
+        "SELECT id, note, deleted_at FROM resource_notes WHERE id = ?",
+        (note["id"],),
+    ).fetchone()
+    assert row is not None
+    assert row["deleted_at"] is not None
+    assert row["note"] == "will be tombstoned"
+    # Admin-style listing with include_deleted=True still surfaces it.
+    admin_view = d.list_resource_notes(res["id"], include_deleted=True)
+    assert any(n["id"] == note["id"] for n in admin_view)
+    # Default listing hides it.
+    user_view = d.list_resource_notes(res["id"])
+    assert all(n["id"] != note["id"] for n in user_view)
+    d.close()
+
+
+def test_add_resource_note_resurrects_tombstoned_identical_text(db_path, user):
+    """Delete-then-re-add of identical text must resurrect the tombstone,
+    not silently no-op on the UNIQUE constraint."""
+    from dugg.db import DuggDB
+    d = DuggDB(db_path)
+    coll_id = d.ensure_default_collection(user["id"])
+    res = d.add_resource(url="https://example.com/resurrect", collection_id=coll_id,
+                         submitted_by=user["id"], title="R")
+    first = d.add_resource_note(res["id"], "same text",
+                                submitter_user_id=user["id"],
+                                submitter_name=user["name"])
+    d.delete_resource_note(first["id"], user["id"])
+    second = d.add_resource_note(res["id"], "same text",
+                                 submitter_user_id=user["id"],
+                                 submitter_name=user["name"])
+    assert second is not None
+    # Should be the same row, resurrected (deleted_at cleared).
+    assert second["id"] == first["id"]
+    live = d.list_resource_notes(res["id"])
+    assert any(n["id"] == first["id"] and n.get("deleted_at") is None for n in live)
+    d.close()
+
+
+def test_ingest_attributes_sibling_note_to_local_user_when_name_matches(client, db_path, user):
+    """Kade's key pain: a note federated from his home Dugg to chino-bandido
+    must be editable on chino-bandido. Previously `/ingest` only threaded
+    the matched local user_id onto the resource row, not the sibling note,
+    so can_edit came back false for the remote author's own note.
+    """
+    from dugg.db import DuggDB
+    c, _ = client
+    d = DuggDB(db_path)
+    # Seed a user named "Kade" on this server -- the name the incoming
+    # publish will carry as submitter_name. `user` fixture = "Test" by
+    # default; we'll auth as Kade-on-destination.
+    kade = d.create_user("Kade")
+    d.close()
+
+    payload = {
+        "source_instance_id": "origin-instance",
+        "source_server": "https://home.example",
+        "resource": {
+            "url": "https://example.com/federated",
+            "title": "Federated entry",
+            "note": "Kade's note from home",
+            "submitter_name": "Kade",
+        },
+    }
+    resp = c.post(
+        "/ingest",
+        json=payload,
+        headers={"X-Dugg-Key": kade["api_key"]},
+    )
+    assert resp.status_code == 201
+    res_id = resp.json()["id"]
+
+    # Kade (on destination) sees can_edit=true on his own federated note.
+    get = c.get(f"/api/resource/{res_id}", headers={"X-Dugg-Key": kade["api_key"]})
+    notes = get.json()["resource"]["notes"]
+    kade_note = next(n for n in notes if n["note"] == "Kade's note from home")
+    assert kade_note["can_edit"] is True
+    assert kade_note["can_delete"] is True
+    # He can round-trip an actual edit too.
+    edit = c.post(
+        "/api/note/edit",
+        json={"note_id": kade_note["id"], "text": "revised after federation"},
+        headers={"X-Dugg-Key": kade["api_key"]},
+    )
+    assert edit.status_code == 200
+
+
+def test_ingest_leaves_sibling_note_unattributed_when_name_does_not_match(client, db_path, user):
+    """When the federated author's name matches no local user, the sibling
+    note must stay unattributed (submitter_user_id=''). The `user` fixture
+    gets can_edit=false even though they were the HTTP caller -- the
+    delivery agent is not the author.
+    """
+    c, _ = client
+    payload = {
+        "source_instance_id": "origin-instance",
+        "source_server": "https://home.example",
+        "resource": {
+            "url": "https://example.com/unknown-author",
+            "title": "Entry from unknown",
+            "note": "note text",
+            "submitter_name": "NobodyHereNamedThis",
+        },
+    }
+    resp = c.post(
+        "/ingest",
+        json=payload,
+        headers={"X-Dugg-Key": user["api_key"]},
+    )
+    assert resp.status_code == 201
+    res_id = resp.json()["id"]
+
+    get = c.get(f"/api/resource/{res_id}", headers={"X-Dugg-Key": user["api_key"]})
+    notes = get.json()["resource"]["notes"]
+    n = next(nn for nn in notes if nn["note"] == "note text")
+    assert n["can_edit"] is False
+    assert n["can_delete"] is False
+
+
 def test_api_resource_exposes_per_note_can_edit_delete(client, db_path, user):
     """iOS's per-note context menu keys off can_edit/can_delete on each
     note entry. Viewer gets true only for their own notes."""

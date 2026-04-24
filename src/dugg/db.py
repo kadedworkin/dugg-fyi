@@ -504,6 +504,14 @@ class DuggDB:
         if "publish_scope" not in coll_cols:
             self.conn.execute("ALTER TABLE collections ADD COLUMN publish_scope TEXT DEFAULT 'auto'")
 
+        # Soft-delete column for sibling notes. Hard deletion destroys the
+        # audit trail a moderator would use to reconstruct what was removed
+        # and why. We keep the row, stamp a tombstone, and filter from
+        # user-facing reads. Owner/admin surfaces can opt into seeing them.
+        rn_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(resource_notes)").fetchall()}
+        if "deleted_at" not in rn_cols:
+            self.conn.execute("ALTER TABLE resource_notes ADD COLUMN deleted_at TEXT DEFAULT NULL")
+
         cm_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(collection_members)").fetchall()}
         if "member_type" not in cm_cols:
             self.conn.execute("ALTER TABLE collection_members ADD COLUMN member_type TEXT DEFAULT 'contributor'")
@@ -1361,6 +1369,7 @@ class DuggDB:
                            ON cm.user_id = rn.submitter_user_id
                           AND cm.collection_id = r.collection_id
                     WHERE resource_notes_fts MATCH ?
+                      AND rn.deleted_at IS NULL
                       AND (rn.submitter_user_id = '' OR cm.status = 'active')
                 ),
                 best_rank AS (
@@ -1504,6 +1513,29 @@ class DuggDB:
         """
         if not note or not note.strip():
             return None
+        # If a tombstoned row with the same (resource, source, submitter,
+        # text) tuple exists, resurrect it instead of relying on
+        # INSERT OR IGNORE silently no-op-ing. This lets a user delete a
+        # note and then re-post the identical text -- otherwise the UNIQUE
+        # constraint would swallow the second insert and nothing would
+        # appear.
+        tomb = self.conn.execute(
+            """SELECT id FROM resource_notes
+               WHERE resource_id = ? AND source_server = ?
+                 AND submitter_user_id = ? AND note = ?
+                 AND deleted_at IS NOT NULL""",
+            (resource_id, source_server, submitter_user_id, note),
+        ).fetchone()
+        if tomb:
+            now = _now()
+            self.conn.execute(
+                "UPDATE resource_notes SET deleted_at = NULL, added_at = ? WHERE id = ?",
+                (now, tomb["id"]),
+            )
+            self.conn.commit()
+            return {"id": tomb["id"], "resource_id": resource_id, "note": note,
+                    "source_server": source_server, "submitter_name": submitter_name,
+                    "added_at": now}
         note_id = _uuid()
         now = _now()
         self.conn.execute(
@@ -1519,27 +1551,39 @@ class DuggDB:
                 "source_server": source_server, "submitter_name": submitter_name,
                 "added_at": now}
 
-    def list_resource_notes(self, resource_id: str) -> list[dict]:
+    def list_resource_notes(self, resource_id: str,
+                            include_deleted: bool = False) -> list[dict]:
         """Return all sibling notes attached to a resource, oldest first.
 
-        Callers: feed renderer, Atom feed, ``/r/{id}`` viewer. Do NOT call
-        this from any code path that constructs an outbound publish payload
-        -- sibling notes are local-only enrichment and must not federate.
+        Soft-deleted notes are excluded by default. Owner/admin surfaces
+        can pass ``include_deleted=True`` to see tombstoned rows for
+        moderation. Callers: feed renderer, Atom feed, ``/r/{id}`` viewer.
+        Do NOT call this from any code path that constructs an outbound
+        publish payload -- sibling notes are local-only enrichment and
+        must not federate.
         """
+        where = "WHERE resource_id = ?"
+        if not include_deleted:
+            where += " AND deleted_at IS NULL"
         rows = self.conn.execute(
-            """SELECT id, source_server, source_instance_id, submitter_user_id,
-                      submitter_name, note, added_at
-               FROM resource_notes WHERE resource_id = ? ORDER BY added_at ASC""",
+            f"""SELECT id, source_server, source_instance_id, submitter_user_id,
+                       submitter_name, note, added_at, deleted_at
+                FROM resource_notes {where} ORDER BY added_at ASC""",
             (resource_id,),
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def get_resource_note(self, note_id: str) -> Optional[dict]:
-        """Fetch a single sibling note by id."""
+    def get_resource_note(self, note_id: str,
+                          include_deleted: bool = False) -> Optional[dict]:
+        """Fetch a single sibling note by id. Soft-deleted by default hidden."""
+        where = "WHERE id = ?"
+        if not include_deleted:
+            where += " AND deleted_at IS NULL"
         row = self.conn.execute(
-            """SELECT id, resource_id, source_server, source_instance_id,
-                      submitter_user_id, submitter_name, note, added_at
-               FROM resource_notes WHERE id = ?""",
+            f"""SELECT id, resource_id, source_server, source_instance_id,
+                       submitter_user_id, submitter_name, note, added_at,
+                       deleted_at
+                FROM resource_notes {where}""",
             (note_id,),
         ).fetchone()
         return dict(row) if row else None
@@ -1584,12 +1628,15 @@ class DuggDB:
         return self.get_resource_note(note_id)
 
     def delete_resource_note(self, note_id: str, actor_id: str) -> bool:
-        """Delete a sibling note. Author-gated.
+        """Soft-delete a sibling note. Author-gated.
 
-        Returns True if the note was deleted, False if it didn't exist.
-        Raises PermissionError if the actor isn't the note's author.
-        Logs to ``resource_edits`` with ``field='note'`` and empty
-        ``new_value`` so the deletion shows up in the audit trail.
+        Stamps ``deleted_at`` rather than physically removing the row, so
+        the owner/admin view of the collection can reconstruct what was
+        removed and by whom. Returns True if the note was tombstoned,
+        False if it didn't exist or was already deleted. Raises
+        PermissionError if the actor isn't the note's author. Logs to
+        ``resource_edits`` with ``field='note'`` and empty ``new_value``
+        so the deletion shows up in the audit trail too.
         """
         existing = self.get_resource_note(note_id)
         if not existing:
@@ -1597,7 +1644,10 @@ class DuggDB:
         if not existing["submitter_user_id"] or existing["submitter_user_id"] != actor_id:
             raise PermissionError("Only the note author can delete this note")
         now = _now()
-        self.conn.execute("DELETE FROM resource_notes WHERE id = ?", (note_id,))
+        self.conn.execute(
+            "UPDATE resource_notes SET deleted_at = ? WHERE id = ?",
+            (now, note_id),
+        )
         self.conn.execute(
             """INSERT INTO resource_edits
                (id, resource_id, actor_id, field, old_value, new_value, edited_at)
@@ -1609,13 +1659,20 @@ class DuggDB:
         return True
 
     def batch_resource_notes(self, resource_ids: list[str]) -> dict[str, list[dict]]:
-        """Return resource_notes grouped by resource_id for a batch of IDs."""
+        """Return non-deleted resource_notes grouped by resource_id for a batch of IDs.
+
+        Soft-deleted rows are excluded -- the feed/search serializers that
+        batch-load notes should never surface tombstones to non-admin
+        viewers.
+        """
         if not resource_ids:
             return {}
         placeholders = ",".join("?" for _ in resource_ids)
         rows = self.conn.execute(
             f"""SELECT resource_id, submitter_name, note
-                FROM resource_notes WHERE resource_id IN ({placeholders})
+                FROM resource_notes
+                WHERE resource_id IN ({placeholders})
+                  AND deleted_at IS NULL
                 ORDER BY added_at ASC""",
             resource_ids,
         ).fetchall()
@@ -3651,7 +3708,7 @@ class DuggDB:
 
     # --- Inbound Publish (receiving from remote) ---
 
-    def ingest_remote_publish(self, resource_data: dict, source_instance_id: str, target_collection_id: str, source_server: str = "", submitted_by: str = "") -> Optional[dict]:
+    def ingest_remote_publish(self, resource_data: dict, source_instance_id: str, target_collection_id: str, source_server: str = "", submitted_by: str = "", note_submitter_id: str = "") -> Optional[dict]:
         """Receive a published resource from a remote Dugg instance.
 
         Stores the resource in the target collection with the source tracked.
@@ -3659,6 +3716,15 @@ class DuggDB:
         captured into `resource_notes` (quarantined from outbound publish) on
         both first ingest and duplicate ingest, so cross-server enrichment is
         never lost.
+
+        ``submitted_by`` is the resource-row owner: the HTTP ingest handler
+        resolves this from a name match, else from the authed caller, so the
+        resource always has a local owner. ``note_submitter_id`` is for the
+        sibling note's ``submitter_user_id`` column and is stricter -- only
+        pass a local id when the incoming author was *confirmed* to map to a
+        real local user. An empty value keeps the note unattributed, which
+        correctly makes it uneditable by anyone who happens to share the
+        caller's id.
         """
         url = resource_data.get("url", "")
         if not url:
@@ -3680,6 +3746,7 @@ class DuggDB:
                     existing["id"], incoming_note,
                     source_server=source_server,
                     source_instance_id=source_instance_id,
+                    submitter_user_id=note_submitter_id,
                     submitter_name=submitter_name,
                 )
                 note_added = True
@@ -3731,6 +3798,7 @@ class DuggDB:
                 res_id, incoming_note,
                 source_server=source_server,
                 source_instance_id=source_instance_id,
+                submitter_user_id=note_submitter_id,
                 submitter_name=submitter_name,
             )
 

@@ -271,15 +271,34 @@ def create_app(db_path: Optional[Path] = None, mode: str = "local") -> Starlette
 
         source_server = payload.get("source_server", "")
 
-        # Resolve submitter: prefer matching user by name from source, fall back to authed user
+        # Resolve submitter for the resource row: prefer matching user by
+        # name from source, fall back to the authed caller (required —
+        # resources always need a local owner for the moderation gate).
         submitter_id = user["id"]
         submitter_name = resource_data.get("submitter_name", "")
+        # Sibling-note attribution is stricter: only attach a local
+        # submitter_user_id when the incoming author name *confirms* a
+        # local user. A fallback to the authed caller here would let the
+        # federation delivery agent appear to "own" every sibling note it
+        # relayed, wrongly exposing Edit/Delete affordances.
+        note_submitter_id = ""
         if submitter_name:
-            match = d.conn.execute("SELECT id FROM users WHERE name = ?", (submitter_name,)).fetchone()
-            if match:
-                submitter_id = match["id"]
+            if user.get("name") == submitter_name:
+                # Self-post: the authed caller claims to be the author.
+                # This is unambiguous and beats any other local user that
+                # happens to share the name.
+                submitter_id = user["id"]
+                note_submitter_id = user["id"]
+            else:
+                match = d.conn.execute(
+                    "SELECT id FROM users WHERE name = ? LIMIT 1",
+                    (submitter_name,),
+                ).fetchone()
+                if match:
+                    submitter_id = match["id"]
+                    note_submitter_id = match["id"]
 
-        result = d.ingest_remote_publish(resource_data, source_instance_id, coll_id, source_server=source_server, submitted_by=submitter_id)
+        result = d.ingest_remote_publish(resource_data, source_instance_id, coll_id, source_server=source_server, submitted_by=submitter_id, note_submitter_id=note_submitter_id)
         if not result:
             return _problem_response(500, "Ingest failed")
 

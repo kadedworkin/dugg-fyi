@@ -2,6 +2,27 @@
 
 Dugg follows date-versioned releases: `vYYYY.MM.DD` on each shipped day, with `.N` suffixes if a day ships multiple times. Each release ships from `main` with the commit tagged at release time.
 
+## v2026.04.24.2
+
+Three fixes Kade surfaced while stress-testing per-note edit across home + federated servers:
+
+### Fixed
+
+- **Federated notes were unattributed on the destination, so the remote author couldn't edit their own words.** `ingest_remote_publish` only threaded the resolved submitter id onto the resource row, not the sibling note, so on the destination server every federated note arrived with `submitter_user_id=""` and `can_edit=false`. Both paths now carry a stricter `note_submitter_id`: if the incoming `submitter_name` *confirms* a local user (or the authed caller claims to be the author by name match), the sibling note is attributed to that user. If no local user exists with that name, the note stays unattributed rather than defaulting to the delivery agent — which would have wrongly exposed Edit/Delete to anyone relaying notes on behalf of others.
+
+- **Delete was a hard delete; no moderator recourse.** `delete_resource_note` now stamps a `deleted_at` tombstone instead of `DELETE FROM resource_notes`. The row stays in the DB, hidden from `list_resource_notes` / `batch_resource_notes` / `/api/resource/{id}` / FTS search by default; owner/admin surfaces can opt in via `include_deleted=True`. The audit trail entry (`field='note'`, `new_value=''`) still lands alongside the tombstone so two independent moderation signals exist.
+
+- **Re-adding the same note text after delete silently no-op'd** because `resource_notes` has a UNIQUE constraint on `(resource_id, source_server, submitter_user_id, note)` and `INSERT OR IGNORE` would swallow the second write. `add_resource_note` now detects a matching tombstoned row and resurrects it (clears `deleted_at`, refreshes `added_at`) rather than letting the constraint eat the insert.
+
+### Known gaps (not in this release)
+
+- **Browser feed's "edit note" button edits the primary `resource.note` (attributed to the resource submitter), not the caller's sibling note.** If you're not the submitter and click "edit," you end up writing the primary note with the submitter's attribution — which is why Kade saw "secondary browser note" appear unattributed. Fix requires rendering sibling notes inline in `/feed` with per-note edit buttons and routing them through `/api/note/edit`. Deferred until we pick up the browser surface again.
+- **Soft-delete for resources / skills / videos / articles.** Only notes are soft-deleted in this release. Resource-level soft-delete has a wider blast radius (47+ SELECT sites) and I didn't want to destabilize federation/Atom in the same drop. Tracked for a follow-up.
+
+### Tests
+
+370 passing (+4 this release): federated attribution when `submitter_name` matches a local user; federated stays unattributed when it doesn't; soft-delete tombstones the row and preserves it for admin view; resurrection on identical re-add.
+
 ## v2026.04.24.1
 
 Per-note edit and delete. The .0 release let users edit the resource row but not individual notes attached to it — if a second user dropped a sibling note on someone else's entry, there was no way to revise or remove it. Long-press on a note now surfaces Edit/Delete for notes the viewer authored.
