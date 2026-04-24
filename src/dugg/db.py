@@ -1534,6 +1534,80 @@ class DuggDB:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def get_resource_note(self, note_id: str) -> Optional[dict]:
+        """Fetch a single sibling note by id."""
+        row = self.conn.execute(
+            """SELECT id, resource_id, source_server, source_instance_id,
+                      submitter_user_id, submitter_name, note, added_at
+               FROM resource_notes WHERE id = ?""",
+            (note_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def update_resource_note(self, note_id: str, new_text: str,
+                             actor_id: str) -> Optional[dict]:
+        """Edit a sibling note's text. Author-gated.
+
+        Returns the updated note dict on success; None if the note doesn't
+        exist. Raises PermissionError if the actor isn't the note's author.
+        Logs to ``resource_edits`` with ``field='note'`` so link-swap /
+        note-swap auditing covers sibling notes just like primary notes.
+        """
+        text = (new_text or "").strip()
+        if not text:
+            return None
+        existing = self.get_resource_note(note_id)
+        if not existing:
+            return None
+        # Cross-server sibling notes have empty submitter_user_id (the
+        # remote user isn't a local principal). We disallow editing those
+        # since there's no author to match -- they belong to whoever owns
+        # the note on the origin server.
+        if not existing["submitter_user_id"] or existing["submitter_user_id"] != actor_id:
+            raise PermissionError("Only the note author can edit this note")
+        old_text = existing["note"] or ""
+        if old_text == text:
+            return existing
+        now = _now()
+        self.conn.execute(
+            "UPDATE resource_notes SET note = ? WHERE id = ?",
+            (text, note_id),
+        )
+        self.conn.execute(
+            """INSERT INTO resource_edits
+               (id, resource_id, actor_id, field, old_value, new_value, edited_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (_uuid(), existing["resource_id"], actor_id, "note",
+             str(old_text), text, now),
+        )
+        self.conn.commit()
+        return self.get_resource_note(note_id)
+
+    def delete_resource_note(self, note_id: str, actor_id: str) -> bool:
+        """Delete a sibling note. Author-gated.
+
+        Returns True if the note was deleted, False if it didn't exist.
+        Raises PermissionError if the actor isn't the note's author.
+        Logs to ``resource_edits`` with ``field='note'`` and empty
+        ``new_value`` so the deletion shows up in the audit trail.
+        """
+        existing = self.get_resource_note(note_id)
+        if not existing:
+            return False
+        if not existing["submitter_user_id"] or existing["submitter_user_id"] != actor_id:
+            raise PermissionError("Only the note author can delete this note")
+        now = _now()
+        self.conn.execute("DELETE FROM resource_notes WHERE id = ?", (note_id,))
+        self.conn.execute(
+            """INSERT INTO resource_edits
+               (id, resource_id, actor_id, field, old_value, new_value, edited_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (_uuid(), existing["resource_id"], actor_id, "note",
+             str(existing["note"] or ""), "", now),
+        )
+        self.conn.commit()
+        return True
+
     def batch_resource_notes(self, resource_ids: list[str]) -> dict[str, list[dict]]:
         """Return resource_notes grouped by resource_id for a batch of IDs."""
         if not resource_ids:

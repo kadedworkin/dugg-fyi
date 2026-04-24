@@ -1656,18 +1656,30 @@ async function syncNow(e) {
 
         notes: list[dict] = []
         if r.get("note"):
+            # Primary note is attached to the resource row (resource.note)
+            # rather than resource_notes. It carries no stable note-level
+            # id, so clients address it as id="" and route edits through
+            # /api/edit (resource-level) instead of /api/note/edit.
             notes.append({
+                "id": "",
                 "author": submitter_cache.get(sub_id, ""),
                 "note": r["note"],
                 "added_at": r.get("created_at") or "",
                 "source_server": r.get("source_server") or "",
+                "can_edit": bool(viewer_id and sub_id == viewer_id),
+                "can_delete": bool(viewer_id and sub_id == viewer_id),
             })
         for sn in sibling_notes or []:
+            sn_submitter = sn.get("submitter_user_id") or ""
+            mine = bool(viewer_id and sn_submitter and sn_submitter == viewer_id)
             notes.append({
+                "id": sn.get("id") or "",
                 "author": sn.get("submitter_name") or "",
                 "note": sn.get("note") or "",
                 "added_at": sn.get("added_at") or "",
                 "source_server": sn.get("source_server") or "",
+                "can_edit": mine,
+                "can_delete": mine,
             })
 
         source_type = r.get("source_type") or ""
@@ -1850,12 +1862,102 @@ async function syncNow(e) {
 
         return JSONResponse({
             "note": {
+                "id": result.get("id", ""),
                 "author": user.get("name", ""),
                 "note": note_text,
                 "added_at": result.get("added_at", ""),
                 "source_server": "",
+                "can_edit": True,
+                "can_delete": True,
             }
         }, status_code=201)
+
+    async def handle_api_note_edit(request: Request):
+        """POST /api/note/edit — edit a sibling note you authored.
+
+        Body: {"note_id": "...", "text": "..."}
+        The primary note on a resource is not addressable here (id="" in
+        the serializer) — callers editing the primary note route through
+        /api/edit with field=note instead.
+
+        Logs to ``resource_edits`` with ``field='note'`` so note-swap
+        attacks show up in the audit trail alongside URL/title changes.
+        """
+        try:
+            user = resolve_user_from_request(request)
+        except ValueError as e:
+            return _problem_response(401, str(e))
+        try:
+            body = await request.json()
+        except Exception:
+            return _problem_response(400, "Invalid JSON payload")
+
+        note_id = (body.get("note_id") or "").strip()
+        text = (body.get("text") or "").strip()
+        if not note_id:
+            return _problem_response(400, "Missing note_id")
+        if not text:
+            return _problem_response(400, "Missing text")
+
+        d = get_db()
+        existing = d.get_resource_note(note_id)
+        if not existing:
+            return _problem_response(404, "Note not found")
+        # Visibility gate: caller must see the parent resource.
+        resource = d.get_resource(existing["resource_id"])
+        if not resource or resource.get("collection_id") not in d._accessible_collection_ids(user["id"]):
+            return _problem_response(404, "Note not found")
+        try:
+            updated = d.update_resource_note(note_id, text, user["id"])
+        except PermissionError:
+            return _problem_response(403, "Only the note author can edit this note")
+        if not updated:
+            return _problem_response(400, "Empty note")
+
+        return JSONResponse({
+            "note": {
+                "id": updated["id"],
+                "author": updated.get("submitter_name") or "",
+                "note": updated["note"],
+                "added_at": updated.get("added_at", ""),
+                "source_server": updated.get("source_server") or "",
+                "can_edit": True,
+                "can_delete": True,
+            }
+        })
+
+    async def handle_api_note_delete(request: Request):
+        """POST /api/note/delete — delete a sibling note you authored.
+
+        Body: {"note_id": "..."}
+        """
+        try:
+            user = resolve_user_from_request(request)
+        except ValueError as e:
+            return _problem_response(401, str(e))
+        try:
+            body = await request.json()
+        except Exception:
+            return _problem_response(400, "Invalid JSON payload")
+
+        note_id = (body.get("note_id") or "").strip()
+        if not note_id:
+            return _problem_response(400, "Missing note_id")
+
+        d = get_db()
+        existing = d.get_resource_note(note_id)
+        if not existing:
+            return _problem_response(404, "Note not found")
+        resource = d.get_resource(existing["resource_id"])
+        if not resource or resource.get("collection_id") not in d._accessible_collection_ids(user["id"]):
+            return _problem_response(404, "Note not found")
+        try:
+            ok = d.delete_resource_note(note_id, user["id"])
+        except PermissionError:
+            return _problem_response(403, "Only the note author can delete this note")
+        if not ok:
+            return _problem_response(404, "Note not found")
+        return JSONResponse({"status": "deleted", "note_id": note_id})
 
     async def handle_api_edit(request: Request):
         """POST /api/edit — modify a resource the caller owns (or owns the
@@ -3438,6 +3540,8 @@ async function syncNow(e) {
         Route("/api/search", endpoint=handle_api_search),
         Route("/api/resource/{id}", endpoint=handle_api_resource),
         Route("/api/note", endpoint=handle_api_note, methods=["POST"]),
+        Route("/api/note/edit", endpoint=handle_api_note_edit, methods=["POST"]),
+        Route("/api/note/delete", endpoint=handle_api_note_delete, methods=["POST"]),
         Route("/api/edit", endpoint=handle_api_edit, methods=["POST"]),
         Route("/api/resource/{id}/edits", endpoint=handle_api_resource_edits),
         Route("/paste", endpoint=handle_paste_page_bare),

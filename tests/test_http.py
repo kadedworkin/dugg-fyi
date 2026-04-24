@@ -748,6 +748,140 @@ def test_tools_dugg_edit_without_flag_still_audits(client, db_path, user):
     assert get.json()["resource"]["edit_count"] == 1
 
 
+def test_api_note_edit_by_author_succeeds_and_audits(client, db_path, user):
+    """Sibling-note edit by the author: updates text, logs a resource_edits
+    row with field='note' so note-swap is auditable alongside URL-swap."""
+    from dugg.db import DuggDB
+    c, _ = client
+    # Submitter owns the resource; `user` is a different member who'll
+    # attach and then edit their own sibling note.
+    d = DuggDB(db_path)
+    submitter = d.create_user("Submitter")
+    coll = d.create_collection("Shared", submitter["id"], visibility="shared")
+    d.invite_member(coll["id"], submitter["id"], user["id"])
+    res = d.add_resource(url="https://example.com/shared", collection_id=coll["id"],
+                         submitted_by=submitter["id"], title="Shared")
+    note_row = d.add_resource_note(res["id"], "original sibling",
+                                   submitter_user_id=user["id"],
+                                   submitter_name=user["name"])
+    d.close()
+
+    resp = c.post(
+        "/api/note/edit",
+        json={"note_id": note_row["id"], "text": "revised sibling"},
+        headers={"X-Dugg-Key": user["api_key"]},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["note"]["note"] == "revised sibling"
+
+    hist = c.get(
+        f"/api/resource/{res['id']}/edits",
+        headers={"X-Dugg-Key": user["api_key"]},
+    )
+    edits = hist.json()["edits"]
+    assert len(edits) == 1
+    assert edits[0]["field"] == "note"
+    assert edits[0]["old_value"] == "original sibling"
+    assert edits[0]["new_value"] == "revised sibling"
+    assert edits[0]["actor"] == user["name"]
+
+
+def test_api_note_edit_by_non_author_forbidden(client, db_path, user):
+    """A collection member who didn't author the sibling note can't edit it."""
+    from dugg.db import DuggDB
+    c, _ = client
+    d = DuggDB(db_path)
+    author = d.create_user("Author")
+    coll = d.create_collection("Shared", user["id"], visibility="shared")
+    d.invite_member(coll["id"], user["id"], author["id"])
+    res = d.add_resource(url="https://example.com/x", collection_id=coll["id"],
+                         submitted_by=user["id"], title="x")
+    note_row = d.add_resource_note(res["id"], "author's note",
+                                   submitter_user_id=author["id"],
+                                   submitter_name=author["name"])
+    d.close()
+
+    resp = c.post(
+        "/api/note/edit",
+        json={"note_id": note_row["id"], "text": "hijack"},
+        headers={"X-Dugg-Key": user["api_key"]},
+    )
+    assert resp.status_code == 403
+
+
+def test_api_note_delete_by_author_succeeds_and_audits(client, db_path, user):
+    """Author deleting their own sibling note removes it and records the
+    deletion in the audit trail (old=text, new='')."""
+    from dugg.db import DuggDB
+    c, _ = client
+    d = DuggDB(db_path)
+    submitter = d.create_user("Submitter2")
+    coll = d.create_collection("Shared2", submitter["id"], visibility="shared")
+    d.invite_member(coll["id"], submitter["id"], user["id"])
+    res = d.add_resource(url="https://example.com/shared2", collection_id=coll["id"],
+                         submitted_by=submitter["id"], title="Shared2")
+    note_row = d.add_resource_note(res["id"], "to be deleted",
+                                   submitter_user_id=user["id"],
+                                   submitter_name=user["name"])
+    d.close()
+
+    resp = c.post(
+        "/api/note/delete",
+        json={"note_id": note_row["id"]},
+        headers={"X-Dugg-Key": user["api_key"]},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "deleted"
+
+    # Note is gone from the resource's notes[] payload.
+    get = c.get(f"/api/resource/{res['id']}",
+                headers={"X-Dugg-Key": user["api_key"]})
+    notes = get.json()["resource"]["notes"]
+    assert all(n["id"] != note_row["id"] for n in notes)
+
+    # Audit trail captures the deletion.
+    hist = c.get(
+        f"/api/resource/{res['id']}/edits",
+        headers={"X-Dugg-Key": user["api_key"]},
+    )
+    edits = hist.json()["edits"]
+    assert len(edits) == 1
+    assert edits[0]["field"] == "note"
+    assert edits[0]["old_value"] == "to be deleted"
+    assert edits[0]["new_value"] == ""
+
+
+def test_api_resource_exposes_per_note_can_edit_delete(client, db_path, user):
+    """iOS's per-note context menu keys off can_edit/can_delete on each
+    note entry. Viewer gets true only for their own notes."""
+    from dugg.db import DuggDB
+    c, _ = client
+    d = DuggDB(db_path)
+    other = d.create_user("Other")
+    coll = d.create_collection("Shared3", user["id"], visibility="shared")
+    d.invite_member(coll["id"], user["id"], other["id"])
+    res = d.add_resource(url="https://example.com/shared3", collection_id=coll["id"],
+                         submitted_by=user["id"], title="s3", note="my primary")
+    d.add_resource_note(res["id"], "other's sibling",
+                        submitter_user_id=other["id"], submitter_name=other["name"])
+    d.add_resource_note(res["id"], "my sibling",
+                        submitter_user_id=user["id"], submitter_name=user["name"])
+    d.close()
+
+    resp = c.get(f"/api/resource/{res['id']}", headers={"X-Dugg-Key": user["api_key"]})
+    notes = resp.json()["resource"]["notes"]
+    by_text = {n["note"]: n for n in notes}
+    # Primary note belongs to viewer → editable.
+    assert by_text["my primary"]["can_edit"] is True
+    assert by_text["my primary"]["can_delete"] is True
+    # Other user's sibling → not editable.
+    assert by_text["other's sibling"]["can_edit"] is False
+    assert by_text["other's sibling"]["can_delete"] is False
+    # Viewer's own sibling → editable.
+    assert by_text["my sibling"]["can_edit"] is True
+    assert by_text["my sibling"]["can_delete"] is True
+
+
 def test_cli_cmd_edit_audits_human_edits(client, db_path, user):
     """Regression: `dugg edit` via CLI must audit like iOS /api/edit does.
     Previously the CLI call-site omitted actor_id, so human edits through
