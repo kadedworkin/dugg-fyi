@@ -56,6 +56,10 @@ Configure your MCP client with the SSE transport and your API key:
 | `/ingest` | POST | Key | Receive published resources from remote instances |
 | `/delete` | POST | Key | Delete a published resource by URL. Mirrors `/ingest` for CRUD symmetry. Records tombstone for Atom feed propagation. |
 | `/tools/{name}` | POST | Key | HTTP dispatch for any MCP tool |
+| `/api/feed` | GET | Key | Structured JSON feed for typed clients (iOS app, custom UIs). `?limit=N` (max 500). |
+| `/api/search` | GET | Key | Structured JSON search (`?q=...&limit=N`, max 100). Shape mirrors `/api/feed`. |
+| `/api/resource/{id}` | GET | Key | Structured JSON for a single resource (404 if not in an accessible collection). |
+| `/publish-note` | POST | Key | Upstream federation — push a local note to the source server of a synced resource. Body: `{resource_id, note}`. |
 | `/events/stream` | GET | Key | SSE stream of real-time Dugg events |
 | `/invite/{token}` | GET | None | Invite page (HTML for browsers, JSON for agents via `Accept: application/json`) |
 | `/invite/{token}/redeem` | POST | None | Process invite (form or JSON) |
@@ -109,6 +113,21 @@ curl -X POST http://localhost:8411/tools/dugg_search \
   -H "Content-Type: application/json" \
   -d '{"query": "webhook architectures"}'
 ```
+
+**Typed-client JSON feed (iOS, custom UIs):**
+
+```bash
+curl -H "X-Dugg-Key: dugg_your_api_key" \
+  "http://localhost:8411/api/feed?limit=50"
+
+curl -H "X-Dugg-Key: dugg_your_api_key" \
+  "http://localhost:8411/api/search?q=webhook%20architecture&limit=20"
+
+curl -H "X-Dugg-Key: dugg_your_api_key" \
+  "http://localhost:8411/api/resource/abc123"
+```
+
+Each resource is serialized as `{id, url, title, description, note, tags, submitter, added_at, published_at, source_label}`; `/api/resource/{id}` also returns `body` for full content. These endpoints power the native iOS app and any other typed client that can't speak MCP over SSE.
 
 **Paste raw content with a publication date:**
 

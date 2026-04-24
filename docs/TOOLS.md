@@ -1,6 +1,6 @@
 # MCP Tools
 
-Dugg exposes 56 tools via MCP. Your agent calls these directly — no REST API wrapper needed.
+Dugg exposes 65 tools via MCP. Your agent calls these directly — no REST API wrapper needed.
 
 ## Tool reference
 
@@ -15,7 +15,8 @@ Dugg exposes 56 tools via MCP. Your agent calls these directly — no REST API w
 | `dugg_edit` | Update a resource's metadata or content (submitter only). |
 | `dugg_paste` | Submit raw content (text, HTML, email) as a resource. Accepts `published_at` for the original send/pub date. |
 | `dugg_collections` | List all collections you have access to. |
-| `dugg_create_collection` | Create a new collection. |
+| `dugg_create_collection` | Create a new collection. Accepts `publish_scope: "auto" \| "none"` to gate federation at create time. |
+| `dugg_set_collection_scope` | Change a collection's `publish_scope` after creation (`auto` federates matching items; `none` pins content to this server). |
 | `dugg_link` | Create a relationship between two resources (knowledge graph). |
 | `dugg_related` | Get resources related to a given resource via agent-built connections. |
 | `dugg_publish` | Publish a resource to named targets (e.g. `public`, `aev-team`). |
@@ -63,6 +64,13 @@ Dugg exposes 56 tools via MCP. Your agent calls these directly — no REST API w
 | `dugg_webhook_test` | Fire a test event to all active webhooks. |
 | `dugg_share_link` | Generate a shareable `/r/{id}` URL for a resource (no key in URL). |
 | `dugg_email` | Show your email forwarding addresses for connected instances. |
+| `dugg_skill_list` | List skills (SKILL.md procedures) available in a collection. Distinct from stored links — skills are explicitly-authored, installable agent procedures. |
+| `dugg_skill_get` | Fetch a skill's full SKILL.md body by id or name (frontmatter + body). |
+| `dugg_skill_search` | Full-text search across skills in accessible collections (title, description, author, body). |
+| `dugg_skill_install` | Return a skill pre-formatted for the caller's SKILL.md directory (`{markdown, filename, name}`). |
+| `dugg_skill_add` | Author a new skill from a SKILL.md body. Parses frontmatter, validates name, stores in a collection. |
+| `dugg_skill_fork` | Fork a skill into your own collection for editing; new row keeps a `supersedes` pointer to the source. |
+| `dugg_skill_edit` | Create a new superseding version of a skill by submitting an edited SKILL.md body. |
 
 ## Enrichment
 

@@ -56,7 +56,7 @@ For remote connections (HTTP/SSE), see [docs/HTTP.md](docs/HTTP.md).
 └──────────────────┬──────────────────────────┘
                    │ MCP (stdio or HTTP/SSE)
 ┌──────────────────▼──────────────────────────┐
-│  Dugg MCP Server — 51 tools                 │
+│  Dugg MCP Server — 65 tools                 │
 │  - Auth, rate limiting, event emission      │
 │  - Publish sync daemon (federation)         │
 │  - SQLite storage, FTS5 search              │
@@ -89,12 +89,14 @@ For remote connections (HTTP/SSE), see [docs/HTTP.md](docs/HTTP.md).
 
 | Surface | Description |
 |---------|-------------|
-| **MCP tools** | 51 tools for agents — add, search, publish, moderate |
-| **CLI** | `dugg add`, `dugg search`, `dugg feed`, `dugg export`, `dugg import`, `dugg admin` |
+| **MCP tools** | 65 tools for agents — add, search, publish, moderate, skills |
+| **CLI** | `dugg add`, `dugg search`, `dugg feed`, `dugg export`, `dugg import`, `dugg admin`, `dugg skill` |
+| **iOS app** | Native SwiftUI client — merged feed, search, per-server origin, offline-friendly |
 | **Chrome extension** | "Dugg This" — one-click from any browser tab |
 | **Email forwarding** | Self-describing `{key}@{host}.dugg.fyi` addresses |
-| **Slack** | `/dugg` slash command + webhook notifications |
-| **Browser** | Read-only feed, paste form, admin panel |
+| **RSS/Atom ingest** | Server-side polling daemon + agent watcher for parameterized/authenticated feeds |
+| **Slack** | `/dugg` slash command + webhook notifications with Block Kit reactions |
+| **Browser** | Read-only feed, paste form, admin panel, invite redemption |
 
 ## Documentation
 
@@ -102,7 +104,7 @@ For remote connections (HTTP/SSE), see [docs/HTTP.md](docs/HTTP.md).
 |-----|--------|
 | [docs/GETTING-STARTED.md](docs/GETTING-STARTED.md) | Local vs shared setup, the three paths, why two accounts |
 | [docs/SCALING.md](docs/SCALING.md) | Contributor vs subscriber roles, large-audience deployment |
-| [docs/TOOLS.md](docs/TOOLS.md) | Full MCP tool reference (51 tools) |
+| [docs/TOOLS.md](docs/TOOLS.md) | Full MCP tool reference (65 tools) |
 | [docs/CLI.md](docs/CLI.md) | CLI commands, admin TUI, `/dugg` slash command |
 | [docs/HTTP.md](docs/HTTP.md) | HTTP/SSE server, endpoints, remote agent setup |
 | [docs/GOVERNANCE.md](docs/GOVERNANCE.md) | Invite trees, bans, appeals, rate limits, pruning, succession |
@@ -115,7 +117,7 @@ For remote connections (HTTP/SSE), see [docs/HTTP.md](docs/HTTP.md).
 
 ```bash
 uv sync --all-extras
-uv run pytest           # 208 tests
+uv run pytest           # 340 tests
 ```
 
 ## License

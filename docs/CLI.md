@@ -46,6 +46,12 @@ Dugg ships a full management CLI alongside the MCP server.
 | `dugg admin` | Launch the terminal admin UI |
 | `dugg export <file> [--collection ...] [--tag ...] [--since ...] [--pretty]` | Export resources to a portable `.dugg.json` file |
 | `dugg import <file> [--collection ...] [--tag ...] [--on-conflict skip\|update] [--dry-run]` | Import resources from a `.dugg.json` file |
+| `dugg skill add <SKILL.md> [--collection ...]` | Add a SKILL.md procedure to a collection |
+| `dugg skill list [--collection ...] [--author me\|<id>] [--limit N]` | List skills you can see, optionally scoped to a collection or author |
+| `dugg skill get <id-or-name> [--collection ...]` | Print a skill as a SKILL.md document (frontmatter + body) |
+| `dugg skill fork <id> [--collection ...] [--name ...]` | Fork a skill into your collection with a `supersedes` pointer |
+| `dugg skill edit <id>` | Open the skill in `$EDITOR`, submit the edited body as a new superseding version |
+| `dugg skill history <id>` | Show the version chain for a skill |
 
 ## Feed & search output
 
