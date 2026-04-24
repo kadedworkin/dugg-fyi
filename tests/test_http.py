@@ -748,6 +748,37 @@ def test_tools_dugg_edit_without_flag_still_audits(client, db_path, user):
     assert get.json()["resource"]["edit_count"] == 1
 
 
+def test_cli_cmd_edit_audits_human_edits(client, db_path, user):
+    """Regression: `dugg edit` via CLI must audit like iOS /api/edit does.
+    Previously the CLI call-site omitted actor_id, so human edits through
+    the CLI silently bypassed the resource_edits log that moderators rely
+    on for link-swap detection."""
+    from argparse import Namespace
+    from dugg.cli import cmd_edit
+
+    c, _ = client
+    res_id = _seed_resource(db_path, user, note="original", title="Original")
+
+    args = Namespace(
+        db=str(db_path),
+        key=user["api_key"],
+        target=res_id,
+        title="CLI-edited title",
+        note="CLI-edited note",
+        description=None,
+        author=None,
+        source_type=None,
+        tags=None,
+    )
+    cmd_edit(args)
+
+    resp = c.get(f"/api/resource/{res_id}/edits",
+                 headers={"X-Dugg-Key": user["api_key"]})
+    assert resp.status_code == 200
+    fields = {e["field"] for e in resp.json()["edits"]}
+    assert fields == {"title", "note"}
+
+
 def test_api_search_returns_structured_resources(client, db_path, user):
     c, _ = client
     _seed_resource(db_path, user, url="https://example.com/rust", title="rust performance")

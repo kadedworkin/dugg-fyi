@@ -1307,7 +1307,9 @@ def cmd_edit(args):
         sys.exit(1)
 
     if updates:
-        result = db.update_resource(resource_id, **updates)
+        # Human-driven edit: thread actor_id so the change lands in
+        # resource_edits alongside edits from iOS and other surfaces.
+        result = db.update_resource(resource_id, actor_id=user["id"], **updates)
     else:
         result = db.get_resource(resource_id)
 
