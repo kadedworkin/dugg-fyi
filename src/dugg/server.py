@@ -279,9 +279,23 @@ async def list_tools() -> list[Tool]:
                     "name": {"type": "string", "description": "Collection name"},
                     "description": {"type": "string", "description": "What this collection is for", "default": ""},
                     "visibility": {"type": "string", "enum": ["private", "shared"], "description": "Whether others can be added to this collection", "default": "private"},
+                    "publish_scope": {"type": "string", "enum": ["auto", "none"], "description": "'auto' = agent may federate items from this collection to other Dugg servers when topics match. 'none' = items stay on this server only (use for draft/private collections).", "default": "auto"},
                     "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
                 },
                 "required": ["name"],
+            },
+        ),
+        Tool(
+            name="dugg_set_collection_scope",
+            description="Set a collection's publish_scope to 'auto' (agent may federate matching items) or 'none' (items stay on this server). Use 'none' on drafts or sensitive collections you never want reaching other Dugg servers.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "collection": {"type": "string", "description": "Collection name or id"},
+                    "publish_scope": {"type": "string", "enum": ["auto", "none"]},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+                "required": ["collection", "publish_scope"],
             },
         ),
         Tool(
@@ -971,6 +985,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = _handle_share(d, user_id, arguments)
         elif name == "dugg_create_collection":
             result = _handle_create_collection(d, user_id, arguments)
+        elif name == "dugg_set_collection_scope":
+            result = _handle_set_collection_scope(d, user_id, arguments)
         elif name == "dugg_create_user":
             result = _handle_create_user(d, arguments)
         elif name == "dugg_invite_user":
@@ -2050,7 +2066,9 @@ def _handle_collections(d: DuggDB, user_id: str) -> list[TextContent]:
     lines = [f"{len(collections)} collection(s):\n"]
     for c in collections:
         count = len(d.list_resources(c["id"], limit=1000))
-        lines.append(f"- [{c['id']}] {c['name']} ({c['visibility']}, {count} resources)")
+        scope = c.get("publish_scope") or "auto"
+        scope_suffix = "" if scope == "auto" else f", scope={scope}"
+        lines.append(f"- [{c['id']}] {c['name']} ({c['visibility']}, {count} resources{scope_suffix})")
         if c.get("description"):
             lines.append(f"  {c['description']}")
     return [TextContent(type="text", text="\n".join(lines))]
@@ -2081,8 +2099,43 @@ def _handle_create_collection(d: DuggDB, user_id: str, args: dict) -> list[TextC
     name = args["name"]
     description = args.get("description", "")
     visibility = args.get("visibility", "private")
-    result = d.create_collection(name, user_id, description=description, visibility=visibility)
-    return [TextContent(type="text", text=f"Created collection: {result['name']} [{result['id']}] ({result['visibility']})")]
+    publish_scope = args.get("publish_scope", "auto")
+    try:
+        result = d.create_collection(name, user_id, description=description, visibility=visibility, publish_scope=publish_scope)
+    except ValueError as e:
+        return [TextContent(type="text", text=f"Error: {e}")]
+    scope_note = f", scope={publish_scope}" if publish_scope != "auto" else ""
+    return [TextContent(type="text", text=f"Created collection: {result['name']} [{result['id']}] ({result['visibility']}{scope_note})")]
+
+
+def _handle_set_collection_scope(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    ident = args["collection"]
+    publish_scope = args["publish_scope"]
+    # Resolve by id first, fall back to name within this user's collections.
+    coll = d.get_collection(ident)
+    if not coll:
+        for c in d.list_collections(user_id):
+            if c["name"] == ident:
+                coll = c
+                break
+    if not coll:
+        return [TextContent(type="text", text=f"No collection found matching {ident!r}.")]
+    # Only the creator can change scope.
+    if coll.get("created_by") and coll["created_by"] != user_id:
+        return [TextContent(type="text", text="Only the collection owner can change publish_scope.")]
+    try:
+        ok = d.set_collection_publish_scope(coll["id"], publish_scope)
+    except ValueError as e:
+        return [TextContent(type="text", text=f"Error: {e}")]
+    if not ok:
+        return [TextContent(type="text", text="Update failed — collection not found.")]
+    msg = (
+        f"Set {coll['name']} publish_scope to {publish_scope}."
+        + ("\nAgent will not federate items from this collection to other Dugg servers."
+           if publish_scope == "none"
+           else "\nAgent may federate matching items to other Dugg servers on topic match.")
+    )
+    return [TextContent(type="text", text=msg)]
 
 
 def _handle_create_user(d: DuggDB, args: dict) -> list[TextContent]:

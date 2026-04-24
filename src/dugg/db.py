@@ -141,6 +141,7 @@ class DuggDB:
                 description TEXT DEFAULT '',
                 created_by TEXT NOT NULL REFERENCES users(id),
                 visibility TEXT DEFAULT 'private' CHECK(visibility IN ('private', 'shared')),
+                publish_scope TEXT DEFAULT 'auto' CHECK(publish_scope IN ('auto', 'none')),
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -478,6 +479,10 @@ class DuggDB:
             self.conn.execute("ALTER TABLE invite_tokens ADD COLUMN onboarded_at TEXT DEFAULT NULL")
         if "role" not in inv_cols:
             self.conn.execute("ALTER TABLE invite_tokens ADD COLUMN role TEXT DEFAULT 'contributor'")
+
+        coll_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(collections)").fetchall()}
+        if "publish_scope" not in coll_cols:
+            self.conn.execute("ALTER TABLE collections ADD COLUMN publish_scope TEXT DEFAULT 'auto'")
 
         cm_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(collection_members)").fetchall()}
         if "member_type" not in cm_cols:
@@ -821,19 +826,38 @@ class DuggDB:
 
     # --- Collections ---
 
-    def create_collection(self, name: str, user_id: str, description: str = "", visibility: str = "private") -> dict:
+    def create_collection(self, name: str, user_id: str, description: str = "", visibility: str = "private",
+                          publish_scope: str = "auto") -> dict:
+        if publish_scope not in ("auto", "none"):
+            raise ValueError(f"publish_scope must be 'auto' or 'none', got {publish_scope!r}")
         coll_id = _uuid()
         now = _now()
         self.conn.execute(
-            "INSERT INTO collections (id, name, description, created_by, visibility, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (coll_id, name, description, user_id, visibility, now, now),
+            "INSERT INTO collections (id, name, description, created_by, visibility, publish_scope, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (coll_id, name, description, user_id, visibility, publish_scope, now, now),
         )
         self.conn.execute(
             "INSERT INTO collection_members (collection_id, user_id, role, status, joined_at) VALUES (?, ?, 'owner', 'active', ?)",
             (coll_id, user_id, now),
         )
         self.conn.commit()
-        return {"id": coll_id, "name": name, "description": description, "visibility": visibility, "created_by": user_id, "created_at": now}
+        return {"id": coll_id, "name": name, "description": description, "visibility": visibility,
+                "publish_scope": publish_scope, "created_by": user_id, "created_at": now}
+
+    def set_collection_publish_scope(self, collection_id: str, publish_scope: str) -> bool:
+        """Set 'auto' (agent may federate) or 'none' (stays on this server)."""
+        if publish_scope not in ("auto", "none"):
+            raise ValueError(f"publish_scope must be 'auto' or 'none', got {publish_scope!r}")
+        cur = self.conn.execute(
+            "UPDATE collections SET publish_scope = ?, updated_at = ? WHERE id = ?",
+            (publish_scope, _now(), collection_id),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def get_collection(self, collection_id: str) -> Optional[dict]:
+        row = self.conn.execute("SELECT * FROM collections WHERE id = ?", (collection_id,)).fetchone()
+        return dict(row) if row else None
 
     def list_collections(self, user_id: str) -> list[dict]:
         rows = self.conn.execute(
@@ -954,8 +978,13 @@ class DuggDB:
             "source_type": source_type, "author": author, "note": note, "submitted_by": submitted_by,
             "collection_id": collection_id, "tags": tags or [], "created_at": now,
         }
+        scope_row = self.conn.execute("SELECT publish_scope FROM collections WHERE id = ?", (collection_id,)).fetchone()
+        collection_publish_scope = (scope_row["publish_scope"] if scope_row else "auto") or "auto"
         self.emit_event("resource_added", actor_id=submitted_by, collection_id=collection_id,
-                        payload={"resource_id": res_id, "url": url, "title": title, "note": note, "source_type": source_type, "submitted_by": submitted_by})
+                        payload={"resource_id": res_id, "url": url, "title": title, "note": note,
+                                 "source_type": source_type, "submitted_by": submitted_by,
+                                 "collection_id": collection_id,
+                                 "collection_publish_scope": collection_publish_scope})
         return result
 
     def update_resource(self, resource_id: str, **fields) -> Optional[dict]:
@@ -3552,12 +3581,16 @@ class DuggDB:
         self.conn.commit()
 
         # Fire resource_added event so webhooks (Slack notifications etc.) trigger
+        scope_row = self.conn.execute("SELECT publish_scope FROM collections WHERE id = ?", (target_collection_id,)).fetchone()
+        collection_publish_scope = (scope_row["publish_scope"] if scope_row else "auto") or "auto"
         self.emit_event("resource_added", actor_id=submitted_by, collection_id=target_collection_id,
                         payload={"resource_id": res_id, "url": url,
                                  "title": resource_data.get("title", ""),
                                  "note": incoming_note,
                                  "source_type": resource_data.get("source_type", "unknown"),
                                  "submitted_by": submitted_by,
+                                 "collection_id": target_collection_id,
+                                 "collection_publish_scope": collection_publish_scope,
                                  "source_server": source_server})
 
         return {"id": res_id, "status": "ingested", "url": url, "title": resource_data.get("title", "")}
