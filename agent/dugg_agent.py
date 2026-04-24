@@ -454,7 +454,7 @@ class DuggAgent:
                 log.info("[%s] YouTube backfill for %s (%s)", server_name, resource_id, title[:50])
                 yt_fields = await _enrich_youtube_locally(url)
                 if yt_fields:
-                    await client.edit_resource(resource_id, **yt_fields)
+                    await client.edit_resource(resource_id, agent_enriched=True, **yt_fields)
                     yt_enriched = True
 
         # Full LLM enrichment: only for the agent's own submissions
@@ -468,6 +468,7 @@ class DuggAgent:
                 description=enriched.get("summary", ""),
                 tags=enriched.get("tags", []),
                 raw_metadata={"agent_enriched": True},
+                agent_enriched=True,
             )
             if publish_scope == "none":
                 log.info("[%s] skipping federation for %s — collection publish_scope=none", server_name, resource_id)

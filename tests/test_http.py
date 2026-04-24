@@ -703,6 +703,51 @@ def test_api_resource_exposes_can_edit_and_can_delete(client, db_path, user):
     assert r["edit_count"] == 0
 
 
+def test_tools_dugg_edit_agent_enriched_skips_audit(client, db_path, user):
+    """Machine enrichment via dugg_edit with agent_enriched=true must not
+    pollute the user-facing edit-history counter. Regression: the dugg
+    watchdog calls dugg_edit post-add to push llm summary + tags back, and
+    that should look like enrichment, not a user edit."""
+    c, _ = client
+    res_id = _seed_resource(db_path, user, description="")
+
+    resp = c.post(
+        "/tools/dugg_edit",
+        json={
+            "resource_id": res_id,
+            "description": "Agent-generated summary",
+            "agent_enriched": True,
+        },
+        headers={"X-Dugg-Key": user["api_key"]},
+    )
+    assert resp.status_code == 200
+
+    get = c.get(f"/api/resource/{res_id}", headers={"X-Dugg-Key": user["api_key"]})
+    assert get.json()["resource"]["edit_count"] == 0
+
+    edits = c.get(f"/api/resource/{res_id}/edits",
+                  headers={"X-Dugg-Key": user["api_key"]})
+    assert edits.json()["edits"] == []
+
+
+def test_tools_dugg_edit_without_flag_still_audits(client, db_path, user):
+    """Absence of the agent_enriched flag keeps the default behavior —
+    human-directed edits through dugg_edit (e.g. a CLI caller or future
+    surface) are audited."""
+    c, _ = client
+    res_id = _seed_resource(db_path, user, note="initial")
+
+    resp = c.post(
+        "/tools/dugg_edit",
+        json={"resource_id": res_id, "note": "human-driven change"},
+        headers={"X-Dugg-Key": user["api_key"]},
+    )
+    assert resp.status_code == 200
+
+    get = c.get(f"/api/resource/{res_id}", headers={"X-Dugg-Key": user["api_key"]})
+    assert get.json()["resource"]["edit_count"] == 1
+
+
 def test_api_search_returns_structured_resources(client, db_path, user):
     c, _ = client
     _seed_resource(db_path, user, url="https://example.com/rust", title="rust performance")

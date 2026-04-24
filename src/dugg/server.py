@@ -812,7 +812,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="dugg_edit",
-            description="Update a resource's metadata or content. Use after enrichment to push summary, tags, or corrected fields back to the server.",
+            description="Update a resource's metadata or content. Use after enrichment to push summary, tags, or corrected fields back to the server. Pass agent_enriched=true for machine-driven enrichment writes so they don't pollute the user-visible edit-history audit trail.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -825,6 +825,7 @@ async def list_tools() -> list[Tool]:
                     "author": {"type": "string", "description": "Corrected author"},
                     "transcript": {"type": "string", "description": "Updated full content"},
                     "tags": {"type": "array", "items": {"type": "string"}, "description": "Tags to add (appended, not replaced)"},
+                    "agent_enriched": {"type": "boolean", "description": "True when the caller is pushing machine-generated enrichment (summary, tags, backfilled metadata). Suppresses the edit-history audit entry so the user-facing 'Edited N times' counter only reflects human-driven changes.", "default": False},
                     "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
                 },
                 "required": ["resource_id"],
@@ -1294,10 +1295,16 @@ def _handle_edit(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
 
     tags = args.pop("tags", None)
     args.pop("resource_id", None)
+    # Agent-driven enrichment (summary, tag backfill, metadata fill-in after
+    # dugg_add) opts out of the audit trail so the user-facing "Edited N
+    # times" counter only reflects human-driven mutations. Human edit paths
+    # (iOS /api/edit, CLI dugg edit) never set this flag.
+    agent_enriched = bool(args.pop("agent_enriched", False))
     update_fields = {k: v for k, v in args.items() if v is not None and v != ""}
 
     if update_fields:
-        updated = d.update_resource(resource_id, actor_id=user_id, **update_fields)
+        edit_actor = "" if agent_enriched else user_id
+        updated = d.update_resource(resource_id, actor_id=edit_actor, **update_fields)
     else:
         updated = resource
 
