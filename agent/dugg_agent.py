@@ -95,11 +95,17 @@ class DuggClient:
 
     @staticmethod
     def _parse_kv(text: str) -> dict:
-        """Parse `Key: value` lines from a tool's text result into a dict."""
+        """Parse `Key: value` lines from a tool's text result into a dict.
+
+        Parenthetical annotations like "Transcript (39 words)" are stripped
+        from the key before normalizing, so the agent can find already-present
+        fields and skip redundant enrichment work.
+        """
         out = {}
         for line in (text or "").splitlines():
             if ":" in line:
                 k, _, v = line.partition(":")
+                k = re.sub(r"\s*\([^)]*\)", "", k)
                 k = k.strip().lower().replace(" ", "_")
                 v = v.strip()
                 if k and v:
