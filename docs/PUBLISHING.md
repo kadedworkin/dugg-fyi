@@ -72,16 +72,17 @@ If the user already knows where content belongs, they can POST to the agent's `/
 
 Put the resource in a collection with `publish_scope: "none"`. Home enriches, nothing leaves.
 
-## Silent reactions
+## Read + reactions
 
-Subscribers silently react to resources. The publisher sees aggregate counts — nobody else sees anything.
+Subscribers can mark resources read or react silently. Read is private per user; the publisher sees only aggregate reaction counts.
 
 ```
-dugg_react(resource_id="abc123", reaction="tap")
+dugg_mark_read(resource_id="abc123")
+dugg_react(resource_id="abc123", reaction="star")
 dugg_reactions(resource_id="abc123")  # publisher only
 ```
 
-No public like counts, no emoji piles, no social proof pressure. Reactions are idempotent.
+No public like counts, no emoji piles, no social proof pressure. Reactions are idempotent and also mark the item read implicitly.
 
 ## Publish sync daemon
 

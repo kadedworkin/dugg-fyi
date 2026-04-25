@@ -856,7 +856,7 @@ def cmd_reactions(args):
     print(f"  {title}")
     print(f"  Total: {reactions['total']}")
     for rtype, count in reactions.get("breakdown", {}).items():
-        emoji = {"tap": ">>", "star": "*", "thumbsup": "+1"}.get(rtype, rtype)
+        emoji = {"star": "*", "thumbsup": "+1"}.get(rtype, rtype)
         print(f"    {emoji} {rtype}: {count}")
     db.close()
 
@@ -1069,7 +1069,7 @@ def cmd_feed(args):
     server_url = db.get_config("server_url", "")
 
     limit = getattr(args, "limit", 20)
-    results = db.get_feed(user["id"], limit=limit)
+    results = db.get_feed(user["id"], limit=limit, unread=getattr(args, "unread", False))
     sibling_notes = db.batch_resource_notes([r["id"] for r in results])
     srv_url = server_url
     db.close()
@@ -1341,7 +1341,7 @@ def cmd_edit(args):
 
 
 def cmd_react(args):
-    """React to a resource (tap, star, or thumbsup)."""
+    """React to a resource (star or thumbsup)."""
     from pathlib import Path
     db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
     db = DuggDB(db_path)
@@ -1363,13 +1363,53 @@ def cmd_react(args):
         db.close()
         sys.exit(1)
 
-    reaction_type = getattr(args, "type", "tap") or "tap"
-    emoji = {"tap": ">>", "star": "*", "thumbsup": "+1"}.get(reaction_type, ">>")
+    reaction_type = getattr(args, "type", "star") or "star"
+    emoji = {"star": "*", "thumbsup": "+1"}.get(reaction_type, "*")
 
     db.react_to_resource(row["id"], user["id"], reaction_type)
+    db.mark_read(user["id"], row["id"], "cli_react_implicit")
     title = row["title"] or row["url"]
     print(f"  {emoji} {title}")
     db.wait_for_webhooks()
+    db.close()
+
+
+def cmd_read(args):
+    """Mark a resource as read."""
+    from pathlib import Path
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+    user = _resolve_user(db, args)
+    resource_id = _resolve_resource(db, args.target)
+    if not resource_id:
+        print(f"Resource not found: {args.target}")
+        db.close()
+        sys.exit(1)
+
+    row = db.mark_read(user["id"], resource_id, "cli")
+    resource = db.get_resource(resource_id)
+    title = (resource.get("title") or resource["url"]) if resource else resource_id
+    print(f"  Read: {title}")
+    print(f"  Source: {row['source']}")
+    db.close()
+
+
+def cmd_unmark(args):
+    """Mark a resource as unread."""
+    from pathlib import Path
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+    user = _resolve_user(db, args)
+    resource_id = _resolve_resource(db, args.target)
+    if not resource_id:
+        print(f"Resource not found: {args.target}")
+        db.close()
+        sys.exit(1)
+
+    removed = db.unmark_read(user["id"], resource_id)
+    resource = db.get_resource(resource_id)
+    title = (resource.get("title") or resource["url"]) if resource else resource_id
+    print(f"  Unread: {title}" if removed else f"  Already unread: {title}")
     db.close()
 
 
@@ -1856,6 +1896,7 @@ def main():
 
     p_feed = sub.add_parser("feed", help="Show recent resources")
     p_feed.add_argument("--limit", type=int, default=20, help="Max results (default: 20)")
+    p_feed.add_argument("--unread", action="store_true", help="Only show unread resources")
     p_feed.add_argument("--key", default=None, help="Your API key (uses local user if omitted)")
 
     p_related = sub.add_parser("related", help="Show related/linked resources")
@@ -1888,11 +1929,19 @@ def main():
     p_tag.add_argument("--tags", default="", help="Comma-separated tags to add")
     p_tag.add_argument("--key", default=None, help="Your API key")
 
-    p_react = sub.add_parser("react", help="React to a resource (tap, star, thumbsup)")
+    p_react = sub.add_parser("react", help="React to a resource (star, thumbsup)")
     p_react.add_argument("target", help="Resource ID (or prefix) or URL")
-    p_react.add_argument("--type", choices=["tap", "star", "thumbsup"], default="tap",
-                         help="Reaction type (default: tap)")
+    p_react.add_argument("--type", choices=["star", "thumbsup"], default="star",
+                         help="Reaction type (default: star)")
     p_react.add_argument("--key", default=None, help="Your API key")
+
+    p_read = sub.add_parser("read", help="Mark a resource as read")
+    p_read.add_argument("target", help="Resource ID (or prefix) or URL")
+    p_read.add_argument("--key", default=None, help="Your API key")
+
+    p_unmark = sub.add_parser("unmark", help="Mark a resource as unread")
+    p_unmark.add_argument("target", help="Resource ID (or prefix) or URL")
+    p_unmark.add_argument("--key", default=None, help="Your API key")
 
     p_reactions = sub.add_parser("reactions", help="Show reactions on a resource")
     p_reactions.add_argument("target", help="Resource ID (or prefix) or URL")
@@ -2093,6 +2142,10 @@ def main():
         cmd_tag(args)
     elif args.command == "react":
         cmd_react(args)
+    elif args.command == "read":
+        cmd_read(args)
+    elif args.command == "unmark":
+        cmd_unmark(args)
     elif args.command == "reactions":
         cmd_reactions(args)
     elif args.command == "related":

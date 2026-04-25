@@ -11,7 +11,7 @@ Dugg ships a full management CLI alongside the MCP server.
 | `dugg add-user <name>` | Create a user and get an API key |
 | `dugg login <key>` | Save your API key so you don't need `--key` on every command |
 | `dugg add <url> [--note ...]` | Add a resource (URL auto-detected — `dugg https://...` works too) |
-| `dugg feed [--limit N]` | Show recent resources with server health footer |
+| `dugg feed [--limit N] [--unread]` | Show recent resources with server health footer; `--unread` filters to unread items |
 | `dugg search <query> [--limit N] [--tags ...] [--collection ...] [--submitted-by ...]` | Full-text search with optional filters |
 | `dugg get <id-or-url>` | Show full details for a resource (title, description, author, tags, reactions, transcript preview) |
 | `dugg related <id-or-url> [--limit N]` | Show linked/related resources from the knowledge graph |
@@ -24,7 +24,9 @@ Dugg ships a full management CLI alongside the MCP server.
 | `dugg remove <id-or-url>` | Delete a resource (submitter or owner). Propagates upstream to publish targets automatically. RSS-pulled content is deleted locally only (no upstream propagation). |
 | `dugg edit <id-or-url> [--title ...] [--note ...] [--description ...] [--author ...] [--source-type ...] [--tags ...]` | Edit a resource's metadata (submitter only) |
 | `dugg tag <id-or-url> --tags "tag1,tag2"` | Add tags to an existing resource |
-| `dugg react <id-or-url> [--type tap\|star\|thumbsup]` | Silently react to a resource (default: tap) |
+| `dugg read <id-or-url>` | Mark a resource as read |
+| `dugg unmark <id-or-url>` | Mark a resource as unread |
+| `dugg react <id-or-url> [--type star\|thumbsup]` | Silently react to a resource (default: star; also marks read implicitly) |
 | `dugg reactions <id-or-url>` | Show reaction breakdown per type on a resource |
 | `dugg email` | Show your Dugg email forwarding address |
 | `dugg rss subscribe <url> [--collection ...] [--tag ...] [--interval 1h] [--now]` | Subscribe a collection to an RSS/Atom feed |

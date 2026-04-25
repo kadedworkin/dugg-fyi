@@ -1,6 +1,6 @@
 # MCP Tools
 
-Dugg exposes 65 tools via MCP. Your agent calls these directly — no REST API wrapper needed.
+Dugg exposes MCP tools directly. Your agent calls these without a REST wrapper.
 
 ## Tool reference
 
@@ -8,7 +8,8 @@ Dugg exposes 65 tools via MCP. Your agent calls these directly — no REST API w
 |------|-------------|
 | `dugg_add` | Add a resource (URL + note + tags). Auto-enriches with metadata and transcripts. |
 | `dugg_search` | Full-text search across titles, descriptions, transcripts, and notes. |
-| `dugg_feed` | Latest resources across all your collections, filtered by share rules. |
+| `dugg_feed` | Latest resources across all your collections, filtered by share rules. Accepts `unread=true`. |
+| `dugg_unread_feed` | Latest unread resources across all your collections. |
 | `dugg_tag` | Add tags to a resource for categorization and share filtering. |
 | `dugg_get` | Get full details for a specific resource. |
 | `dugg_enrich` | Re-trigger enrichment (metadata, transcript) for a resource. |
@@ -21,7 +22,9 @@ Dugg exposes 65 tools via MCP. Your agent calls these directly — no REST API w
 | `dugg_related` | Get resources related to a given resource via agent-built connections. |
 | `dugg_publish` | Publish a resource to named targets (e.g. `public`, `aev-team`). |
 | `dugg_unpublish` | Remove a resource from publish targets. |
-| `dugg_react` | Silently react to a resource (`tap`, `star`, `thumbsup`). |
+| `dugg_mark_read` | Mark a resource as read. |
+| `dugg_mark_unread` | Mark a resource as unread. |
+| `dugg_react` | Silently react to a resource (`star`, `thumbsup`). Reactions also mark the resource read implicitly. |
 | `dugg_reactions` | View reaction counts on your resources (submitter only). |
 | `dugg_instance_create` | Create a hosted Dugg instance with topic and access mode. |
 | `dugg_instance_list` | List instances you're subscribed to with their topics. |
