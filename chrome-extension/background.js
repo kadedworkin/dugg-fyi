@@ -42,6 +42,7 @@ async function syncUrlCache() {
     // Build the URL map: { url -> [{ title, id, by, server }] }
     const urlMap = {};
     const allEntries = [];
+    const unreadEntries = [];
 
     // Fetch from the primary server
     const primary = await fetchFeedUrls(url, config.apiKey);
@@ -51,6 +52,12 @@ async function syncUrlCache() {
         if (!urlMap[key]) urlMap[key] = [];
         urlMap[key].push({ ...entry, server: extractServerName(url) });
         allEntries.push({ ...entry, server: extractServerName(url) });
+      }
+    }
+    const primaryUnread = await fetchFeedUrls(url, config.apiKey, { unreadOnly: true });
+    if (primaryUnread) {
+      for (const entry of primaryUnread) {
+        unreadEntries.push({ ...entry, server: extractServerName(url) });
       }
     }
 
@@ -67,11 +74,18 @@ async function syncUrlCache() {
           allEntries.push({ ...entry, server: inst.name || extractServerName(instUrl) });
         }
       }
+      const remoteUnread = await fetchFeedUrls(instUrl, inst.key, { unreadOnly: true });
+      if (remoteUnread) {
+        for (const entry of remoteUnread) {
+          unreadEntries.push({ ...entry, server: inst.name || extractServerName(instUrl) });
+        }
+      }
     }
 
     await chrome.storage.local.set({
       duggUrlMap: urlMap,
       duggAllEntries: allEntries,
+      duggUnreadEntries: unreadEntries,
       duggLastSync: Date.now(),
     });
 
@@ -83,16 +97,45 @@ async function syncUrlCache() {
   }
 }
 
-async function fetchFeedUrls(baseUrl, apiKey) {
+async function fetchFeedUrls(baseUrl, apiKey, { unreadOnly = false } = {}) {
   try {
-    const res = await fetch(`${baseUrl}/feed/urls/${apiKey}`, {
-      signal: AbortSignal.timeout(10000),
-    });
+    const endpoint = unreadOnly
+      ? `${baseUrl}/api/feed/urls?unread=true`
+      : `${baseUrl}/feed/urls/${apiKey}`;
+    const options = unreadOnly
+      ? {
+          headers: { "X-Dugg-Key": apiKey },
+          signal: AbortSignal.timeout(10000),
+        }
+      : {
+          signal: AbortSignal.timeout(10000),
+        };
+    const res = await fetch(endpoint, options);
     if (!res.ok) return null;
     const data = await res.json();
     return data.urls || [];
   } catch {
     return null;
+  }
+}
+
+async function postReadState(baseUrl, apiKey, resourceId, source) {
+  if (!resourceId) return false;
+
+  try {
+    const res = await fetch(`${baseUrl}/api/read/${resourceId}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Dugg-Key": apiKey,
+      },
+      body: JSON.stringify({ source }),
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return null;
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -173,7 +216,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true; // async
   }
   if (msg.type === "surpriseMe") {
-    getRandomUrl(msg.excludeUrl).then(sendResponse);
+    const targetTabId = msg.tabId || (sender.tab && sender.tab.id);
+    openRandomUnreadUrl(msg.excludeUrl, targetTabId).then(sendResponse);
     return true;
   }
   if (msg.type === "syncNow") {
@@ -189,12 +233,12 @@ async function getMatchesForUrl(url) {
 }
 
 async function getRandomUrl(excludeUrl) {
-  const { duggAllEntries } = await chrome.storage.local.get(["duggAllEntries"]);
-  if (!duggAllEntries || duggAllEntries.length === 0) return null;
+  const { duggUnreadEntries } = await chrome.storage.local.get(["duggUnreadEntries"]);
+  if (!duggUnreadEntries || duggUnreadEntries.length === 0) return null;
 
-  // Filter out the current page and dugg:// internal URLs
+  // Filter out the current page and dugg:// internal URLs.
   const excludeKey = excludeUrl ? normalizeUrl(excludeUrl) : null;
-  const candidates = duggAllEntries.filter(e =>
+  const candidates = duggUnreadEntries.filter(e =>
     !e.url.startsWith("dugg://") &&
     normalizeUrl(e.url) !== excludeKey
   );
@@ -202,4 +246,25 @@ async function getRandomUrl(excludeUrl) {
   if (candidates.length === 0) return null;
   const pick = candidates[Math.floor(Math.random() * candidates.length)];
   return pick;
+}
+
+async function openRandomUnreadUrl(excludeUrl, tabId) {
+  const pick = await getRandomUrl(excludeUrl);
+  if (!pick || !pick.url) {
+    return { ok: false, reason: "caught_up" };
+  }
+
+  if (typeof tabId === "number") {
+    await chrome.tabs.update(tabId, { url: pick.url });
+  } else {
+    await chrome.tabs.create({ url: pick.url });
+  }
+
+  const config = await chrome.storage.sync.get(["agentUrl", "apiKey"]);
+  if (config.agentUrl && config.apiKey) {
+    const baseUrl = config.agentUrl.replace(/\/+$/, "");
+    postReadState(baseUrl, config.apiKey, pick.id, "chrome_stumble").catch(() => {});
+  }
+
+  return { ok: true, entry: pick };
 }
