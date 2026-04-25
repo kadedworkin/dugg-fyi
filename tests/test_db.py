@@ -1,10 +1,12 @@
 """Tests for the Dugg database layer."""
 
+import sqlite3
 import tempfile
 from pathlib import Path
 
 import pytest
 
+import dugg.db as db_module
 from dugg.db import DuggDB
 
 
@@ -246,8 +248,8 @@ def test_react_to_resource(db):
     coll = db.create_collection("AI", user["id"], visibility="shared")
     db.add_collection_member(coll["id"], rocco["id"])
     res = db.add_resource(url="https://example.com/1", collection_id=coll["id"], submitted_by=user["id"], title="Cool thing")
-    result = db.react_to_resource(res["id"], rocco["id"], "tap")
-    assert result["reaction_type"] == "tap"
+    result = db.react_to_resource(res["id"], rocco["id"], "star")
+    assert result["reaction_type"] == "star"
     assert result["user_id"] == rocco["id"]
 
 
@@ -257,8 +259,8 @@ def test_reaction_idempotent(db):
     coll = db.create_collection("AI", user["id"], visibility="shared")
     db.add_collection_member(coll["id"], rocco["id"])
     res = db.add_resource(url="https://example.com/1", collection_id=coll["id"], submitted_by=user["id"])
-    db.react_to_resource(res["id"], rocco["id"], "tap")
-    db.react_to_resource(res["id"], rocco["id"], "tap")  # Duplicate — should be no-op
+    db.react_to_resource(res["id"], rocco["id"], "star")
+    db.react_to_resource(res["id"], rocco["id"], "star")  # Duplicate — should be no-op
     reactions = db.get_reactions(res["id"], user["id"])
     assert reactions["total"] == 1
 
@@ -269,11 +271,11 @@ def test_multiple_reaction_types(db):
     coll = db.create_collection("AI", user["id"], visibility="shared")
     db.add_collection_member(coll["id"], rocco["id"])
     res = db.add_resource(url="https://example.com/1", collection_id=coll["id"], submitted_by=user["id"])
-    db.react_to_resource(res["id"], rocco["id"], "tap")
+    db.react_to_resource(res["id"], rocco["id"], "thumbsup")
     db.react_to_resource(res["id"], rocco["id"], "star")
     reactions = db.get_reactions(res["id"], user["id"])
     assert reactions["total"] == 2
-    assert reactions["breakdown"]["tap"] == 1
+    assert reactions["breakdown"]["thumbsup"] == 1
     assert reactions["breakdown"]["star"] == 1
 
 
@@ -285,7 +287,7 @@ def test_reactions_only_visible_to_publisher(db):
     db.add_collection_member(coll["id"], rocco["id"])
     db.add_collection_member(coll["id"], miles["id"])
     res = db.add_resource(url="https://example.com/1", collection_id=coll["id"], submitted_by=kade["id"])
-    db.react_to_resource(res["id"], rocco["id"], "tap")
+    db.react_to_resource(res["id"], rocco["id"], "thumbsup")
     db.react_to_resource(res["id"], miles["id"], "star")
 
     # Kade (publisher) sees reactions
@@ -308,8 +310,8 @@ def test_reactions_summary(db):
 
     r1 = db.add_resource(url="https://example.com/1", collection_id=coll["id"], submitted_by=kade["id"], title="Article A")
     r2 = db.add_resource(url="https://example.com/2", collection_id=coll["id"], submitted_by=kade["id"], title="Article B")
-    db.react_to_resource(r1["id"], rocco["id"], "tap")
-    db.react_to_resource(r1["id"], miles["id"], "tap")
+    db.react_to_resource(r1["id"], rocco["id"], "thumbsup")
+    db.react_to_resource(r1["id"], miles["id"], "thumbsup")
     db.react_to_resource(r2["id"], rocco["id"], "star")
 
     summary = db.get_my_reactions_summary(kade["id"])
@@ -319,6 +321,124 @@ def test_reactions_summary(db):
     assert summary[0]["total"] == 2
     assert summary[1]["title"] == "Article B"
     assert summary[1]["total"] == 1
+
+
+def test_schema_bootstrap_creates_read_states_table(db):
+    tables = {
+        row["name"]
+        for row in db.conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'index')").fetchall()
+    }
+    assert "read_states" in tables
+    assert "idx_read_states_user_resource" in tables
+    assert "idx_read_states_user_read_at" in tables
+
+
+def test_tap_migration_runs_once_and_is_idempotent(tmp_path):
+    db_path = tmp_path / "legacy.db"
+    d = DuggDB(db_path)
+    user = d.create_user("Kade")
+    coll = d.create_collection("AI", user["id"])
+    res = d.add_resource(url="https://example.com/legacy", collection_id=coll["id"], submitted_by=user["id"])
+    d.close()
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    conn.execute("DROP INDEX IF EXISTS idx_read_states_user_resource")
+    conn.execute("DROP INDEX IF EXISTS idx_read_states_user_read_at")
+    conn.execute("DROP TABLE IF EXISTS read_states")
+    conn.execute("DROP TABLE IF EXISTS reactions")
+    conn.execute("""
+        CREATE TABLE reactions (
+            id TEXT PRIMARY KEY,
+            resource_id TEXT NOT NULL REFERENCES resources(id) ON DELETE CASCADE,
+            user_id TEXT NOT NULL REFERENCES users(id),
+            reaction_type TEXT DEFAULT 'tap' CHECK(reaction_type IN ('tap', 'star', 'thumbsup')),
+            created_at TEXT NOT NULL,
+            UNIQUE(resource_id, user_id, reaction_type)
+        )
+    """)
+    conn.execute(
+        """INSERT INTO reactions (id, resource_id, user_id, reaction_type, created_at)
+           VALUES (?, ?, ?, 'tap', ?)""",
+        ("legacytap01", res["id"], user["id"], "2026-04-20T12:00:00+00:00"),
+    )
+    conn.commit()
+    conn.close()
+
+    migrated = DuggDB(db_path)
+    row = migrated.get_read_state(user["id"], res["id"])
+    assert row is not None
+    assert row["source"] == "migration"
+    assert row["read_at"] == "2026-04-20T12:00:00+00:00"
+    assert row["last_read_at"] == "2026-04-20T12:00:00+00:00"
+    assert migrated.conn.execute("SELECT COUNT(*) FROM reactions").fetchone()[0] == 0
+    migrated.close()
+
+    migrated_again = DuggDB(db_path)
+    assert migrated_again.conn.execute("SELECT COUNT(*) FROM read_states").fetchone()[0] == 1
+    assert migrated_again.conn.execute("SELECT COUNT(*) FROM reactions").fetchone()[0] == 0
+    migrated_again.close()
+
+
+def test_mark_read_is_idempotent_and_first_source_sticky(db, monkeypatch):
+    user = db.create_user("Kade")
+    coll = db.create_collection("AI", user["id"])
+    res = db.add_resource(url="https://example.com/read", collection_id=coll["id"], submitted_by=user["id"])
+    times = iter([
+        "2026-04-25T10:00:00+00:00",
+        "2026-04-25T11:00:00+00:00",
+        "2026-04-25T11:00:00+00:00",
+    ])
+    monkeypatch.setattr(db_module, "_now", lambda: next(times))
+
+    first = db.mark_read(user["id"], res["id"], "cli")
+    second = db.mark_read(user["id"], res["id"], "web_outbound")
+
+    assert first["source"] == "cli"
+    assert second["source"] == "cli"
+    assert second["read_at"] == "2026-04-25T10:00:00+00:00"
+    assert second["last_read_at"] == "2026-04-25T11:00:00+00:00"
+    assert db.conn.execute("SELECT COUNT(*) FROM read_states").fetchone()[0] == 1
+
+
+def test_unmark_read_deletes_row_and_returns_bool(db):
+    user = db.create_user("Kade")
+    coll = db.create_collection("AI", user["id"])
+    res = db.add_resource(url="https://example.com/unread", collection_id=coll["id"], submitted_by=user["id"])
+    db.mark_read(user["id"], res["id"], "cli")
+
+    assert db.unmark_read(user["id"], res["id"]) is True
+    assert db.get_read_state(user["id"], res["id"]) is None
+    assert db.unmark_read(user["id"], res["id"]) is False
+
+
+def test_list_read_since_paginates_by_read_at_desc(db):
+    user = db.create_user("Kade")
+    coll = db.create_collection("AI", user["id"])
+    res1 = db.add_resource(url="https://example.com/1", collection_id=coll["id"], submitted_by=user["id"])
+    res2 = db.add_resource(url="https://example.com/2", collection_id=coll["id"], submitted_by=user["id"])
+    res3 = db.add_resource(url="https://example.com/3", collection_id=coll["id"], submitted_by=user["id"])
+
+    db.mark_read(user["id"], res1["id"], "cli")
+    db.mark_read(user["id"], res2["id"], "cli")
+    db.mark_read(user["id"], res3["id"], "cli")
+    db.conn.execute("UPDATE read_states SET read_at = ?, last_read_at = ? WHERE resource_id = ?", ("2026-04-23T00:00:00+00:00", "2026-04-23T00:00:00+00:00", res1["id"]))
+    db.conn.execute("UPDATE read_states SET read_at = ?, last_read_at = ? WHERE resource_id = ?", ("2026-04-24T00:00:00+00:00", "2026-04-24T00:00:00+00:00", res2["id"]))
+    db.conn.execute("UPDATE read_states SET read_at = ?, last_read_at = ? WHERE resource_id = ?", ("2026-04-25T00:00:00+00:00", "2026-04-25T00:00:00+00:00", res3["id"]))
+    db.conn.commit()
+
+    first_page = db.list_read_since(user["id"], "2026-04-22T00:00:00+00:00", limit=2)
+    assert [row["resource_id"] for row in first_page["resources"]] == [res3["id"], res2["id"]]
+    assert first_page["next_cursor"]
+
+    second_page = db.list_read_since(
+        user["id"],
+        "2026-04-22T00:00:00+00:00",
+        cursor=first_page["next_cursor"],
+        limit=2,
+    )
+    assert [row["resource_id"] for row in second_page["resources"]] == [res1["id"]]
+    assert second_page["next_cursor"] is None
 
 
 # --- Instances ---
@@ -515,7 +635,7 @@ def test_credit_score(db):
     # Rocco submits 3 resources
     for i in range(3):
         r = db.add_resource(url=f"https://example.com/{i}", collection_id=coll["id"], submitted_by=rocco["id"])
-        db.react_to_resource(r["id"], kade["id"], "tap")
+        db.react_to_resource(r["id"], kade["id"], "thumbsup")
     score = db.get_member_credit_score(coll["id"], rocco["id"])
     assert score["submissions"] == 3
     assert score["distinct_human_reactors"] == 1  # Only Kade reacted
@@ -1385,13 +1505,13 @@ def test_reaction_emits_event(db):
     coll = db.create_collection("AI", kade["id"], visibility="shared")
     db.add_collection_member(coll["id"], rocco["id"])
     res = db.add_resource(url="https://example.com/1", collection_id=coll["id"], submitted_by=kade["id"], title="Cool thing")
-    db.react_to_resource(res["id"], rocco["id"], "tap")
+    db.react_to_resource(res["id"], rocco["id"], "thumbsup")
     events = db.get_events(kade["id"])
     reaction_events = [e for e in events if e["event_type"] == "reaction_added"]
     assert len(reaction_events) == 1
     assert reaction_events[0]["actor_id"] == rocco["id"]
     assert reaction_events[0]["payload"]["resource_id"] == res["id"]
-    assert reaction_events[0]["payload"]["reaction_type"] == "tap"
+    assert reaction_events[0]["payload"]["reaction_type"] == "thumbsup"
     assert reaction_events[0]["payload"]["resource_owner_id"] == kade["id"]
 
 
@@ -1401,8 +1521,8 @@ def test_duplicate_reaction_no_event(db):
     coll = db.create_collection("AI", kade["id"], visibility="shared")
     db.add_collection_member(coll["id"], rocco["id"])
     res = db.add_resource(url="https://example.com/1", collection_id=coll["id"], submitted_by=kade["id"])
-    db.react_to_resource(res["id"], rocco["id"], "tap")
-    db.react_to_resource(res["id"], rocco["id"], "tap")  # duplicate
+    db.react_to_resource(res["id"], rocco["id"], "thumbsup")
+    db.react_to_resource(res["id"], rocco["id"], "thumbsup")  # duplicate
     events = db.get_events(kade["id"])
     reaction_events = [e for e in events if e["event_type"] == "reaction_added"]
     assert len(reaction_events) == 1  # only one event, not two
@@ -1455,7 +1575,7 @@ def test_reaction_webhook_enriches_payload(db):
 
     # Two people react
     db.react_to_resource(res["id"], rocco["id"], "star")
-    db.react_to_resource(res["id"], sam["id"], "tap")
+    db.react_to_resource(res["id"], sam["id"], "thumbsup")
 
     # Verify aggregate counts are correct
     counts = db.conn.execute(
@@ -1466,7 +1586,45 @@ def test_reaction_webhook_enriches_payload(db):
     assert total == 2
     breakdown = {dict(r)["reaction_type"]: dict(r)["count"] for r in counts}
     assert breakdown["star"] == 1
-    assert breakdown["tap"] == 1
+    assert breakdown["thumbsup"] == 1
+
+
+def test_mark_read_emits_read_added_once(db, monkeypatch):
+    kade = db.create_user("Kade")
+    rocco = db.create_user("Rocco")
+    coll = db.create_collection("AI", kade["id"], visibility="shared")
+    db.add_collection_member(coll["id"], rocco["id"])
+    res = db.add_resource(url="https://example.com/read-event", collection_id=coll["id"], submitted_by=kade["id"])
+    times = iter([
+        "2026-04-25T09:00:00+00:00",
+        "2026-04-25T09:05:00+00:00",
+        "2026-04-25T09:05:00+00:00",
+    ])
+    monkeypatch.setattr(db_module, "_now", lambda: next(times))
+
+    db.mark_read(rocco["id"], res["id"], "slack_button")
+    db.mark_read(rocco["id"], res["id"], "web_outbound")
+
+    events = db.get_events(kade["id"])
+    read_events = [e for e in events if e["event_type"] == "read_added"]
+    assert len(read_events) == 1
+    assert read_events[0]["payload"]["resource_id"] == res["id"]
+    assert read_events[0]["payload"]["source"] == "slack_button"
+
+
+def test_unmark_read_emits_read_removed(db):
+    kade = db.create_user("Kade")
+    rocco = db.create_user("Rocco")
+    coll = db.create_collection("AI", kade["id"], visibility="shared")
+    db.add_collection_member(coll["id"], rocco["id"])
+    res = db.add_resource(url="https://example.com/read-remove", collection_id=coll["id"], submitted_by=kade["id"])
+    db.mark_read(rocco["id"], res["id"], "cli")
+
+    assert db.unmark_read(rocco["id"], res["id"]) is True
+    events = db.get_events(kade["id"])
+    removed = [e for e in events if e["event_type"] == "read_removed"]
+    assert len(removed) == 1
+    assert removed[0]["payload"]["resource_id"] == res["id"]
 
 
 # --- User Cursors ---
@@ -1713,7 +1871,7 @@ def test_credit_score_multiplicative(db):
     # Rocco submits 3 resources, Kade and Miles react
     for i in range(3):
         r = db.add_resource(url=f"https://example.com/r{i}", collection_id=coll["id"], submitted_by=rocco["id"])
-        db.react_to_resource(r["id"], kade["id"], "tap")
+        db.react_to_resource(r["id"], kade["id"], "thumbsup")
         db.react_to_resource(r["id"], miles["id"], "star")
     score = db.get_member_credit_score(coll["id"], rocco["id"])
     assert score["submissions"] == 3
@@ -1731,8 +1889,8 @@ def test_credit_score_excludes_agent_reactions(db):
     db.invite_member(coll["id"], rocco["id"], rocco_bot["id"])
     # Kade submits, rocco (human) reacts, rocco_bot (agent) also reacts
     r = db.add_resource(url="https://example.com/1", collection_id=coll["id"], submitted_by=kade["id"])
-    db.react_to_resource(r["id"], rocco["id"], "tap")
-    db.react_to_resource(r["id"], rocco_bot["id"], "tap")
+    db.react_to_resource(r["id"], rocco["id"], "thumbsup")
+    db.react_to_resource(r["id"], rocco_bot["id"], "thumbsup")
     score = db.get_member_credit_score(coll["id"], kade["id"])
     # Only rocco counts as human, not rocco_bot
     assert score["distinct_human_reactors"] == 1

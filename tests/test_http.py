@@ -360,6 +360,152 @@ def test_api_feed_respects_limit(client, db_path, user):
     assert resp.json()["count"] == 2
 
 
+def test_api_feed_unread_filter_excludes_read_resources(client, db_path, user):
+    c, _ = client
+    read_id = _seed_resource(db_path, user, url="https://example.com/read")
+    unread_id = _seed_resource(db_path, user, url="https://example.com/unread")
+    d = DuggDB(db_path)
+    d.mark_read(user["id"], read_id, "cli")
+    d.close()
+
+    resp = c.get("/api/feed?unread=true", headers={"X-Dugg-Key": user["api_key"]})
+    assert resp.status_code == 200
+    ids = [resource["id"] for resource in resp.json()["resources"]]
+    assert unread_id in ids
+    assert read_id not in ids
+
+
+def test_api_feed_urls_includes_read_at_and_unread_filter(client, db_path, user):
+    c, _ = client
+    read_id = _seed_resource(db_path, user, url="https://example.com/feed-url-read", title="Read URL")
+    unread_id = _seed_resource(db_path, user, url="https://example.com/feed-url-unread", title="Unread URL")
+    d = DuggDB(db_path)
+    d.mark_read(user["id"], read_id, "cli")
+    d.conn.execute(
+        "UPDATE read_states SET read_at = ?, last_read_at = ? WHERE user_id = ? AND resource_id = ?",
+        ("2026-04-25T12:00:00+00:00", "2026-04-25T12:00:00+00:00", user["id"], read_id),
+    )
+    d.conn.commit()
+    d.close()
+
+    resp = c.get("/api/feed/urls", headers={"X-Dugg-Key": user["api_key"]})
+    assert resp.status_code == 200
+    urls = {entry["id"]: entry for entry in resp.json()["urls"]}
+    assert urls[read_id]["read_at"] == "2026-04-25T12:00:00+00:00"
+    assert urls[unread_id]["read_at"] is None
+
+    unread_resp = c.get("/api/feed/urls?unread=true", headers={"X-Dugg-Key": user["api_key"]})
+    unread_ids = [entry["id"] for entry in unread_resp.json()["urls"]]
+    assert unread_id in unread_ids
+    assert read_id not in unread_ids
+
+
+def test_api_read_post_delete_and_get(client, db_path, user):
+    c, _ = client
+    res_id = _seed_resource(db_path, user, url="https://example.com/read-endpoint")
+
+    post_resp = c.post(
+        f"/api/read/{res_id}",
+        json={"source": "cli"},
+        headers={"X-Dugg-Key": user["api_key"]},
+    )
+    assert post_resp.status_code == 200
+    body = post_resp.json()
+    assert body["resource_id"] == res_id
+    assert body["source"] == "cli"
+
+    get_resp = c.get(
+        "/api/read?since=2026-04-20T00:00:00+00:00",
+        headers={"X-Dugg-Key": user["api_key"]},
+    )
+    assert get_resp.status_code == 200
+    rows = get_resp.json()["resources"]
+    assert len(rows) == 1
+    assert rows[0]["resource_id"] == res_id
+
+    delete_resp = c.delete(f"/api/read/{res_id}", headers={"X-Dugg-Key": user["api_key"]})
+    assert delete_resp.status_code == 200
+
+    get_after_delete = c.get(
+        "/api/read?since=2026-04-20T00:00:00+00:00",
+        headers={"X-Dugg-Key": user["api_key"]},
+    )
+    assert get_after_delete.status_code == 200
+    assert get_after_delete.json()["resources"] == []
+
+
+def test_api_read_get_paginates(client, db_path, user):
+    c, _ = client
+    res1 = _seed_resource(db_path, user, url="https://example.com/read-page-1")
+    res2 = _seed_resource(db_path, user, url="https://example.com/read-page-2")
+    d = DuggDB(db_path)
+    d.mark_read(user["id"], res1, "cli")
+    d.mark_read(user["id"], res2, "cli")
+    d.conn.execute(
+        "UPDATE read_states SET read_at = ?, last_read_at = ? WHERE resource_id = ?",
+        ("2026-04-24T00:00:00+00:00", "2026-04-24T00:00:00+00:00", res1),
+    )
+    d.conn.execute(
+        "UPDATE read_states SET read_at = ?, last_read_at = ? WHERE resource_id = ?",
+        ("2026-04-25T00:00:00+00:00", "2026-04-25T00:00:00+00:00", res2),
+    )
+    d.conn.commit()
+    d.close()
+
+    first = c.get(
+        "/api/read?since=2026-04-20T00:00:00+00:00&cursor=&limit=1",
+        headers={"X-Dugg-Key": user["api_key"]},
+    )
+    assert first.status_code == 200
+    first_body = first.json()
+    assert [row["resource_id"] for row in first_body["resources"]] == [res2]
+    assert first_body["next_cursor"]
+
+    second = c.get(
+        f"/api/read?since=2026-04-20T00:00:00+00:00&cursor={first_body['next_cursor']}",
+        headers={"X-Dugg-Key": user["api_key"]},
+    )
+    assert second.status_code == 200
+    assert [row["resource_id"] for row in second.json()["resources"]] == [res1]
+
+
+def test_api_react_rejects_tap(client, db_path, user):
+    c, _ = client
+    res_id = _seed_resource(db_path, user, url="https://example.com/react-tap")
+
+    resp = c.post(
+        "/api/react",
+        json={"resource_id": res_id, "type": "tap"},
+        headers={"X-Dugg-Key": user["api_key"]},
+    )
+    assert resp.status_code == 400
+    assert resp.json() == {
+        "error": "reaction_type 'tap' is no longer supported; use POST /api/read instead"
+    }
+
+
+def test_api_react_marks_read_implicitly(client, db_path, user):
+    c, _ = client
+    res_id = _seed_resource(db_path, user, url="https://example.com/react-read")
+
+    resp = c.post(
+        "/api/react",
+        json={"resource_id": res_id, "type": "star"},
+        headers={"X-Dugg-Key": user["api_key"]},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["reaction"]["reaction_type"] == "star"
+
+    d = DuggDB(db_path)
+    read_state = d.get_read_state(user["id"], res_id)
+    reactions = d.get_reactions(res_id, user["id"])
+    d.close()
+    assert read_state is not None
+    assert read_state["source"] == "mcp_react_implicit"
+    assert reactions is not None
+    assert reactions["breakdown"]["star"] == 1
+
+
 def test_api_resource_requires_auth(client, db_path, user):
     c, _ = client
     res_id = _seed_resource(db_path, user)
@@ -1375,7 +1521,6 @@ def test_invite_page_invalid_token_json(client):
 
 def test_invite_page_html(client):
     c, user = client
-    db = DuggDB(Path(c.app.state._db_path) if hasattr(c.app.state, '_db_path') else None)
     # Reopen the DB to create an invite
     import os
     db_path = os.environ.get("DUGG_DB_PATH")
@@ -1737,7 +1882,7 @@ def test_resource_page_403_without_membership(client, db_path, user):
 
 
 def test_slack_actions_react(client, db_path):
-    """Slack Block Kit button click fires a reaction."""
+    """Slack Block Kit button click fires a reaction and marks the item read."""
     c, user = client
     d = DuggDB(db_path)
     coll_id = d.ensure_default_collection(user["id"])
@@ -1765,10 +1910,83 @@ def test_slack_actions_react(client, db_path):
     # Verify reaction was stored
     d = DuggDB(db_path)
     reactions = d.get_reactions(res["id"], user["id"])
+    read_state = d.get_read_state(user["id"], res["id"])
     assert reactions is not None
     assert reactions["total"] == 1
     assert reactions["breakdown"]["star"] == 1
+    assert read_state is not None
+    assert read_state["source"] == "slack_react_implicit"
     d.close()
+
+
+def test_slack_actions_retired_tap_button_returns_ephemeral_error(client, db_path):
+    c, user = client
+    d = DuggDB(db_path)
+    coll_id = d.ensure_default_collection(user["id"])
+    res = d.add_resource(
+        url="https://example.com/slack-retired-tap",
+        collection_id=coll_id,
+        submitted_by=user["id"],
+        title="Slack Retired Tap",
+    )
+    d.close()
+
+    payload = json.dumps({
+        "type": "block_actions",
+        "user": {"username": user["name"]},
+        "actions": [{
+            "action_id": "dugg_react_tap",
+            "value": res["id"],
+        }],
+    })
+    resp = c.post("/slack/actions", data={"payload": payload})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["response_type"] == "ephemeral"
+    assert "This button has been retired." in body["text"]
+
+
+def test_slack_command_feed_uses_mark_read_and_thumbs_up_labels(client, db_path, user):
+    c, _ = client
+    _seed_resource(db_path, user, url="https://example.com/slack-feed-buttons", title="Slack Feed Buttons")
+    resp = c.post("/slack/command", data={"text": "", "user_name": user["name"]})
+    assert resp.status_code == 200
+    action_block = next(block for block in resp.json()["blocks"] if block["type"] == "actions")
+    labels = [element["text"]["text"] for element in action_block["elements"]]
+    action_ids = [element["action_id"] for element in action_block["elements"]]
+    assert labels == [":book: Mark as Read", ":star: Star", ":+1: Thumbs Up"]
+    assert action_ids == ["dugg_mark_read", "dugg_react_star", "dugg_react_thumbsup"]
+
+
+def test_slack_actions_mark_read(client, db_path):
+    c, user = client
+    d = DuggDB(db_path)
+    coll_id = d.ensure_default_collection(user["id"])
+    res = d.add_resource(
+        url="https://example.com/slack-mark-read",
+        collection_id=coll_id,
+        submitted_by=user["id"],
+        title="Slack Mark Read",
+    )
+    d.close()
+
+    payload = json.dumps({
+        "type": "block_actions",
+        "user": {"username": user["name"]},
+        "actions": [{
+            "action_id": "dugg_mark_read",
+            "value": res["id"],
+        }],
+    })
+    resp = c.post("/slack/actions", data={"payload": payload})
+    assert resp.status_code == 200
+    assert ":book: You marked *Slack Mark Read* as read" in resp.json()["text"]
+
+    d = DuggDB(db_path)
+    read_state = d.get_read_state(user["id"], res["id"])
+    d.close()
+    assert read_state is not None
+    assert read_state["source"] == "slack_button"
 
 
 # --- Session cookie auth (web feature-freeze lifted 2026-04-18) ---
