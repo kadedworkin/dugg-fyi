@@ -506,6 +506,31 @@ def test_api_react_marks_read_implicitly(client, db_path, user):
     assert reactions["breakdown"]["star"] == 1
 
 
+def test_api_react_marks_read_implicitly_for_web_surface(client, db_path, user):
+    c, _ = client
+    res_id = _seed_resource(db_path, user, url="https://example.com/react-read-web")
+
+    resp = c.post(
+        "/api/react",
+        json={"resource_id": res_id, "type": "thumbsup"},
+        headers={
+            "X-Dugg-Key": user["api_key"],
+            "X-Dugg-Surface": "web",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["reaction"]["reaction_type"] == "thumbsup"
+
+    d = DuggDB(db_path)
+    read_state = d.get_read_state(user["id"], res_id)
+    reactions = d.get_reactions(res_id, user["id"])
+    d.close()
+    assert read_state is not None
+    assert read_state["source"] == "web_react_implicit"
+    assert reactions is not None
+    assert reactions["breakdown"]["thumbsup"] == 1
+
+
 def test_api_resource_requires_auth(client, db_path, user):
     c, _ = client
     res_id = _seed_resource(db_path, user)
@@ -1832,6 +1857,19 @@ def test_resource_page_with_header_key_renders(client, db_path, user):
     assert "line one" in resp.text
 
 
+def test_resource_page_marks_read_on_render(client, db_path, user):
+    c, _ = client
+    res_id = _make_pasted_resource(db_path, user)
+    resp = c.get(f"/r/{res_id}", headers={"X-Dugg-Key": user["api_key"]})
+    assert resp.status_code == 200
+
+    d = DuggDB(db_path)
+    read_state = d.get_read_state(user["id"], res_id)
+    d.close()
+    assert read_state is not None
+    assert read_state["source"] == "web_detail"
+
+
 def test_resource_unlock_invalid_key(client, db_path, user):
     c, _ = client
     res_id = _make_pasted_resource(db_path, user)
@@ -2086,6 +2124,20 @@ def test_feed_bare_with_cookie_renders_html(client, user):
     assert "window.location.pathname.split('/feed/')" not in resp.text
     # Key must not appear in the rendered HTML
     assert user["api_key"] not in resp.text
+
+
+def test_feed_html_includes_read_state_markup_and_reaction_buttons(client, db_path, user):
+    c, _ = client
+    res_id = _seed_resource(db_path, user, url="https://example.com/feed-read-state", title="Feed Read State")
+    c.cookies.set("dugg_key", user["api_key"])
+    resp = c.get("/feed")
+    assert resp.status_code == 200
+    assert f'data-dugg-resource-id="{res_id}"' in resp.text
+    assert 'id="unreadOnlyToggle"' in resp.text
+    assert 'navigator.sendBeacon(\'/api/read/\'' in resp.text
+    assert 'data-reaction-type="star"' in resp.text
+    assert 'data-reaction-type="thumbsup"' in resp.text
+    assert '>Thumbs Up<' in resp.text
 
 
 # --- /paste: silent migration + cookie auth ---
