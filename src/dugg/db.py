@@ -512,22 +512,37 @@ class DuggDB:
         if "deleted_at" not in rn_cols:
             self.conn.execute("ALTER TABLE resource_notes ADD COLUMN deleted_at TEXT DEFAULT NULL")
 
-        # Backfill orphan attributions: rows added before the v2026.04.24.2
-        # attribution fix have submitter_user_id='' even when a local user
-        # of that name exists. Pre-fix paths that produced these include
-        # the dugg_add URL-collision branch and pre-fix federation ingest.
-        # Conservative match: claim the row only when EXACTLY ONE local
-        # user shares the name -- a duplicate-name scenario is ambiguous
-        # and we leave it for manual triage rather than guess.
+        # Federated identity: who is this note's author on the *origin*
+        # server? Stored as the origin's `users.id` UUID -- never the
+        # api_key. Combined with `source_server` it forms a globally
+        # stable identity that survives duplicate display names (two
+        # Johns on different home servers don't collide).
+        if "submitter_remote_id" not in rn_cols:
+            self.conn.execute("ALTER TABLE resource_notes ADD COLUMN submitter_remote_id TEXT DEFAULT ''")
+
+        # Cross-server identity link table. A row says "the local user L
+        # on this server is the same person as the user with id R on
+        # source_server S." Populated only by attested paths:
+        #   - invite redemption (the issuing server attested at invite time)
+        #   - the local admin via the `dugg admin link` CLI
+        # NEVER populated via a public HTTP endpoint -- self-claim by
+        # arbitrary callers would let anyone with a destination key edit
+        # any federated note attributed to (S, R). The link table is the
+        # second prong of the can_edit gate when submitter_user_id is
+        # empty.
         self.conn.execute("""
-            UPDATE resource_notes
-               SET submitter_user_id = (
-                   SELECT u.id FROM users u WHERE u.name = resource_notes.submitter_name
-               )
-             WHERE submitter_user_id = ''
-               AND submitter_name != ''
-               AND (SELECT COUNT(*) FROM users u WHERE u.name = resource_notes.submitter_name) = 1
+            CREATE TABLE IF NOT EXISTS user_remote_identities (
+                local_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                source_server TEXT NOT NULL,
+                remote_user_id TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'admin',
+                created_at TEXT NOT NULL,
+                UNIQUE(source_server, remote_user_id)
+            )
         """)
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_uri_local ON user_remote_identities(local_user_id)"
+        )
 
         cm_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(collection_members)").fetchall()}
         if "member_type" not in cm_cols:
@@ -1498,7 +1513,8 @@ class DuggDB:
                           source_server: str = "",
                           source_instance_id: str = "",
                           submitter_user_id: str = "",
-                          submitter_name: str = "") -> Optional[dict]:
+                          submitter_name: str = "",
+                          submitter_remote_id: str = "") -> Optional[dict]:
         """Attach a sibling note to an existing resource.
 
         A sibling note is a second-submitter or cross-server enrichment: the
@@ -1518,9 +1534,14 @@ class DuggDB:
             source_instance_id: Remote instance ID that delivered the
                 note (empty for same-server adds).
             submitter_user_id: Local user ID of the submitter (empty for
-                cross-server notes, since the remote user is not a local
-                principal). Used by the search ban-filter.
+                cross-server notes whose remote author hasn't been linked
+                to a local user yet). Used by the search ban-filter.
             submitter_name: Display name to render in the feed.
+            submitter_remote_id: Origin-side ``users.id`` of the remote
+                author (NEVER the api_key). Pairs with ``source_server``
+                to form a globally stable identity for cross-server
+                editing — see ``user_remote_identities`` for how a local
+                user gets linked to a remote pair.
 
         Returns:
             A dict summarizing the stored note, or ``None`` if the note
@@ -1558,10 +1579,12 @@ class DuggDB:
         self.conn.execute(
             """INSERT OR IGNORE INTO resource_notes
                (id, resource_id, source_server, source_instance_id,
-                submitter_user_id, submitter_name, note, added_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                submitter_user_id, submitter_name, submitter_remote_id,
+                note, added_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (note_id, resource_id, source_server, source_instance_id,
-             submitter_user_id, submitter_name, note, now),
+             submitter_user_id, submitter_name, submitter_remote_id,
+             note, now),
         )
         self.conn.commit()
         return {"id": note_id, "resource_id": resource_id, "note": note,
@@ -1584,7 +1607,7 @@ class DuggDB:
             where += " AND deleted_at IS NULL"
         rows = self.conn.execute(
             f"""SELECT id, source_server, source_instance_id, submitter_user_id,
-                       submitter_name, note, added_at, deleted_at
+                       submitter_name, submitter_remote_id, note, added_at, deleted_at
                 FROM resource_notes {where} ORDER BY added_at ASC""",
             (resource_id,),
         ).fetchall()
@@ -1598,21 +1621,79 @@ class DuggDB:
             where += " AND deleted_at IS NULL"
         row = self.conn.execute(
             f"""SELECT id, resource_id, source_server, source_instance_id,
-                       submitter_user_id, submitter_name, note, added_at,
-                       deleted_at
+                       submitter_user_id, submitter_name, submitter_remote_id,
+                       note, added_at, deleted_at
                 FROM resource_notes {where}""",
             (note_id,),
         ).fetchone()
         return dict(row) if row else None
+
+    def link_remote_identity(self, local_user_id: str, source_server: str,
+                             remote_user_id: str, source: str = "admin") -> bool:
+        """Link a local user to a remote identity ``(source_server, remote_user_id)``.
+
+        Idempotent on ``(source_server, remote_user_id)`` — re-running with
+        the same pair is a silent no-op even if the local_user_id differs
+        (the existing claim wins; first-write-wins is enforced by the
+        UNIQUE index, which is fine because the only paths that create
+        rows are attested: invite redemption and the local admin CLI).
+        Returns True if a new row was inserted, False on conflict.
+        """
+        if not (local_user_id and source_server and remote_user_id):
+            return False
+        now = _now()
+        cur = self.conn.execute(
+            """INSERT OR IGNORE INTO user_remote_identities
+               (local_user_id, source_server, remote_user_id, source, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (local_user_id, source_server, remote_user_id, source, now),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def lookup_remote_identity(self, source_server: str,
+                               remote_user_id: str) -> Optional[str]:
+        """Resolve ``(source_server, remote_user_id)`` → local user id, or None."""
+        if not (source_server and remote_user_id):
+            return None
+        row = self.conn.execute(
+            """SELECT local_user_id FROM user_remote_identities
+               WHERE source_server = ? AND remote_user_id = ?""",
+            (source_server, remote_user_id),
+        ).fetchone()
+        return row["local_user_id"] if row else None
+
+    def viewer_owns_note(self, note: dict, viewer_id: str) -> bool:
+        """Does ``viewer_id`` own this sibling-note row for edit/delete?
+
+        Two paths: direct local attribution (``submitter_user_id``), or
+        the viewer holds a ``user_remote_identities`` link matching the
+        note's ``(source_server, submitter_remote_id)`` pair. The second
+        path is what makes federated notes editable on the destination
+        once the author's home identity has been linked through invite
+        redemption or the admin CLI.
+        """
+        if not viewer_id:
+            return False
+        if note.get("submitter_user_id") == viewer_id:
+            return True
+        remote_id = note.get("submitter_remote_id") or ""
+        source_server = note.get("source_server") or ""
+        if not (remote_id and source_server):
+            return False
+        linked = self.lookup_remote_identity(source_server, remote_id)
+        return linked == viewer_id
 
     def update_resource_note(self, note_id: str, new_text: str,
                              actor_id: str) -> Optional[dict]:
         """Edit a sibling note's text. Author-gated.
 
         Returns the updated note dict on success; None if the note doesn't
-        exist. Raises PermissionError if the actor isn't the note's author.
-        Logs to ``resource_edits`` with ``field='note'`` so link-swap /
-        note-swap auditing covers sibling notes just like primary notes.
+        exist. Raises PermissionError if the actor isn't the note's author
+        (either directly via ``submitter_user_id`` or transitively via a
+        ``user_remote_identities`` link). Logs to ``resource_edits`` with
+        ``field='note'`` so link-swap / note-swap auditing covers sibling
+        notes just like primary notes.
         """
         text = (new_text or "").strip()
         if not text:
@@ -1620,11 +1701,7 @@ class DuggDB:
         existing = self.get_resource_note(note_id)
         if not existing:
             return None
-        # Cross-server sibling notes have empty submitter_user_id (the
-        # remote user isn't a local principal). We disallow editing those
-        # since there's no author to match -- they belong to whoever owns
-        # the note on the origin server.
-        if not existing["submitter_user_id"] or existing["submitter_user_id"] != actor_id:
+        if not self.viewer_owns_note(existing, actor_id):
             raise PermissionError("Only the note author can edit this note")
         old_text = existing["note"] or ""
         if old_text == text:
@@ -1658,7 +1735,7 @@ class DuggDB:
         existing = self.get_resource_note(note_id)
         if not existing:
             return False
-        if not existing["submitter_user_id"] or existing["submitter_user_id"] != actor_id:
+        if not self.viewer_owns_note(existing, actor_id):
             raise PermissionError("Only the note author can delete this note")
         now = _now()
         self.conn.execute(
@@ -3725,7 +3802,7 @@ class DuggDB:
 
     # --- Inbound Publish (receiving from remote) ---
 
-    def ingest_remote_publish(self, resource_data: dict, source_instance_id: str, target_collection_id: str, source_server: str = "", submitted_by: str = "", note_submitter_id: str = "") -> Optional[dict]:
+    def ingest_remote_publish(self, resource_data: dict, source_instance_id: str, target_collection_id: str, source_server: str = "", submitted_by: str = "", note_submitter_id: str = "", note_remote_id: str = "") -> Optional[dict]:
         """Receive a published resource from a remote Dugg instance.
 
         Stores the resource in the target collection with the source tracked.
@@ -3735,13 +3812,15 @@ class DuggDB:
         never lost.
 
         ``submitted_by`` is the resource-row owner: the HTTP ingest handler
-        resolves this from a name match, else from the authed caller, so the
-        resource always has a local owner. ``note_submitter_id`` is for the
-        sibling note's ``submitter_user_id`` column and is stricter -- only
-        pass a local id when the incoming author was *confirmed* to map to a
-        real local user. An empty value keeps the note unattributed, which
-        correctly makes it uneditable by anyone who happens to share the
-        caller's id.
+        resolves this from a remote-identity link, name self-post, or the
+        authed caller, so the resource always has a local owner.
+        ``note_submitter_id`` is for the sibling note's ``submitter_user_id``
+        column and is stricter -- only pass a local id when the incoming
+        author was *confirmed* to map to a real local user (via
+        user_remote_identities link, or self-post). An empty value keeps
+        the note unattributed locally; ``note_remote_id`` (the origin's
+        users.id UUID) is still stored alongside ``source_server`` so the
+        note can be claimed later when the link gets established.
         """
         url = resource_data.get("url", "")
         if not url:
@@ -3765,6 +3844,7 @@ class DuggDB:
                     source_instance_id=source_instance_id,
                     submitter_user_id=note_submitter_id,
                     submitter_name=submitter_name,
+                    submitter_remote_id=note_remote_id,
                 )
                 note_added = True
             # Union tags from the incoming publish onto the existing resource
@@ -3817,6 +3897,7 @@ class DuggDB:
                 source_instance_id=source_instance_id,
                 submitter_user_id=note_submitter_id,
                 submitter_name=submitter_name,
+                submitter_remote_id=note_remote_id,
             )
 
         # Copy tags

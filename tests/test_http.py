@@ -997,50 +997,170 @@ def test_ingest_leaves_sibling_note_unattributed_when_name_does_not_match(client
     assert n["can_delete"] is False
 
 
-def test_migration_backfills_orphan_note_attribution(db_path):
-    """Notes created before v2026.04.24.2 carry submitter_user_id='' even
-    when a matching local user exists. The migration backfills the
-    attribution on startup *only* when the name is unambiguous (single
-    matching local user); duplicate-name rows stay orphaned and require
-    manual triage.
-    """
+def test_remote_identity_link_widens_can_edit_for_federated_note(client, db_path, user):
+    """The John/Sally case: two users with the same display name on
+    different home servers must each only be able to edit their own
+    federated notes. Identity is the (source_server, remote_user_id)
+    pair, resolved through user_remote_identities -- not the name."""
+    from dugg.db import DuggDB
+    c, _ = client
+    d = DuggDB(db_path)
+    # Resource lives in a shared collection so the viewer (the `user`
+    # fixture) can access it. We attribute notes via the link table,
+    # not by name.
+    kade = d.create_user("Kade")
+    coll = d.create_collection("Shared", kade["id"], visibility="shared")
+    d.invite_member(coll["id"], kade["id"], user["id"])
+    res = d.add_resource(url="https://example.com/john", collection_id=coll["id"],
+                         submitted_by=kade["id"], title="J")
+    # Two federated sibling notes from two different "Johns" on two
+    # different home servers. Both arrive with submitter_user_id='' and
+    # submitter_name='John' but their remote identities differ.
+    note_a = d.add_resource_note(
+        res["id"], "John A's take",
+        source_server="https://home-a.example",
+        submitter_remote_id="john-on-home-a",
+        submitter_name="John",
+    )
+    note_b = d.add_resource_note(
+        res["id"], "John B's take",
+        source_server="https://home-b.example",
+        submitter_remote_id="john-on-home-b",
+        submitter_name="John",
+    )
+    # Link the `user` fixture as John A -- they should now own note A
+    # but NOT note B.
+    d.link_remote_identity(
+        local_user_id=user["id"],
+        source_server="https://home-a.example",
+        remote_user_id="john-on-home-a",
+    )
+    d.close()
+
+    resp = c.get(f"/api/resource/{res['id']}", headers={"X-Dugg-Key": user["api_key"]})
+    notes = {n["id"]: n for n in resp.json()["resource"]["notes"]}
+    assert notes[note_a["id"]]["can_edit"] is True
+    assert notes[note_a["id"]]["can_delete"] is True
+    # Same name, different home, no link → not editable.
+    assert notes[note_b["id"]]["can_edit"] is False
+    assert notes[note_b["id"]]["can_delete"] is False
+
+    # And the linked user can actually round-trip an edit.
+    edit = c.post(
+        "/api/note/edit",
+        json={"note_id": note_a["id"], "text": "John A revised"},
+        headers={"X-Dugg-Key": user["api_key"]},
+    )
+    assert edit.status_code == 200
+    # While the unlinked path on note B is forbidden.
+    forbidden = c.post(
+        "/api/note/edit",
+        json={"note_id": note_b["id"], "text": "hijack"},
+        headers={"X-Dugg-Key": user["api_key"]},
+    )
+    assert forbidden.status_code == 403
+
+
+def test_remote_identity_link_unique_first_write_wins(db_path):
+    """A given (source_server, remote_user_id) pair can be linked to at
+    most one local user. Subsequent link attempts with a different local
+    user no-op. Same local user re-linking is idempotent."""
+    from dugg.db import DuggDB
+    d = DuggDB(db_path)
+    a = d.create_user("Alice")
+    b = d.create_user("Bob")
+    assert d.link_remote_identity(a["id"], "https://home.example", "remote-1") is True
+    # Same local user re-linking same pair → silent no-op (idempotent).
+    assert d.link_remote_identity(a["id"], "https://home.example", "remote-1") is False
+    # Different local user attempting same pair → also blocked by UNIQUE.
+    assert d.link_remote_identity(b["id"], "https://home.example", "remote-1") is False
+    # Pair still resolves to alice.
+    assert d.lookup_remote_identity("https://home.example", "remote-1") == a["id"]
+    d.close()
+
+
+def test_invite_redeem_links_home_identity_when_provided(client, db_path, user):
+    """Redemption of an invite token can carry the redeemer's home
+    identity to auto-create a user_remote_identities link. This is the
+    attested first-contact path -- not a generic claim endpoint."""
+    from dugg.db import DuggDB
+    c, _ = client
+    d = DuggDB(db_path)
+    invite = d.create_invite_token(user["id"], name_hint="Kade Remote")
+    d.close()
+
+    resp = c.post(
+        f"/invite/{invite['token']}/redeem",
+        json={
+            "name": "Kade",
+            "home_server": "https://home.example",
+            "home_user_id": "kade-on-home",
+        },
+        headers={"Content-Type": "application/json"},
+    )
+    assert resp.status_code in (200, 201)
+    redeemed_user_id = resp.json()["user"]["id"]
+
+    d = DuggDB(db_path)
+    linked = d.lookup_remote_identity("https://home.example", "kade-on-home")
+    d.close()
+    assert linked == redeemed_user_id
+
+
+def test_admin_link_cli_creates_link(db_path):
+    """`dugg admin link --user U --source-server S --remote-user-id R`
+    creates a row in user_remote_identities. Admin path, no HTTP."""
+    from argparse import Namespace
+    from dugg.cli import cmd_admin_link
     from dugg.db import DuggDB
     d = DuggDB(db_path)
     kade = d.create_user("Kade")
-    coll = d.create_collection("Default", kade["id"])
-    res = d.add_resource(url="https://example.com/orphan", collection_id=coll["id"],
-                         submitted_by=kade["id"], title="Orphan host")
-    # Simulate a pre-v2.2 orphan row: empty submitter_user_id but matching name.
-    d.conn.execute(
-        """INSERT INTO resource_notes
-           (id, resource_id, source_server, source_instance_id,
-            submitter_user_id, submitter_name, note, added_at)
-           VALUES ('orphan-id', ?, '', '', '', 'Kade', 'orphan note', '2026-01-01T00:00:00Z')""",
-        (res["id"],),
-    )
-    # Also seed a duplicate-name scenario: two users named "Twin" + a row
-    # with submitter_name='Twin'. The migration must NOT claim it for either.
-    twin1 = d.create_user("Twin")
-    twin2 = d.create_user("Twin")
-    d.conn.execute(
-        """INSERT INTO resource_notes
-           (id, resource_id, source_server, source_instance_id,
-            submitter_user_id, submitter_name, note, added_at)
-           VALUES ('twin-id', ?, '', '', '', 'Twin', 'twin orphan', '2026-01-02T00:00:00Z')""",
-        (res["id"],),
-    )
+    d.close()
+
+    cmd_admin_link(Namespace(
+        db=str(db_path),
+        user=kade["id"],
+        source_server="https://home.example",
+        remote_user_id="kade-on-home",
+    ))
+    d = DuggDB(db_path)
+    linked = d.lookup_remote_identity("https://home.example", "kade-on-home")
+    d.close()
+    assert linked == kade["id"]
+
+
+def test_admin_claim_orphans_assigns_unattributed_notes(db_path):
+    """`dugg admin claim-orphans --user U` stamps every empty
+    submitter_user_id sibling note with the named user's id. Tombstoned
+    rows are skipped."""
+    from argparse import Namespace
+    from dugg.cli import cmd_admin_claim_orphans
+    from dugg.db import DuggDB
+    d = DuggDB(db_path)
+    kade = d.create_user("Kade")
+    coll_id = d.ensure_default_collection(kade["id"])
+    res = d.add_resource(url="https://example.com/orphan-host", collection_id=coll_id,
+                         submitted_by=kade["id"], title="host")
+    a = d.add_resource_note(res["id"], "orphan A", submitter_name="Kade")
+    b = d.add_resource_note(res["id"], "orphan B", submitter_name="Stranger")
+    # Soft-deleted orphans should NOT be claimed.
+    c_note = d.add_resource_note(res["id"], "tombstoned orphan", submitter_name="Ghost")
+    d.conn.execute("UPDATE resource_notes SET deleted_at = '2026-01-01' WHERE id = ?", (c_note["id"],))
     d.conn.commit()
     d.close()
 
-    # Re-open the DB; _migrate runs in __init__, which is the production
-    # entry point that fires the backfill on every boot.
-    d2 = DuggDB(db_path)
-    rows = {r["id"]: dict(r) for r in d2.conn.execute(
-        "SELECT id, submitter_user_id, submitter_name FROM resource_notes WHERE id IN ('orphan-id','twin-id')"
+    cmd_admin_claim_orphans(Namespace(db=str(db_path), user=kade["id"], dry_run=False))
+
+    d = DuggDB(db_path)
+    rows = {r["id"]: dict(r) for r in d.conn.execute(
+        "SELECT id, submitter_user_id FROM resource_notes WHERE resource_id = ?",
+        (res["id"],),
     ).fetchall()}
-    d2.close()
-    assert rows["orphan-id"]["submitter_user_id"] == kade["id"]
-    assert rows["twin-id"]["submitter_user_id"] == ""  # ambiguous, untouched
+    d.close()
+    assert rows[a["id"]]["submitter_user_id"] == kade["id"]
+    assert rows[b["id"]]["submitter_user_id"] == kade["id"]
+    # Tombstoned orphan stays untouched.
+    assert rows[c_note["id"]]["submitter_user_id"] == ""
 
 
 def test_feed_html_shows_per_note_edit_buttons_on_own_notes(client, db_path, user):

@@ -43,8 +43,15 @@ async def deliver_publish(db, queue_entry: dict) -> bool:
         db.mark_publish_delivered(queue_id)  # Resource deleted, nothing to deliver
         return True
 
-    # Resolve submitter name for remote attribution
-    submitter = db.get_user(resource.get("submitted_by", ""))
+    # Resolve submitter name + remote id for cross-server attribution.
+    # `submitter_remote_id` is the local user.id UUID — explicitly NOT
+    # the api_key. The destination uses (source_server, remote_user_id)
+    # as a stable identity for editing federated notes; pairing the id
+    # with the api_key would expose a credential as part of the wire
+    # protocol and re-introduce the risk we removed by moving keys to
+    # cookies.
+    submitter_id = resource.get("submitted_by", "")
+    submitter = db.get_user(submitter_id) if submitter_id else None
     submitter_name = submitter["name"] if submitter else ""
 
     # Build the payload
@@ -61,6 +68,7 @@ async def deliver_publish(db, queue_entry: dict) -> bool:
             "tags": resource.get("tags", []),
             "enriched_at": resource.get("enriched_at"),
             "submitter_name": submitter_name,
+            "submitter_remote_id": submitter_id,
         },
         "target": target_name,
         "source_instance_id": queue_entry["target_instance_id"],

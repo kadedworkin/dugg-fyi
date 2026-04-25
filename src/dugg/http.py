@@ -270,35 +270,44 @@ def create_app(db_path: Optional[Path] = None, mode: str = "local") -> Starlette
         coll_id = _ensure_default_collection(d, user["id"])
 
         source_server = payload.get("source_server", "")
-
-        # Resolve submitter for the resource row: prefer matching user by
-        # name from source, fall back to the authed caller (required —
-        # resources always need a local owner for the moderation gate).
-        submitter_id = user["id"]
         submitter_name = resource_data.get("submitter_name", "")
-        # Sibling-note attribution is stricter: only attach a local
-        # submitter_user_id when the incoming author name *confirms* a
-        # local user. A fallback to the authed caller here would let the
-        # federation delivery agent appear to "own" every sibling note it
-        # relayed, wrongly exposing Edit/Delete affordances.
-        note_submitter_id = ""
-        if submitter_name:
-            if user.get("name") == submitter_name:
-                # Self-post: the authed caller claims to be the author.
-                # This is unambiguous and beats any other local user that
-                # happens to share the name.
-                submitter_id = user["id"]
-                note_submitter_id = user["id"]
-            else:
-                match = d.conn.execute(
-                    "SELECT id FROM users WHERE name = ? LIMIT 1",
-                    (submitter_name,),
-                ).fetchone()
-                if match:
-                    submitter_id = match["id"]
-                    note_submitter_id = match["id"]
+        # `submitter_remote_id` is the origin server's local users.id UUID
+        # for the author. Pairs with source_server to form a globally
+        # stable identity. NEVER an api_key — the publish-side wire builder
+        # (sync.deliver_publish) is documented to send users.id only.
+        submitter_remote_id = resource_data.get("submitter_remote_id", "") or ""
 
-        result = d.ingest_remote_publish(resource_data, source_instance_id, coll_id, source_server=source_server, submitted_by=submitter_id, note_submitter_id=note_submitter_id)
+        # Resolve attribution. Two prongs:
+        #   1. Resource row owner (`submitted_by`). Defaults to the authed
+        #      caller because resources always need a local owner for the
+        #      moderation gate.
+        #   2. Sibling note local link (`note_submitter_id`). Set ONLY when
+        #      we have a high-confidence link via user_remote_identities,
+        #      OR when the authed caller's own name matches submitter_name
+        #      (self-post: the caller is asserting they're the author and
+        #      they're proving it via their auth). Otherwise leave empty
+        #      and let the (source_server, submitter_remote_id) pair be the
+        #      identity — viewer_owns_note() resolves it through the link
+        #      table at edit time.
+        submitter_id = user["id"]
+        note_submitter_id = ""
+        if source_server and submitter_remote_id:
+            linked = d.lookup_remote_identity(source_server, submitter_remote_id)
+            if linked:
+                submitter_id = linked
+                note_submitter_id = linked
+        if not note_submitter_id and submitter_name and user.get("name") == submitter_name:
+            # Self-post fallback (no link yet): a brand-new server where the
+            # author is also the federation caller. Trust the auth.
+            note_submitter_id = user["id"]
+            submitter_id = user["id"]
+
+        result = d.ingest_remote_publish(
+            resource_data, source_instance_id, coll_id,
+            source_server=source_server, submitted_by=submitter_id,
+            note_submitter_id=note_submitter_id,
+            note_remote_id=submitter_remote_id,
+        )
         if not result:
             return _problem_response(500, "Ingest failed")
 
@@ -816,25 +825,54 @@ async function doSetup() {{
         return HTMLResponse(_html_page(f"Join {instance_name}", body))
 
     async def handle_invite_redeem(request: Request):
-        """POST /invite/{token}/redeem — process the invite redemption."""
+        """POST /invite/{token}/redeem — process the invite redemption.
+
+        Optional ``home_server`` + ``home_user_id`` (JSON body only) link
+        the new local user to their home-server identity via
+        ``user_remote_identities`` so federated notes from the home
+        server resolve to this account locally. The redemption itself is
+        the attestation: the token was issued by this server's owner and
+        is single-use, so a malicious redeemer can at worst link their
+        own newly-minted local user to a chosen home identity once. This
+        is NOT a generic claim endpoint -- there is no surface for
+        retroactively re-linking an existing account.
+        """
         token = request.path_params["token"]
         d = get_db()
 
         # Accept both form-encoded and JSON
         content_type = request.headers.get("content-type", "")
+        home_server = ""
+        home_user_id = ""
         if "application/json" in content_type:
             body = await request.body()
             data = json.loads(body)
             name = data.get("name", "")
+            home_server = (data.get("home_server") or "").strip()
+            home_user_id = (data.get("home_user_id") or "").strip()
         else:
             form = await request.form()
             name = form.get("name", "")
+            home_server = (form.get("home_server") or "").strip()
+            home_user_id = (form.get("home_user_id") or "").strip()
 
         if not name:
             invite = d.get_invite_token(token)
             name = invite["name_hint"] if invite and invite.get("name_hint") else "New User"
 
         result = d.redeem_invite_token(token, name)
+        if result and result.get("user") and home_server and home_user_id:
+            # Best-effort: a UNIQUE conflict here means the home identity
+            # was already linked to a different local user on this server.
+            # We swallow the conflict rather than fail redemption -- the
+            # user still got their account; only attribution-link is
+            # missed. Admins can resolve via `dugg admin link`.
+            d.link_remote_identity(
+                local_user_id=result["user"]["id"],
+                source_server=home_server,
+                remote_user_id=home_user_id,
+                source="invite_redeem",
+            )
 
         if not result:
             if "application/json" in content_type:
@@ -1219,8 +1257,8 @@ async function doSetup() {{
                         color_class=primary_class,
                     ))
                 for sn in sibling_notes:
-                    sib_author_id = sn.get("submitter_user_id") or ""
-                    sib_is_mine = bool(sib_author_id and sib_author_id == user["id"])
+                    # Direct submitter match OR remote-identity link match.
+                    sib_is_mine = d.viewer_owns_note(sn, user["id"])
                     sib_class = "sibling note-local-mine" if sib_is_mine else "sibling note-other"
                     notes_html_parts.append(_render_note_row(
                         note_id=sn.get("id", ""), kind="sibling",
@@ -1806,8 +1844,10 @@ async function syncNow(e) {
                 "can_delete": bool(viewer_id and sub_id == viewer_id),
             })
         for sn in sibling_notes or []:
-            sn_submitter = sn.get("submitter_user_id") or ""
-            mine = bool(viewer_id and sn_submitter and sn_submitter == viewer_id)
+            # Two ways to be the author: direct local attribution OR a
+            # user_remote_identities link from viewer to (source_server,
+            # submitter_remote_id). The DB helper does both checks.
+            mine = d.viewer_owns_note(sn, viewer_id) if viewer_id else False
             notes.append({
                 "id": sn.get("id") or "",
                 "author": sn.get("submitter_name") or "",

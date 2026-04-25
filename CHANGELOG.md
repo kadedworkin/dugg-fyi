@@ -2,6 +2,23 @@
 
 Dugg follows date-versioned releases: `vYYYY.MM.DD` on each shipped day, with `.N` suffixes if a day ships multiple times. Each release ships from `main` with the commit tagged at release time.
 
+## v2026.04.24.5
+
+Stable cross-server note editing needs a server-scoped remote identity, not name matching. The v2026.04.24.4 boot-time name-uniqueness backfill tried to force that invariant through local usernames and broke legitimate duplicates like John/Sally, so this release walks that back and replaces it with attested `(source_server, remote_user_id)` links.
+
+### Changed
+
+- **Stable federated identity schema.** `resource_notes` adds `submitter_remote_id` (the origin server's `users.id` UUID, never the API key) and the new `user_remote_identities` table records `(local_user_id, source_server, remote_user_id, source, created_at)` with a UNIQUE constraint on `(source_server, remote_user_id)` so the first attested link wins.
+- **Walked back the v2026.04.24.4 boot-time backfill.** Startup no longer rewrites local users into fake uniqueness just to make federated note ownership work; duplicate local display names like John/Sally stay valid.
+- **Attested link paths only.** Invite redemption (`POST /invite/{token}/redeem`) now accepts optional `home_server` + `home_user_id` and auto-links on redeem; local admins can also create links with `dugg admin link`. There is no public claim endpoint.
+- **Ownership gate widened by explicit link map.** `viewer_owns_note` now treats a note as editable when `submitter_user_id` matches directly or when `user_remote_identities` maps the viewer to `(source_server, submitter_remote_id)`. That gate now drives `/api/note/edit`, `/api/note/delete`, per-note `can_edit` on `/api/resource/{id}`, and the browser feed renderer.
+- **Federation now carries the remote identity through the wire.** Outbound publish includes `submitter_remote_id = resource.submitted_by`; `/ingest` threads it through on arrival and fills `submitter_user_id` from the link table when a local attested mapping exists.
+- **Admin orphan-claim tooling.** `dugg admin claim-orphans --user U [--dry-run]` claims legacy unattributed notes for a linked user, so existing private/chino-bandido notes can pick up editability without a data rewrite.
+
+### Tests
+
+377 passing (+5 this release): John/Sally duplicate-name collision stays valid; remote identity link remains first-write-wins; invite redeem auto-links; `dugg admin link` works; `dugg admin claim-orphans` dry-run and apply paths both behave.
+
 ## v2026.04.24.3
 
 Browser feed catches up to iOS for per-note editing. Previously the card-level "edit" button rewrote the resource's primary note regardless of who clicked it, which is why Kade's "secondary browser note" landed unattributed and uneditable — he was actually replacing the primary note (attributed to the resource submitter), not creating his own.

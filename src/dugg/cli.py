@@ -1574,12 +1574,117 @@ def cmd_set_pruning(args):
 
 
 def cmd_admin(args):
-    """Launch the admin TUI for ban & appeal management."""
+    """Dispatch `dugg admin [link | claim-orphans]`, defaulting to TUI."""
+    action = getattr(args, "admin_action", None)
+    if action == "link":
+        cmd_admin_link(args)
+    elif action == "claim-orphans":
+        cmd_admin_claim_orphans(args)
+    else:
+        from pathlib import Path
+        from dugg.tui import run_tui
+        db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+        api_key = getattr(args, "key", None)
+        run_tui(db_path=db_path, api_key=api_key)
+
+
+def _resolve_local_user(db, ref: str) -> Optional[dict]:
+    """Resolve a user reference (id or unique display name) to a user dict.
+
+    Returns None when nothing matches, or when a name reference is
+    ambiguous (multiple users share that display name). Direct id lookups
+    are unambiguous by definition.
+    """
+    if not ref:
+        return None
+    row = db.conn.execute("SELECT id, name FROM users WHERE id = ?", (ref,)).fetchone()
+    if row:
+        return dict(row)
+    rows = db.conn.execute("SELECT id, name FROM users WHERE name = ?", (ref,)).fetchall()
+    if len(rows) == 1:
+        return dict(rows[0])
+    if len(rows) > 1:
+        print(f"Ambiguous: {len(rows)} local users named {ref!r}. Pass the user id instead:")
+        for r in rows:
+            print(f"  {r['id']}  {r['name']}")
+        return None
+    return None
+
+
+def cmd_admin_link(args):
+    """Manually create a user_remote_identities link.
+
+    File-system access required (no HTTP surface). Use this to backfill
+    a link for an existing local user whose home identity wasn't captured
+    at invite-redemption time, or to repair an account.
+    """
     from pathlib import Path
-    from dugg.tui import run_tui
     db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
-    api_key = getattr(args, "key", None)
-    run_tui(db_path=db_path, api_key=api_key)
+    db = DuggDB(db_path)
+    user = _resolve_local_user(db, args.user)
+    if not user:
+        print(f"User not found: {args.user}")
+        db.close()
+        sys.exit(1)
+    inserted = db.link_remote_identity(
+        local_user_id=user["id"],
+        source_server=args.source_server,
+        remote_user_id=args.remote_user_id,
+        source="admin",
+    )
+    db.close()
+    if inserted:
+        print(f"Linked {user['name']} ({user['id']}) -> ({args.source_server}, {args.remote_user_id})")
+    else:
+        print(f"No-op: ({args.source_server}, {args.remote_user_id}) is already linked to a local user.")
+
+
+def cmd_admin_claim_orphans(args):
+    """Assign every unattributed sibling note on this server to a chosen user.
+
+    "Unattributed" = ``submitter_user_id = ''``. Used to repair pre-link
+    orphans for the closest single human in the system. Per-server admin
+    decision: in a "two potential users, one real user" world, all empty
+    rows belong to the named user.
+    """
+    from pathlib import Path
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+    user = _resolve_local_user(db, args.user)
+    if not user:
+        print(f"User not found: {args.user}")
+        db.close()
+        sys.exit(1)
+
+    rows = db.conn.execute(
+        """SELECT id, submitter_name, source_server, substr(note, 1, 60) AS preview
+           FROM resource_notes
+           WHERE submitter_user_id = '' AND deleted_at IS NULL""",
+    ).fetchall()
+    if not rows:
+        print("No orphan rows to claim.")
+        db.close()
+        return
+
+    print(f"{len(rows)} orphan rows would be assigned to {user['name']} ({user['id']}):")
+    for r in rows[:20]:
+        origin = r["source_server"] or "(local)"
+        print(f"  {r['id']}  name={r['submitter_name']!r:20}  source={origin}  | {r['preview']}")
+    if len(rows) > 20:
+        print(f"  ... and {len(rows) - 20} more")
+
+    if args.dry_run:
+        print("\n[dry-run] No changes written.")
+        db.close()
+        return
+
+    db.conn.execute(
+        "UPDATE resource_notes SET submitter_user_id = ? WHERE submitter_user_id = '' AND deleted_at IS NULL",
+        (user["id"],),
+    )
+    db.conn.commit()
+    db.close()
+    print(f"\nClaimed {len(rows)} rows for {user['name']}.")
 
 
 def cmd_doctor(args):
@@ -1823,8 +1928,27 @@ def main():
     p_doctor.add_argument("--host", default="127.0.0.1", help="HTTP host to check (default: 127.0.0.1)")
     p_doctor.add_argument("--port", type=int, default=None, help="If set, also check HTTP server reachability")
 
-    p_admin = sub.add_parser("admin", help="Launch admin TUI for ban & appeal management")
+    p_admin = sub.add_parser("admin", help="Admin: ban/appeal TUI by default; link / claim-orphans subcommands")
     p_admin.add_argument("--key", default=None, help="API key (uses local user if omitted)")
+    admin_sub = p_admin.add_subparsers(dest="admin_action")
+
+    p_admin_link = admin_sub.add_parser(
+        "link",
+        help="Link a local user to a remote (source_server, remote_user_id) identity",
+    )
+    p_admin_link.add_argument("--user", required=True, help="Local user id (or display name; uniquely-named only)")
+    p_admin_link.add_argument("--source-server", required=True, help="Origin server URL (e.g. https://home.example)")
+    p_admin_link.add_argument("--remote-user-id", required=True, help="Origin-side users.id UUID for that user")
+
+    p_admin_claim = admin_sub.add_parser(
+        "claim-orphans",
+        help="Assign all unattributed sibling notes on this server to a chosen local user",
+    )
+    p_admin_claim.add_argument("--user", required=True, help="Local user id (or unique display name) to attribute orphans to")
+    p_admin_claim.add_argument(
+        "--dry-run", action="store_true",
+        help="Print which rows would change without writing",
+    )
 
     p_welcome = sub.add_parser("welcome", help="Show orientation info for your Dugg installation")
     p_welcome.add_argument("--key", default=None, help="API key (uses local user if omitted)")
