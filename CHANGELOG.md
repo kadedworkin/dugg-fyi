@@ -2,6 +2,10 @@
 
 Dugg follows date-versioned releases: `vYYYY.MM.DD` on each shipped day, with `.N` suffixes if a day ships multiple times. Each release ships from `main` with the commit tagged at release time.
 
+## v2026.04.25
+
+- Removed `tap` reaction; replaced with first-class Read primitive (`read_states` table, `/api/read` endpoints, surface-tagged source enum, MCP/CLI/Slack parity).
+
 ## v2026.04.24.5
 
 Stable cross-server note editing needs a server-scoped remote identity, not name matching. The v2026.04.24.4 boot-time name-uniqueness backfill tried to force that invariant through local usernames and broke legitimate duplicates like John/Sally, so this release walks that back and replaces it with attested `(source_server, remote_user_id)` links.

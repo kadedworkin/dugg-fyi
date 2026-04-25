@@ -13,7 +13,7 @@ Added by Rocco · from chino-bandido
 _context note if you included one_
 ```
 
-Each message includes **Tap / Star / Nice** buttons — click one to silently react. The resource's author gets a separate notification with aggregate counts.
+Each message includes **Mark as Read / Star / Thumbs Up** buttons. Read is private to the clicking user; Star and Thumbs Up still notify the resource's author with aggregate counts.
 
 The formatting is automatic — Dugg detects Slack webhook URLs and uses Slack Block Kit payloads; other webhook targets get raw JSON instead.
 
@@ -107,7 +107,7 @@ No restart needed — the server reads it from the database on each request.
 
 ## Step 7 — Enable reactions (interactive buttons)
 
-New resource messages include Tap / Star / Nice buttons. For these to work, you need to enable interactivity in your Slack app:
+New resource messages include Mark as Read / Star / Thumbs Up buttons. For these to work, you need to enable interactivity in your Slack app:
 
 1. In the app's sidebar, click **Interactivity & Shortcuts**.
 2. Toggle **Interactivity** to on.
@@ -115,9 +115,10 @@ New resource messages include Tap / Star / Nice buttons. For these to work, you 
    (e.g. `https://chino-bandido.kadedworkin.com/slack/actions`)
 4. Click **Save Changes**.
 
-When someone clicks a reaction button:
+When someone clicks a button:
 - The reactor sees an ephemeral confirmation (only visible to them)
-- The resource's author gets a webhook notification: ":star: Your resource *Title* got a star — 3 total reactions (1 star, 2 tap)"
+- Mark as Read updates only that user's private read state
+- The resource's author gets a webhook notification for Star / Thumbs Up, e.g. ":star: Your resource *Title* got a star — 3 total reactions (2 star, 1 thumbsup)"
 - Reaction counts are only visible to the author — no one else knows who reacted
 
 Buttons appear on webhook push messages, `/dugg` feed results, `/dugg <url>` add confirmations, and `/dugg <query>` search results.

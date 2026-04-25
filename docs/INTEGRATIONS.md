@@ -30,7 +30,7 @@ Set up a Slack app with a slash command pointing to your server:
 
 ### Reactions via Slack buttons
 
-New resources posted to Slack via webhooks include Tap / Star / Nice buttons. Clicking a button fires a reaction back to the Dugg server, and the resource's author is quietly notified with aggregate counts.
+New resources posted to Slack via webhooks include Mark as Read / Star / Thumbs Up buttons. Mark as Read updates private read state; Star and Thumbs Up fire reactions back to the Dugg server and quietly notify the resource's author with aggregate counts.
 
 **Setup:**
 1. In your Slack app settings, go to **Interactivity & Shortcuts**
