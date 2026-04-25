@@ -227,6 +227,18 @@ async def list_tools() -> list[Tool]:
                 "type": "object",
                 "properties": {
                     "limit": {"type": "integer", "description": "Max results to return", "default": 50},
+                    "unread": {"type": "boolean", "description": "Only return unread resources", "default": False},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+            },
+        ),
+        Tool(
+            name="dugg_unread_feed",
+            description="Get unread resources across all collections you have access to.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "description": "Max results to return", "default": 50},
                     "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
                 },
             },
@@ -402,12 +414,36 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="dugg_react",
-            description="Silently react to a resource. Only the publisher will see aggregate reaction counts — no one else knows you reacted. Reaction types: tap (default), star, thumbsup.",
+            description="Silently react to a resource. Only the publisher will see aggregate reaction counts — no one else knows you reacted. Reaction types: star, thumbsup.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "resource_id": {"type": "string", "description": "The resource to react to"},
-                    "reaction": {"type": "string", "enum": ["tap", "star", "thumbsup"], "description": "Type of reaction", "default": "tap"},
+                    "reaction": {"type": "string", "enum": ["star", "thumbsup"], "description": "Type of reaction", "default": "star"},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+                "required": ["resource_id"],
+            },
+        ),
+        Tool(
+            name="dugg_mark_read",
+            description="Mark a resource as read.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "resource_id": {"type": "string", "description": "The resource to mark as read"},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+                "required": ["resource_id"],
+            },
+        ),
+        Tool(
+            name="dugg_mark_unread",
+            description="Mark a resource as unread.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "resource_id": {"type": "string", "description": "The resource to mark as unread"},
                     "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
                 },
                 "required": ["resource_id"],
@@ -978,6 +1014,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = _handle_skill_edit(d, user_id, arguments)
         elif name == "dugg_feed":
             result = _handle_feed(d, user_id, arguments)
+        elif name == "dugg_unread_feed":
+            result = _handle_feed(d, user_id, {**arguments, "unread": True})
         elif name == "dugg_tag":
             result = _handle_tag(d, arguments)
         elif name == "dugg_collections":
@@ -1006,6 +1044,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = _handle_unpublish(d, user_id, arguments)
         elif name == "dugg_react":
             result = _handle_react(d, user_id, arguments)
+        elif name == "dugg_mark_read":
+            result = _handle_mark_read(d, user_id, arguments)
+        elif name == "dugg_mark_unread":
+            result = _handle_mark_unread(d, user_id, arguments)
         elif name == "dugg_reactions":
             result = _handle_reactions(d, user_id, arguments)
         elif name == "dugg_instance_create":
@@ -2031,7 +2073,7 @@ def _handle_search(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
 def _handle_feed(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
     d.mark_invite_onboarded(user_id)
     limit = args.get("limit", 50)
-    results = d.get_feed(user_id, limit=limit)
+    results = d.get_feed(user_id, limit=limit, unread=args.get("unread", False))
 
     if not results:
         return [TextContent(type="text", text="Your feed is empty. Add some resources with dugg_add!")]
@@ -2400,7 +2442,7 @@ def _handle_unpublish(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
 
 def _handle_react(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
     resource_id = args["resource_id"]
-    reaction_type = args.get("reaction", "tap")
+    reaction_type = args.get("reaction", "star")
     resource = d.get_resource(resource_id)
     if not resource:
         return [TextContent(type="text", text=f"Resource {resource_id} not found")]
@@ -2409,7 +2451,34 @@ def _handle_react(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
     if resource["collection_id"] not in accessible:
         return [TextContent(type="text", text=f"Access denied to resource {resource_id}")]
     d.react_to_resource(resource_id, user_id, reaction_type)
+    d.mark_read(user_id, resource_id, "mcp_react_implicit")
     return [TextContent(type="text", text=f"Reacted to {resource_id} with {reaction_type}")]
+
+
+def _handle_mark_read(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    resource_id = args["resource_id"]
+    resource = d.get_resource(resource_id)
+    if not resource:
+        return [TextContent(type="text", text=f"Resource {resource_id} not found")]
+    accessible = d._accessible_collection_ids(user_id)
+    if resource["collection_id"] not in accessible:
+        return [TextContent(type="text", text=f"Access denied to resource {resource_id}")]
+    d.mark_read(user_id, resource_id, "mcp_tool")
+    return [TextContent(type="text", text=f"Marked {resource_id} as read")]
+
+
+def _handle_mark_unread(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    resource_id = args["resource_id"]
+    resource = d.get_resource(resource_id)
+    if not resource:
+        return [TextContent(type="text", text=f"Resource {resource_id} not found")]
+    accessible = d._accessible_collection_ids(user_id)
+    if resource["collection_id"] not in accessible:
+        return [TextContent(type="text", text=f"Access denied to resource {resource_id}")]
+    removed = d.unmark_read(user_id, resource_id)
+    if removed:
+        return [TextContent(type="text", text=f"Marked {resource_id} as unread")]
+    return [TextContent(type="text", text=f"{resource_id} was already unread")]
 
 
 def _handle_reactions(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
