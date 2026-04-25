@@ -199,6 +199,45 @@ def create_app(db_path: Optional[Path] = None, mode: str = "local") -> Starlette
         # Default to MCP because unannotated API calls are most likely from MCP/agent clients.
         return "mcp_react_implicit"
 
+    def _batch_feed_reactions(d: DuggDB, resource_ids: list[str], user_id: str) -> dict[str, dict]:
+        if not resource_ids:
+            return {}
+        placeholders = ",".join("?" for _ in resource_ids)
+        state = {
+            resource_id: {
+                "star_count": 0,
+                "thumbsup_count": 0,
+                "viewer_starred": False,
+                "viewer_thumbsup": False,
+            }
+            for resource_id in resource_ids
+        }
+        count_rows = d.conn.execute(
+            f"""SELECT resource_id, reaction_type, COUNT(*) AS count
+                FROM reactions
+                WHERE resource_id IN ({placeholders})
+                GROUP BY resource_id, reaction_type""",
+            resource_ids,
+        ).fetchall()
+        for row in count_rows:
+            if row["reaction_type"] == "star":
+                state[row["resource_id"]]["star_count"] = row["count"]
+            elif row["reaction_type"] == "thumbsup":
+                state[row["resource_id"]]["thumbsup_count"] = row["count"]
+
+        viewer_rows = d.conn.execute(
+            f"""SELECT resource_id, reaction_type
+                FROM reactions
+                WHERE user_id = ? AND resource_id IN ({placeholders})""",
+            [user_id, *resource_ids],
+        ).fetchall()
+        for row in viewer_rows:
+            if row["reaction_type"] == "star":
+                state[row["resource_id"]]["viewer_starred"] = True
+            elif row["reaction_type"] == "thumbsup":
+                state[row["resource_id"]]["viewer_thumbsup"] = True
+        return state
+
     def _slack_resource_action_buttons(resource_id: str) -> list[dict]:
         return [
             {"type": "button", "text": {"type": "plain_text", "text": ":book: Mark as Read", "emoji": True},
@@ -679,11 +718,14 @@ async function doSetup() {{
                  font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }}
   .type-badge.yt {{ background: #dc2626; }}
   .type-badge.article {{ background: #2563eb; }}
-  .search-bar {{ margin-bottom: 1.5rem; display: flex; gap: 0.5rem; position: relative; }}
-  .search-bar input {{ flex: 1; padding: 0.6rem 2.2rem 0.6rem 0.8rem; background: #111; border: 1px solid #333;
+  .search-bar {{ margin-bottom: 1.5rem; display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }}
+  .search-input-wrap {{ flex: 1 1 320px; position: relative; min-width: 0; }}
+  .search-bar input {{ width: 100%; padding: 0.6rem 2.2rem 0.6rem 0.8rem; background: #111; border: 1px solid #333;
                        border-radius: 8px; color: #fff; font-size: 0.9rem; }}
   .search-bar input:focus {{ outline: none; border-color: #6366f1; }}
   .search-bar input::placeholder {{ color: #555; }}
+  .unread-toggle {{ display: inline-flex; align-items: center; gap: 0.45rem; color: #aaa; font-size: 0.8rem; white-space: nowrap; }}
+  .unread-toggle input {{ margin: 0; accent-color: #6366f1; }}
   .search-clear {{ position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
                    background: none; border: none; color: #555; font-size: 1.1rem; cursor: pointer;
                    padding: 0 4px; line-height: 1; display: none; width: auto; }}
@@ -694,9 +736,17 @@ async function doSetup() {{
   .action-btn {{ width: auto; padding: 0.2rem 0.5rem; font-size: 0.75rem; background: transparent;
                  color: #666; border: 1px solid #333; border-radius: 4px; cursor: pointer; font-weight: 400; }}
   .action-btn:hover {{ color: #ccc; border-color: #555; background: #1a1a1a; }}
+  .reaction-btn {{ display: inline-flex; align-items: center; gap: 0.3rem; }}
+  .reaction-btn .reaction-icon {{ font-size: 0.9rem; line-height: 1; }}
+  .reaction-btn .reaction-count {{ color: #888; min-width: 0.9rem; text-align: right; }}
+  .reaction-btn.is-active {{ color: #fcd34d; border-color: #854d0e; background: rgba(133, 77, 14, 0.16); }}
+  .reaction-btn.is-active .reaction-count {{ color: #fcd34d; }}
   .delete-btn:hover {{ color: #f87171; border-color: #7f1d1d; }}
   .save-btn {{ color: #4ade80; border-color: #166534; }}
   .save-btn:hover {{ background: #052e16; }}
+  .mark-unread-btn {{ color: #888; opacity: 0; pointer-events: none; transition: opacity 0.15s, color 0.15s; }}
+  .card.is-read:hover .mark-unread-btn, .card.is-read:focus-within .mark-unread-btn {{ opacity: 1; pointer-events: auto; }}
+  .mark-unread-btn:hover {{ color: #fcd34d; border-color: #854d0e; background: #2a1b05; }}
   .publish-btn {{ color: #60a5fa; border-color: #1e3a5f; }}
   .publish-btn:hover {{ background: #0c1f3a; }}
   .edit-form {{ margin-top: 0.4rem; }}
@@ -709,6 +759,14 @@ async function doSetup() {{
   .sync-status ul {{ margin: 0.5rem 0 0 1rem; padding: 0; list-style: none; }}
   .sync-status li {{ color: #666; margin-bottom: 0.25rem; }}
   .sync-btn {{ font-size: 0.7rem; padding: 0.15rem 0.4rem; }}
+  .meta-read-state {{ display: inline-flex; align-items: center; gap: 0.35rem; margin-right: 0.2rem; }}
+  .unread-dot {{ width: 6px; height: 6px; border-radius: 50%; background: #f59e0b; display: inline-block; flex: 0 0 auto; }}
+  .read-pill {{ font-size: 0.72rem; color: #888; }}
+  .meta-read-state[data-state="read"] .unread-dot {{ display: none; }}
+  .meta-read-state[data-state="unread"] .read-pill {{ display: none; }}
+  @media (hover: none) {{
+    .card.is-read .mark-unread-btn {{ opacity: 1; pointer-events: auto; }}
+  }}
   .step {{ display: flex; gap: 1rem; margin-bottom: 1.25rem; }}
   .step-num {{ flex-shrink: 0; width: 28px; height: 28px; background: #6366f1; color: #fff;
                border-radius: 50%; display: flex; align-items: center; justify-content: center;
@@ -1212,6 +1270,7 @@ async function doSetup() {{
         feed = d.get_feed(user["id"], limit=50)
         page_title = f"{user['name']}'s Dugg"
         page_topic = ""
+        feed_reactions = _batch_feed_reactions(d, [r["id"] for r in feed], user["id"])
 
         submitter_cache: dict[str, str] = {}
         if not feed:
@@ -1227,11 +1286,16 @@ async function doSetup() {{
                     u = d.get_user(sub_id)
                     submitter_cache[sub_id] = u["name"] if u else sub_id
                 submitter_name = submitter_cache.get(sub_id, "")
-                author_html = f'<span class="author">{_xml_escape(r["author"])}</span> · ' if r.get("author") else ""
-                by_html = f'<span class="submitted-by">{_xml_escape(submitter_name)}</span>' if submitter_name else ""
+                meta_bits: list[str] = []
+                if r.get("author"):
+                    meta_bits.append(f'<span class="author">{_xml_escape(r["author"])}</span>')
+                if submitter_name:
+                    meta_bits.append(f'<span class="submitted-by">{_xml_escape(submitter_name)}</span>')
                 added_date = _short_date(r.get("created_at"))
                 pub_date = _resource_pub_date(r)
                 pub_html = f" (published {pub_date})" if pub_date and pub_date != added_date else ""
+                meta_bits.append(f"{added_date}{pub_html}")
+                meta_html = " · ".join(bit for bit in meta_bits if bit)
                 source_type = r.get("source_type", "")
                 url = r["url"]
                 if url.startswith("dugg://content/"):
@@ -1311,16 +1375,32 @@ async function doSetup() {{
                     type_badge = '<span class="type-badge yt">YouTube</span>'
                 elif source_type == "article":
                     type_badge = '<span class="type-badge article">Article</span>'
+                reaction_state = feed_reactions.get(r["id"], {})
+                star_count = int(reaction_state.get("star_count", 0))
+                thumbsup_count = int(reaction_state.get("thumbsup_count", 0))
+                viewer_starred = "true" if reaction_state.get("viewer_starred") else "false"
+                viewer_thumbsup = "true" if reaction_state.get("viewer_thumbsup") else "false"
 
-                items_html += f"""<div class="card" id="item-{r["id"]}" data-collection="{coll_id}" data-source-server="{_xml_escape(source_srv)}" data-url="{_xml_escape(r['url'])}">
+                items_html += f"""<div class="card" id="item-{r["id"]}" data-collection="{coll_id}" data-source-server="{_xml_escape(source_srv)}" data-url="{_xml_escape(r['url'])}" data-resource-id="{r["id"]}">
   {f'<div class="card-media">{thumb_html}</div>' if thumb_html else ""}
   <div class="card-body">
-    <h3><a href="{url}" target="_blank" rel="noopener">{_xml_escape(title)}</a> {type_badge}</h3>
-    <p class="meta">{author_html}{by_html} · {added_date}{pub_html}</p>
+    <h3><a href="{url}" target="_blank" rel="noopener" data-dugg-resource-id="{r["id"]}">{_xml_escape(title)}</a> {type_badge}</h3>
+    <p class="meta"><span class="meta-read-state" data-state="unread"><span class="unread-dot" aria-hidden="true"></span><span class="read-pill">✓ read</span></span>{meta_html}</p>
     {desc_html}
     <div class="notes-block">{notes_html}</div>
     {tags_html}
     <div class="item-actions">
+      <button class="action-btn reaction-btn" onclick="toggleReaction(this)" data-resource-id="{r["id"]}" data-reaction-type="star" data-active="{viewer_starred}" data-count="{star_count}" aria-pressed="{viewer_starred}">
+        <span class="reaction-icon" aria-hidden="true">{"★" if viewer_starred == "true" else "☆"}</span>
+        <span class="reaction-label">Star</span>
+        <span class="reaction-count">{star_count}</span>
+      </button>
+      <button class="action-btn reaction-btn" onclick="toggleReaction(this)" data-resource-id="{r["id"]}" data-reaction-type="thumbsup" data-active="{viewer_thumbsup}" data-count="{thumbsup_count}" aria-pressed="{viewer_thumbsup}">
+        <span class="reaction-icon" aria-hidden="true">{"👍" if viewer_thumbsup == "true" else "◦"}</span>
+        <span class="reaction-label">Thumbs Up</span>
+        <span class="reaction-count">{thumbsup_count}</span>
+      </button>
+      <button class="action-btn mark-unread-btn" onclick="markUnread(this)" data-resource-id="{r["id"]}" aria-label="Mark item unread">mark unread</button>
       <button class="action-btn add-note-btn" onclick="beginAddNote(this)" data-resource-id="{r["id"]}">add note</button>
       <button class="action-btn delete-btn" onclick="deleteItem('{r["id"]}')">delete item</button>
     </div>
@@ -1348,8 +1428,14 @@ async function doSetup() {{
 
         topic_html = f'<p class="topic">{page_topic}</p>' if page_topic else ""
         search_bar = """<div class="search-bar">
-  <input type="text" id="feedSearch" placeholder="Search this feed... (searches full article text)" autocomplete="off">
-  <button class="search-clear" id="searchClear" title="Clear search">&times;</button>
+  <div class="search-input-wrap">
+    <input type="text" id="feedSearch" placeholder="Search this feed... (searches full article text)" autocomplete="off">
+    <button class="search-clear" id="searchClear" title="Clear search">&times;</button>
+  </div>
+  <label class="unread-toggle" for="unreadOnlyToggle">
+    <input type="checkbox" id="unreadOnlyToggle">
+    <span>Unread only</span>
+  </label>
 </div>
 <div id="searchStatus" style="font-size:0.75rem;color:#666;margin-top:-1rem;margin-bottom:1rem;display:none;"></div>"""
         feed_js = """
@@ -1357,20 +1443,122 @@ async function doSetup() {{
 // Same-origin fetch auto-includes the dugg_key cookie, so no X-Dugg-Key header
 // or API key is ever written into JS or URLs on this page.
 const BASE = window.location.origin;
+const READ_SINCE = '1970-01-01T00:00:00+00:00';
+const readResourceIds = new Set();
 
 let searchTimeout = null;
 const searchInput = document.getElementById('feedSearch');
 const clearBtn = document.getElementById('searchClear');
+const unreadOnlyToggle = document.getElementById('unreadOnlyToggle');
+let fullTextMatchIds = null;
+
+function getFeedCards() {
+  return Array.from(document.querySelectorAll('.card[data-resource-id]'));
+}
+
+function updateCardReadUi(card) {
+  if (!card) return;
+  const resourceId = card.dataset.resourceId;
+  const isRead = readResourceIds.has(resourceId);
+  const state = card.querySelector('.meta-read-state');
+  const markUnreadBtn = card.querySelector('.mark-unread-btn');
+  card.classList.toggle('is-read', isRead);
+  card.dataset.readState = isRead ? 'read' : 'unread';
+  if (state) {
+    state.dataset.state = isRead ? 'read' : 'unread';
+  }
+  if (markUnreadBtn) {
+    markUnreadBtn.hidden = !isRead;
+  }
+}
+
+function updateReactionButton(btn) {
+  if (!btn) return;
+  const reactionType = btn.dataset.reactionType;
+  const isActive = btn.dataset.active === 'true';
+  const count = Number(btn.dataset.count || '0');
+  const icon = btn.querySelector('.reaction-icon');
+  const countEl = btn.querySelector('.reaction-count');
+  btn.classList.toggle('is-active', isActive);
+  btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+  if (icon) {
+    icon.textContent = reactionType === 'star'
+      ? (isActive ? '★' : '☆')
+      : (isActive ? '👍' : '◦');
+  }
+  if (countEl) {
+    countEl.textContent = String(count);
+  }
+}
+
+function markCardRead(resourceId) {
+  if (!resourceId) return;
+  readResourceIds.add(resourceId);
+  updateCardReadUi(document.getElementById('item-' + resourceId));
+  applyCardFilters();
+}
+
+function markCardUnreadLocal(resourceId) {
+  if (!resourceId) return;
+  readResourceIds.delete(resourceId);
+  updateCardReadUi(document.getElementById('item-' + resourceId));
+  applyCardFilters();
+}
+
+function applyCardFilters() {
+  const query = (searchInput.value || '').trim().toLowerCase();
+  const unreadOnly = unreadOnlyToggle.checked;
+  getFeedCards().forEach(card => {
+    const resourceId = card.dataset.resourceId;
+    const clientMatch = !query || card.textContent.toLowerCase().includes(query);
+    const serverMatch = !query || !fullTextMatchIds || fullTextMatchIds.has(resourceId);
+    const isUnreadVisible = !unreadOnly || !readResourceIds.has(resourceId);
+    card.style.display = (clientMatch || serverMatch) && isUnreadVisible ? '' : 'none';
+  });
+}
+
+function attachOutboundReadBeacons() {
+  document.querySelectorAll('a[data-dugg-resource-id]').forEach(link => {
+    link.addEventListener('click', function() {
+      const resourceId = this.dataset.duggResourceId;
+      if (!resourceId) return;
+      try {
+        const payload = new Blob([JSON.stringify({ source: 'web_outbound' })], { type: 'application/json' });
+        navigator.sendBeacon('/api/read/' + encodeURIComponent(resourceId), payload);
+      } catch (e) {
+        // Best-effort only; navigation should never be blocked.
+      }
+      markCardRead(resourceId);
+    });
+  });
+}
+
+async function loadReadStateCache() {
+  try {
+    const res = await fetch(BASE + '/api/read?since=' + encodeURIComponent(READ_SINCE));
+    if (!res.ok) return;
+    const data = await res.json();
+    (data.resources || []).forEach(row => {
+      if (row && row.resource_id) readResourceIds.add(row.resource_id);
+    });
+    getFeedCards().forEach(updateCardReadUi);
+    applyCardFilters();
+  } catch (e) {
+    // Keep the page usable even if read-state sync fails.
+  }
+}
 
 function resetSearch() {
   searchInput.value = '';
   clearBtn.style.display = 'none';
   clearTimeout(searchTimeout);
-  document.querySelectorAll('.card[data-url]').forEach(c => c.style.display = '');
+  fullTextMatchIds = null;
+  applyCardFilters();
   document.getElementById('searchStatus').style.display = 'none';
 }
 
 clearBtn.addEventListener('click', resetSearch);
+unreadOnlyToggle.addEventListener('change', applyCardFilters);
 
 searchInput.addEventListener('input', function() {
   const q = this.value.trim();
@@ -1383,9 +1571,8 @@ searchInput.addEventListener('input', function() {
   }
 
   const ql = q.toLowerCase();
-  document.querySelectorAll('.card[data-url]').forEach(card => {
-    card.style.display = card.textContent.toLowerCase().includes(ql) ? '' : 'none';
-  });
+  fullTextMatchIds = null;
+  applyCardFilters();
 
   searchTimeout = setTimeout(async () => {
     const status = document.getElementById('searchStatus');
@@ -1405,11 +1592,8 @@ searchInput.addEventListener('input', function() {
       let m;
       while ((m = idRegex.exec(String(text))) !== null) matchIds.add(m[1]);
 
-      document.querySelectorAll('.card[data-url]').forEach(card => {
-        const cardId = card.id.replace('item-', '');
-        const clientMatch = card.textContent.toLowerCase().includes(ql);
-        card.style.display = (clientMatch || matchIds.has(cardId)) ? '' : 'none';
-      });
+      fullTextMatchIds = matchIds;
+      applyCardFilters();
       const visibleAfter = document.querySelectorAll('.card[data-url]:not([style*="display: none"])').length;
       status.textContent = visibleAfter + ' result' + (visibleAfter !== 1 ? 's' : '') + (matchIds.size > 0 ? ' (includes full-text matches)' : '');
     } catch (e) {
@@ -1524,6 +1708,53 @@ async function deleteNoteRow(btn) {
   } catch (e) { alert('Error: ' + e.message); }
 }
 
+async function markUnread(btn) {
+  const resourceId = btn.dataset.resourceId;
+  if (!resourceId) return;
+  try {
+    const res = await fetch(BASE + '/api/read/' + encodeURIComponent(resourceId), {
+      method: 'DELETE',
+    });
+    if (!res.ok) { alert('Failed to mark unread (' + res.status + ')'); return; }
+    markCardUnreadLocal(resourceId);
+  } catch (e) { alert('Error: ' + e.message); }
+}
+
+async function toggleReaction(btn) {
+  const resourceId = btn.dataset.resourceId;
+  const reactionType = btn.dataset.reactionType;
+  if (!resourceId || !reactionType || btn.dataset.pending === 'true') return;
+  if (btn.dataset.active === 'true') return;
+  const wasRead = readResourceIds.has(resourceId);
+  btn.dataset.pending = 'true';
+  btn.disabled = true;
+  markCardRead(resourceId);
+  try {
+    const res = await fetch(BASE + '/api/react', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Dugg-Surface': 'web',
+      },
+      body: JSON.stringify({ resource_id: resourceId, type: reactionType }),
+    });
+    if (!res.ok) {
+      if (!wasRead) markCardUnreadLocal(resourceId);
+      alert('Failed to react (' + res.status + ')');
+      return;
+    }
+    btn.dataset.active = 'true';
+    btn.dataset.count = String(Number(btn.dataset.count || '0') + 1);
+    updateReactionButton(btn);
+  } catch (e) {
+    if (!wasRead) markCardUnreadLocal(resourceId);
+    alert('Error: ' + e.message);
+  } finally {
+    btn.dataset.pending = 'false';
+    btn.disabled = false;
+  }
+}
+
 function beginAddNote(btn) {
   const resourceId = btn.dataset.resourceId;
   const card = document.getElementById('item-' + resourceId);
@@ -1610,6 +1841,11 @@ async function syncNow(e) {
     setTimeout(() => { btn.textContent = 'Sync now'; btn.disabled = false; }, 2000);
   }
 }
+
+attachOutboundReadBeacons();
+getFeedCards().forEach(updateCardReadUi);
+document.querySelectorAll('.reaction-btn').forEach(updateReactionButton);
+loadReadStateCache();
 </script>"""
         # Stats bar
         n_items = len(feed)
@@ -2640,6 +2876,7 @@ async function syncNow(e) {
             return HTMLResponse(_html_page("Not Found", "<h1>Not found</h1>"), status_code=404)
 
         siblings = d.list_resource_notes(resource["id"])
+        d.mark_read(user["id"], resource["id"], "web_detail")
         return HTMLResponse(_render_resource(resource, sibling_notes=siblings))
 
     async def handle_resource_unlock(request: Request):
