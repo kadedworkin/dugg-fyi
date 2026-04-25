@@ -72,13 +72,19 @@ document.addEventListener("DOMContentLoaded", async () => {
     surpriseBtn.disabled = true;
     surpriseBtn.textContent = "...";
     try {
-      const pick = await chrome.runtime.sendMessage({
+      const result = await chrome.runtime.sendMessage({
         type: "surpriseMe",
         excludeUrl: tab.url,
+        tabId: tab.id,
       });
-      if (pick && pick.url) {
-        chrome.tabs.update(tab.id, { url: pick.url });
+      if (result && result.ok) {
         window.close();
+      } else if (result && result.reason === "caught_up") {
+        surpriseBtn.textContent = "All caught up";
+        setTimeout(() => {
+          surpriseBtn.textContent = "Surprise me";
+          surpriseBtn.disabled = false;
+        }, 1800);
       } else {
         surpriseBtn.textContent = "Nothing yet";
         setTimeout(() => {
