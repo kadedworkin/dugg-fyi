@@ -104,6 +104,24 @@ GRACE_PERIOD_DAYS = 14
 EGRESS_TIMEOUT_DAYS = 60
 PUBLISH_TTL_DAYS = 30
 
+READ_STATE_SOURCES = (
+    "ios_swipe", "ios_detail", "ios_outbound", "ios_react_implicit",
+    "web_detail", "web_outbound", "web_react_implicit",
+    "chrome_outbound", "chrome_stumble", "chrome_react_implicit",
+    "slack_button", "slack_react_implicit",
+    "mcp_tool", "mcp_react_implicit",
+    "cli", "cli_react_implicit",
+    "migration",
+)
+REACTION_TYPES = ("star", "thumbsup")
+EVENT_TYPES = (
+    "resource_added", "resource_published", "resource_deleted",
+    "member_joined", "member_banned", "publish_delivered",
+    "invite_created", "invite_redeemed", "reaction_added",
+    "read_added", "read_removed",
+    "skill_added", "skill_forked", "skill_superseded", "skill_deleted",
+)
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -127,6 +145,9 @@ class DuggDB:
         self._migrate()
 
     def _init_schema(self):
+        read_sources_sql = ", ".join(f"'{source}'" for source in READ_STATE_SOURCES)
+        reaction_types_sql = ", ".join(f"'{reaction_type}'" for reaction_type in REACTION_TYPES)
+        event_types_sql = ", ".join(f"'{event_type}'" for event_type in EVENT_TYPES)
         self.conn.executescript("""
             CREATE TABLE IF NOT EXISTS users (
                 id TEXT PRIMARY KEY,
@@ -267,10 +288,24 @@ class DuggDB:
                 id TEXT PRIMARY KEY,
                 resource_id TEXT NOT NULL REFERENCES resources(id) ON DELETE CASCADE,
                 user_id TEXT NOT NULL REFERENCES users(id),
-                reaction_type TEXT DEFAULT 'tap' CHECK(reaction_type IN ('tap', 'star', 'thumbsup')),
+                reaction_type TEXT DEFAULT 'star' CHECK(reaction_type IN (""" + reaction_types_sql + """)),
                 created_at TEXT NOT NULL,
                 UNIQUE(resource_id, user_id, reaction_type)
             );
+
+            CREATE TABLE IF NOT EXISTS read_states (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                resource_id TEXT NOT NULL,
+                read_at TEXT NOT NULL,
+                last_read_at TEXT NOT NULL,
+                source TEXT NOT NULL CHECK(source IN (""" + read_sources_sql + """)),
+                FOREIGN KEY (resource_id) REFERENCES resources(id) ON DELETE CASCADE,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                UNIQUE(user_id, resource_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_read_states_user_resource ON read_states(user_id, resource_id);
+            CREATE INDEX IF NOT EXISTS idx_read_states_user_read_at ON read_states(user_id, read_at DESC);
 
             CREATE TABLE IF NOT EXISTS publish_queue (
                 id TEXT PRIMARY KEY,
@@ -300,7 +335,7 @@ class DuggDB:
 
             CREATE TABLE IF NOT EXISTS event_log (
                 id TEXT PRIMARY KEY,
-                event_type TEXT NOT NULL CHECK(event_type IN ('resource_added', 'resource_published', 'resource_deleted', 'member_joined', 'member_banned', 'publish_delivered', 'invite_created', 'invite_redeemed', 'reaction_added', 'skill_added', 'skill_forked', 'skill_superseded', 'skill_deleted')),
+                event_type TEXT NOT NULL CHECK(event_type IN (""" + event_types_sql + """)),
                 instance_id TEXT REFERENCES dugg_instances(id),
                 collection_id TEXT REFERENCES collections(id),
                 actor_id TEXT REFERENCES users(id),
@@ -461,6 +496,9 @@ class DuggDB:
 
     def _migrate(self):
         """Run idempotent schema migrations for new columns."""
+        self._ensure_read_states_schema()
+        self._migrate_tap_reactions_to_read_states()
+        self._rebuild_reactions_table_without_tap()
         inst_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(dugg_instances)").fetchall()}
         if "read_horizon_base_days" not in inst_cols:
             self.conn.execute("ALTER TABLE dugg_instances ADD COLUMN read_horizon_base_days INTEGER DEFAULT 30")
@@ -612,10 +650,94 @@ class DuggDB:
         # Migrate event_log CHECK constraint to include skill_* event types.
         # SQLite can't ALTER a CHECK, so rebuild the table when the stored DDL
         # lacks 'skill_added'. Preserves all existing rows.
+        self._rebuild_event_log_table()
+
+        self.conn.commit()
+
+    def _ensure_read_states_schema(self):
+        read_sources_sql = ", ".join(f"'{source}'" for source in READ_STATE_SOURCES)
+        self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS read_states (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                resource_id TEXT NOT NULL,
+                read_at TEXT NOT NULL,
+                last_read_at TEXT NOT NULL,
+                source TEXT NOT NULL CHECK(source IN (""" + read_sources_sql + """)),
+                FOREIGN KEY (resource_id) REFERENCES resources(id) ON DELETE CASCADE,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                UNIQUE(user_id, resource_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_read_states_user_resource ON read_states(user_id, resource_id);
+            CREATE INDEX IF NOT EXISTS idx_read_states_user_read_at ON read_states(user_id, read_at DESC);
+        """)
+
+    def _migrate_tap_reactions_to_read_states(self):
+        reaction_table = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='reactions'"
+        ).fetchone()
+        if not reaction_table:
+            return
+        rows = self.conn.execute(
+            """SELECT user_id, resource_id, created_at
+               FROM reactions
+               WHERE reaction_type = 'tap'""",
+        ).fetchall()
+        for row in rows:
+            user_id = row["user_id"]
+            resource_id = row["resource_id"]
+            created_at = row["created_at"]
+            already_migrated = self.conn.execute(
+                """SELECT 1 FROM read_states
+                   WHERE user_id = ? AND resource_id = ? AND source = 'migration'""",
+                (user_id, resource_id),
+            ).fetchone()
+            if already_migrated:
+                continue
+            self.conn.execute(
+                """INSERT OR IGNORE INTO read_states
+                   (id, user_id, resource_id, read_at, last_read_at, source)
+                   VALUES (?, ?, ?, ?, ?, 'migration')""",
+                (_uuid(), user_id, resource_id, created_at, created_at),
+            )
+        self.conn.execute("DELETE FROM reactions WHERE reaction_type = 'tap'")
+
+    def _rebuild_reactions_table_without_tap(self):
+        row = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='reactions'"
+        ).fetchone()
+        sql = (row[0] or "") if row else ""
+        if row and "'tap'" in sql:
+            reaction_types_sql = ", ".join(f"'{reaction_type}'" for reaction_type in REACTION_TYPES)
+            self.conn.executescript("""
+                PRAGMA foreign_keys=OFF;
+                ALTER TABLE reactions RENAME TO reactions_old;
+                CREATE TABLE reactions (
+                    id TEXT PRIMARY KEY,
+                    resource_id TEXT NOT NULL REFERENCES resources(id) ON DELETE CASCADE,
+                    user_id TEXT NOT NULL REFERENCES users(id),
+                    reaction_type TEXT DEFAULT 'star' CHECK(reaction_type IN (""" + reaction_types_sql + """)),
+                    created_at TEXT NOT NULL,
+                    UNIQUE(resource_id, user_id, reaction_type)
+                );
+                INSERT INTO reactions (id, resource_id, user_id, reaction_type, created_at)
+                    SELECT id, resource_id, user_id, reaction_type, created_at
+                    FROM reactions_old
+                    WHERE reaction_type IN (""" + reaction_types_sql + """);
+                DROP TABLE reactions_old;
+                PRAGMA foreign_keys=ON;
+            """)
+
+    def _rebuild_event_log_table(self):
         ev_row = self.conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='event_log'"
         ).fetchone()
-        if ev_row and "skill_added" not in (ev_row[0] or ""):
+        sql = (ev_row[0] or "") if ev_row else ""
+        if not ev_row:
+            return
+        needs_rebuild = "skill_added" not in sql or "read_added" not in sql or "read_removed" not in sql
+        if needs_rebuild:
+            event_types_sql = ", ".join(f"'{event_type}'" for event_type in EVENT_TYPES)
             # Disable FK enforcement during the rebuild — SQLite's recommended
             # pattern for ALTER-via-rebuild. Production DBs can have orphaned
             # event_log rows (instance/collection/actor deleted over time) that
@@ -627,7 +749,7 @@ class DuggDB:
                 DROP TABLE IF EXISTS event_log_new;
                 CREATE TABLE event_log_new (
                     id TEXT PRIMARY KEY,
-                    event_type TEXT NOT NULL CHECK(event_type IN ('resource_added', 'resource_published', 'resource_deleted', 'member_joined', 'member_banned', 'publish_delivered', 'invite_created', 'invite_redeemed', 'reaction_added', 'skill_added', 'skill_forked', 'skill_superseded', 'skill_deleted')),
+                    event_type TEXT NOT NULL CHECK(event_type IN (""" + event_types_sql + """)),
                     instance_id TEXT REFERENCES dugg_instances(id),
                     collection_id TEXT REFERENCES collections(id),
                     actor_id TEXT REFERENCES users(id),
@@ -640,8 +762,6 @@ class DuggDB:
                 ALTER TABLE event_log_new RENAME TO event_log;
                 PRAGMA foreign_keys=ON;
             """)
-
-        self.conn.commit()
 
     def close(self):
         self.wait_for_webhooks(timeout=5.0)
@@ -1441,7 +1561,7 @@ class DuggDB:
             results.append(d)
         return results
 
-    def get_feed(self, user_id: str, limit: int = 50) -> list[dict]:
+    def get_feed(self, user_id: str, limit: int = 50, unread: bool = False) -> list[dict]:
         """Get all resources across collections the user has access to, respecting share rules and read horizon."""
         accessible = self._accessible_collection_ids(user_id)
         if not accessible:
@@ -1449,11 +1569,19 @@ class DuggDB:
 
         horizon_filters = self._build_horizon_filters(user_id, accessible)
         horizon_sql, horizon_params = self._horizon_where_clause(user_id, accessible, horizon_filters)
+        unread_sql = ""
+        unread_params: list[str] = []
+        if unread:
+            unread_sql = """ AND NOT EXISTS (
+                SELECT 1 FROM read_states rs
+                WHERE rs.user_id = ? AND rs.resource_id = r.id
+            )"""
+            unread_params.append(user_id)
 
         placeholders = ",".join("?" for _ in accessible)
         # Use 'r' alias to match horizon clause
-        sql = f"SELECT r.* FROM resources r WHERE r.collection_id IN ({placeholders}){horizon_sql} ORDER BY r.created_at DESC LIMIT ?"
-        params = list(accessible) + horizon_params + [limit]
+        sql = f"SELECT r.* FROM resources r WHERE r.collection_id IN ({placeholders}){horizon_sql}{unread_sql} ORDER BY r.created_at DESC LIMIT ?"
+        params = list(accessible) + horizon_params + unread_params + [limit]
 
         rows = self.conn.execute(sql, params).fetchall()
 
@@ -1464,6 +1592,17 @@ class DuggDB:
             if self._passes_share_rules(d, user_id):
                 results.append(d)
         return results
+
+    def batch_read_states(self, user_id: str, resource_ids: list[str]) -> dict[str, dict]:
+        if not resource_ids:
+            return {}
+        placeholders = ",".join("?" for _ in resource_ids)
+        rows = self.conn.execute(
+            f"""SELECT * FROM read_states
+                WHERE user_id = ? AND resource_id IN ({placeholders})""",
+            [user_id] + resource_ids,
+        ).fetchall()
+        return {row["resource_id"]: dict(row) for row in rows}
 
     # --- Tags ---
 
@@ -2070,9 +2209,103 @@ class DuggDB:
             results.append(d)
         return results
 
+    # --- Read States ---
+
+    def mark_read(self, user_id: str, resource_id: str, source: str) -> dict:
+        """Mark a resource as read. First read keeps its original source."""
+        now = _now()
+        read_id = _uuid()
+        existing = self.get_read_state(user_id, resource_id)
+        self.conn.execute(
+            """INSERT INTO read_states (id, user_id, resource_id, read_at, last_read_at, source)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(user_id, resource_id)
+               DO UPDATE SET last_read_at = excluded.last_read_at""",
+            (read_id, user_id, resource_id, now, now, source),
+        )
+        self.conn.commit()
+        row = self.conn.execute(
+            "SELECT * FROM read_states WHERE user_id = ? AND resource_id = ?",
+            (user_id, resource_id),
+        ).fetchone()
+        result = dict(row) if row else {}
+        if not existing:
+            resource = self.get_resource(resource_id)
+            self.emit_event(
+                "read_added",
+                actor_id=user_id,
+                collection_id=resource["collection_id"] if resource else None,
+                payload={
+                    "resource_id": resource_id,
+                    "resource_owner_id": resource["submitted_by"] if resource else None,
+                    "source": source,
+                },
+            )
+        return result
+
+    def unmark_read(self, user_id: str, resource_id: str) -> bool:
+        """Delete a read-state row. Returns True when a row was removed."""
+        existing = self.conn.execute(
+            "SELECT * FROM read_states WHERE user_id = ? AND resource_id = ?",
+            (user_id, resource_id),
+        ).fetchone()
+        if not existing:
+            return False
+        cursor = self.conn.execute(
+            "DELETE FROM read_states WHERE user_id = ? AND resource_id = ?",
+            (user_id, resource_id),
+        )
+        self.conn.commit()
+        if cursor.rowcount:
+            resource = self.get_resource(resource_id)
+            self.emit_event(
+                "read_removed",
+                actor_id=user_id,
+                collection_id=resource["collection_id"] if resource else None,
+                payload={
+                    "resource_id": resource_id,
+                    "resource_owner_id": resource["submitted_by"] if resource else None,
+                    "source": existing["source"],
+                },
+            )
+        return cursor.rowcount > 0
+
+    def list_read_since(self, user_id: str, since_iso: str, cursor: Optional[str] = None, limit: int = 200) -> dict:
+        """List read-state rows newest-first with cursor pagination."""
+        params: list[Union[str, int]] = [user_id, since_iso]
+        cursor_sql = ""
+        if cursor:
+            cursor_read_at, _, cursor_id = cursor.partition("|")
+            if cursor_read_at and cursor_id:
+                cursor_sql = " AND (rs.read_at < ? OR (rs.read_at = ? AND rs.id < ?))"
+                params.extend([cursor_read_at, cursor_read_at, cursor_id])
+        capped_limit = max(1, min(limit, 200))
+        params.append(capped_limit + 1)
+        rows = self.conn.execute(
+            """SELECT rs.*
+               FROM read_states rs
+               WHERE rs.user_id = ? AND rs.read_at >= ?""" + cursor_sql + """
+               ORDER BY rs.read_at DESC, rs.id DESC
+               LIMIT ?""",
+            params,
+        ).fetchall()
+        items = [dict(row) for row in rows[:capped_limit]]
+        next_cursor = None
+        if len(rows) > capped_limit and items:
+            last = items[-1]
+            next_cursor = f"{last['read_at']}|{last['id']}"
+        return {"resources": items, "next_cursor": next_cursor}
+
+    def get_read_state(self, user_id: str, resource_id: str) -> Optional[dict]:
+        row = self.conn.execute(
+            "SELECT * FROM read_states WHERE user_id = ? AND resource_id = ?",
+            (user_id, resource_id),
+        ).fetchone()
+        return dict(row) if row else None
+
     # --- Reactions ---
 
-    def react_to_resource(self, resource_id: str, user_id: str, reaction_type: str = "tap") -> dict:
+    def react_to_resource(self, resource_id: str, user_id: str, reaction_type: str = "star") -> dict:
         """Add a silent reaction to a resource. Idempotent — same user+type is a no-op."""
         react_id = _uuid()
         now = _now()
@@ -3482,10 +3715,12 @@ class DuggDB:
 
         # Slack-formatted payload
         if "hooks.slack.com" in hook["callback_url"]:
+            if event_type in {"read_added", "read_removed"}:
+                return
             # For reaction_added events, look up the resource to get title/url
             if event_type == "reaction_added":
-                reaction_type = payload.get("reaction_type", "tap")
-                emoji = {"tap": "point_right", "star": "star", "thumbsup": "thumbsup"}.get(reaction_type, "sparkles")
+                reaction_type = payload.get("reaction_type", "star")
+                emoji = {"star": "star", "thumbsup": "thumbsup"}.get(reaction_type, "sparkles")
                 res_title = payload.get("resource_title", "a resource")
                 res_url = payload.get("resource_url", "")
                 total = payload.get("reaction_total", 0)
@@ -3521,11 +3756,11 @@ class DuggDB:
                     blocks.append({
                         "type": "actions",
                         "elements": [
-                            {"type": "button", "text": {"type": "plain_text", "text": ":point_right: Tap", "emoji": True},
-                             "action_id": "dugg_react_tap", "value": resource_id},
+                            {"type": "button", "text": {"type": "plain_text", "text": ":book: Mark as Read", "emoji": True},
+                             "action_id": "dugg_mark_read", "value": resource_id},
                             {"type": "button", "text": {"type": "plain_text", "text": ":star: Star", "emoji": True},
                              "action_id": "dugg_react_star", "value": resource_id},
-                            {"type": "button", "text": {"type": "plain_text", "text": ":thumbsup: Nice", "emoji": True},
+                            {"type": "button", "text": {"type": "plain_text", "text": ":+1: Thumbs Up", "emoji": True},
                              "action_id": "dugg_react_thumbsup", "value": resource_id},
                         ],
                     })
