@@ -9,6 +9,8 @@
   // Don't inject on chrome:// or extension pages
   if (location.protocol === "chrome:" || location.protocol === "chrome-extension:") return;
 
+  wireFeedOutboundReadTracking().catch(() => {});
+
   try {
     const matches = await chrome.runtime.sendMessage({
       type: "getMatches",
@@ -76,3 +78,38 @@
     // Extension context may be invalid — silently ignore
   }
 })();
+
+async function wireFeedOutboundReadTracking() {
+  const { agentUrl, apiKey } = await chrome.storage.sync.get(["agentUrl", "apiKey"]);
+  if (!agentUrl || !apiKey) return;
+
+  const baseUrl = agentUrl.replace(/\/+$/, "");
+  let agentOrigin;
+  try {
+    agentOrigin = new URL(baseUrl).origin;
+  } catch {
+    return;
+  }
+
+  if (window.location.origin !== agentOrigin || window.location.pathname !== "/feed") {
+    return;
+  }
+
+  document.addEventListener("click", (event) => {
+    const link = event.target && event.target.closest
+      ? event.target.closest("a[data-dugg-resource-id]")
+      : null;
+    const resourceId = link && link.dataset ? link.dataset.duggResourceId : null;
+    if (!resourceId) return;
+
+    fetch(`${baseUrl}/api/read/${resourceId}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Dugg-Key": apiKey,
+      },
+      body: JSON.stringify({ source: "chrome_outbound" }),
+      keepalive: true,
+    }).catch(() => {});
+  }, true);
+}
