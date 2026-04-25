@@ -31,7 +31,7 @@ from starlette.routing import Route
 
 from mcp.server.sse import SseServerTransport
 
-from dugg.db import DuggDB
+from dugg.db import DuggDB, READ_STATE_SOURCES
 from dugg.source_registry import hints_for
 from dugg.sync import start_sync_daemon
 from dugg.rss import start_rss_daemon
@@ -185,6 +185,29 @@ def create_app(db_path: Optional[Path] = None, mode: str = "local") -> Starlette
         if request.cookies.get(COOKIE_NAME) or request.headers.get("x-dugg-key"):
             raise ValueError("Invalid API key")
         raise ValueError("Missing credentials — dugg_key cookie or X-Dugg-Key header required")
+
+    def _query_flag(request: Request, name: str) -> bool:
+        return (request.query_params.get(name) or "").strip().lower() == "true"
+
+    def _reaction_implicit_source(request: Request) -> str:
+        raw_surface = (request.headers.get("X-Dugg-Surface") or "").strip().lower()
+        if raw_surface in READ_STATE_SOURCES and raw_surface.endswith("_react_implicit"):
+            return raw_surface
+        candidate = f"{raw_surface}_react_implicit" if raw_surface else ""
+        if candidate in READ_STATE_SOURCES:
+            return candidate
+        # Default to MCP because unannotated API calls are most likely from MCP/agent clients.
+        return "mcp_react_implicit"
+
+    def _slack_resource_action_buttons(resource_id: str) -> list[dict]:
+        return [
+            {"type": "button", "text": {"type": "plain_text", "text": ":book: Mark as Read", "emoji": True},
+             "action_id": "dugg_mark_read", "value": resource_id},
+            {"type": "button", "text": {"type": "plain_text", "text": ":star: Star", "emoji": True},
+             "action_id": "dugg_react_star", "value": resource_id},
+            {"type": "button", "text": {"type": "plain_text", "text": ":+1: Thumbs Up", "emoji": True},
+             "action_id": "dugg_react_thumbsup", "value": resource_id},
+        ]
 
     def verify_hmac_signature(request: Request, body: bytes, secret: str) -> bool:
         """Verify HMAC-SHA256 signature from X-Dugg-Signature header."""
@@ -1755,6 +1778,7 @@ async function syncNow(e) {
         d.touch_user(user["id"])
         feed = d.get_feed(user["id"], limit=500)
         submitter_cache: dict[str, str] = {}
+        read_states = d.batch_read_states(user["id"], [r["id"] for r in feed])
 
         entries = []
         for r in feed:
@@ -1769,6 +1793,7 @@ async function syncNow(e) {
                 "title": r.get("title") or "",
                 "id": r["id"],
                 "by": submitter_name,
+                "read_at": (read_states.get(r["id"]) or {}).get("read_at"),
             })
 
         return JSONResponse({"urls": entries, "count": len(entries)})
@@ -1888,6 +1913,24 @@ async function syncNow(e) {
 
         return payload
 
+    def _serialize_feed_url_entries(d: DuggDB, user_id: str, feed: list[dict]) -> list[dict]:
+        submitter_cache: dict[str, str] = {}
+        read_states = d.batch_read_states(user_id, [r["id"] for r in feed])
+        entries = []
+        for r in feed:
+            sub_id = r.get("submitted_by", "")
+            if sub_id and sub_id not in submitter_cache:
+                u = d.get_user(sub_id)
+                submitter_cache[sub_id] = u["name"] if u else sub_id
+            entries.append({
+                "url": r["url"],
+                "title": r.get("title") or "",
+                "id": r["id"],
+                "by": submitter_cache.get(sub_id, ""),
+                "read_at": (read_states.get(r["id"]) or {}).get("read_at"),
+            })
+        return entries
+
     async def handle_api_feed(request: Request):
         """GET /api/feed — structured JSON feed for typed clients (iOS, etc.).
 
@@ -1909,10 +1952,11 @@ async function syncNow(e) {
         except ValueError:
             limit = 50
         limit = max(1, min(limit, 500))
+        unread = _query_flag(request, "unread")
 
         d = get_db()
         d.mark_invite_onboarded(user["id"])
-        feed = d.get_feed(user["id"], limit=limit)
+        feed = d.get_feed(user["id"], limit=limit, unread=unread)
 
         submitter_cache: dict[str, str] = {}
         notes_by_id = d.batch_resource_notes([r["id"] for r in feed])
@@ -1921,6 +1965,100 @@ async function syncNow(e) {
             for r in feed
         ]
         return JSONResponse({"resources": resources, "count": len(resources)})
+
+    async def handle_api_feed_urls(request: Request):
+        """GET /api/feed/urls — compact JSON feed for typed clients."""
+        try:
+            user = resolve_user_from_request(request)
+        except ValueError as e:
+            return _problem_response(401, str(e))
+
+        try:
+            limit = int(request.query_params.get("limit", "500"))
+        except ValueError:
+            limit = 500
+        limit = max(1, min(limit, 500))
+        unread = _query_flag(request, "unread")
+
+        d = get_db()
+        d.mark_invite_onboarded(user["id"])
+        feed = d.get_feed(user["id"], limit=limit, unread=unread)
+        entries = _serialize_feed_url_entries(d, user["id"], feed)
+        return JSONResponse({"urls": entries, "count": len(entries)})
+
+    async def handle_api_read(request: Request):
+        try:
+            user = resolve_user_from_request(request)
+        except ValueError as e:
+            return _problem_response(401, str(e))
+
+        d = get_db()
+        if request.method == "GET":
+            since_iso = (request.query_params.get("since") or "").strip()
+            if not since_iso:
+                return _problem_response(400, "Missing since")
+            cursor = (request.query_params.get("cursor") or "").strip() or None
+            try:
+                limit = int(request.query_params.get("limit", "200"))
+            except ValueError:
+                limit = 200
+            return JSONResponse(d.list_read_since(user["id"], since_iso, cursor=cursor, limit=limit))
+
+        resource_id = (request.path_params.get("resource_id") or "").strip()
+        if not resource_id:
+            return _problem_response(400, "Missing resource_id")
+        resource = d.get_resource(resource_id)
+        if not resource:
+            return _problem_response(404, "Resource not found")
+        if resource.get("collection_id") not in d._accessible_collection_ids(user["id"]):
+            return _problem_response(404, "Resource not found")
+
+        if request.method == "DELETE":
+            d.unmark_read(user["id"], resource_id)
+            return JSONResponse({"status": "ok"})
+
+        try:
+            body = await request.json()
+        except Exception:
+            return _problem_response(400, "Invalid JSON payload")
+        source = (body.get("source") or "").strip()
+        if source not in READ_STATE_SOURCES:
+            return _problem_response(400, "Invalid read source")
+        return JSONResponse(d.mark_read(user["id"], resource_id, source))
+
+    async def handle_api_react(request: Request):
+        try:
+            user = resolve_user_from_request(request)
+        except ValueError as e:
+            return _problem_response(401, str(e))
+
+        try:
+            body = await request.json()
+        except Exception:
+            return _problem_response(400, "Invalid JSON payload")
+
+        resource_id = (body.get("resource_id") or "").strip()
+        reaction_type = (body.get("type") or "").strip().lower()
+        if not resource_id:
+            return _problem_response(400, "Missing resource_id")
+        if reaction_type == "tap":
+            return JSONResponse(
+                {"error": "reaction_type 'tap' is no longer supported; use POST /api/read instead"},
+                status_code=400,
+            )
+        if reaction_type not in {"star", "thumbsup"}:
+            return _problem_response(400, "Invalid reaction_type")
+
+        d = get_db()
+        resource = d.get_resource(resource_id)
+        if not resource:
+            return _problem_response(404, "Resource not found")
+        if resource.get("collection_id") not in d._accessible_collection_ids(user["id"]):
+            return _problem_response(404, "Resource not found")
+
+        reaction = d.react_to_resource(resource_id, user["id"], reaction_type)
+        d.mark_read(user["id"], resource_id, _reaction_implicit_source(request))
+        return JSONResponse({"reaction": reaction})
 
     async def handle_api_search(request: Request):
         """GET /api/search?q=... — structured JSON search for typed clients.
@@ -3132,14 +3270,7 @@ async function syncNow(e) {
                 if resource_id:
                     blocks.append({
                         "type": "actions",
-                        "elements": [
-                            {"type": "button", "text": {"type": "plain_text", "text": ":point_right: Tap", "emoji": True},
-                             "action_id": "dugg_react_tap", "value": resource_id},
-                            {"type": "button", "text": {"type": "plain_text", "text": ":star: Star", "emoji": True},
-                             "action_id": "dugg_react_star", "value": resource_id},
-                            {"type": "button", "text": {"type": "plain_text", "text": ":thumbsup: Nice", "emoji": True},
-                             "action_id": "dugg_react_thumbsup", "value": resource_id},
-                        ],
+                        "elements": _slack_resource_action_buttons(resource_id),
                     })
                 blocks.append({"type": "divider"})
             return JSONResponse({"response_type": "in_channel", "text": "\n".join(text_lines), "blocks": blocks, "unfurl_links": False, "unfurl_media": False})
@@ -3187,14 +3318,7 @@ async function syncNow(e) {
             if resource_id:
                 blocks.append({
                     "type": "actions",
-                    "elements": [
-                        {"type": "button", "text": {"type": "plain_text", "text": ":point_right: Tap", "emoji": True},
-                         "action_id": "dugg_react_tap", "value": resource_id},
-                        {"type": "button", "text": {"type": "plain_text", "text": ":star: Star", "emoji": True},
-                         "action_id": "dugg_react_star", "value": resource_id},
-                        {"type": "button", "text": {"type": "plain_text", "text": ":thumbsup: Nice", "emoji": True},
-                         "action_id": "dugg_react_thumbsup", "value": resource_id},
-                    ],
+                    "elements": _slack_resource_action_buttons(resource_id),
                 })
             return JSONResponse({"response_type": "in_channel", "text": text_fallback, "blocks": blocks})
 
@@ -3248,14 +3372,7 @@ async function syncNow(e) {
             if resource_id:
                 blocks.append({
                     "type": "actions",
-                    "elements": [
-                        {"type": "button", "text": {"type": "plain_text", "text": ":point_right: Tap", "emoji": True},
-                         "action_id": "dugg_react_tap", "value": resource_id},
-                        {"type": "button", "text": {"type": "plain_text", "text": ":star: Star", "emoji": True},
-                         "action_id": "dugg_react_star", "value": resource_id},
-                        {"type": "button", "text": {"type": "plain_text", "text": ":thumbsup: Nice", "emoji": True},
-                         "action_id": "dugg_react_thumbsup", "value": resource_id},
-                    ],
+                    "elements": _slack_resource_action_buttons(resource_id),
                 })
             blocks.append({"type": "divider"})
         return JSONResponse({"response_type": "in_channel", "text": "\n".join(text_lines), "blocks": blocks, "unfurl_links": False, "unfurl_media": False})
@@ -3326,14 +3443,27 @@ async function syncNow(e) {
                 ),
             })
 
+        if action_id == "dugg_react_tap":
+            return JSONResponse({
+                "response_type": "ephemeral",
+                "replace_original": False,
+                "blocks": [{
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "This button has been retired. New messages have a Mark as Read button — please refresh your feed.",
+                    },
+                }],
+                "text": "This button has been retired. New messages have a Mark as Read button — please refresh your feed.",
+            })
+
         # Map action_id to reaction type
         reaction_map = {
-            "dugg_react_tap": "tap",
             "dugg_react_star": "star",
             "dugg_react_thumbsup": "thumbsup",
         }
         reaction_type = reaction_map.get(action_id)
-        if not reaction_type or not resource_id:
+        if action_id != "dugg_mark_read" and (not reaction_type or not resource_id):
             return JSONResponse({"text": ""})
 
         # Resolve Slack user to Dugg user
@@ -3347,11 +3477,21 @@ async function syncNow(e) {
         if not resource:
             return JSONResponse({"text": "Resource not found."})
 
-        emoji = {"tap": ":point_right:", "star": ":star:", "thumbsup": ":thumbsup:"}.get(reaction_type, "")
+        title = resource.get("title") or resource.get("url", "")
+        if action_id == "dugg_mark_read":
+            d.mark_read(resource_id=resource_id, user_id=user["id"], source="slack_button")
+            d.wait_for_webhooks()
+            return JSONResponse({
+                "response_type": "ephemeral",
+                "replace_original": False,
+                "text": f":book: You marked *{title}* as read",
+            })
+
+        emoji = {"star": ":star:", "thumbsup": ":thumbsup:"}.get(reaction_type, "")
         d.react_to_resource(resource_id, user["id"], reaction_type)
+        d.mark_read(resource_id=resource_id, user_id=user["id"], source="slack_react_implicit")
         d.wait_for_webhooks()
 
-        title = resource.get("title") or resource.get("url", "")
         return JSONResponse({
             "response_type": "ephemeral",
             "replace_original": False,
@@ -3713,6 +3853,10 @@ async function syncNow(e) {
         Route("/feed", endpoint=handle_feed_bare),
         Route("/feed/{key}", endpoint=handle_feed),
         Route("/api/feed", endpoint=handle_api_feed),
+        Route("/api/feed/urls", endpoint=handle_api_feed_urls),
+        Route("/api/read", endpoint=handle_api_read, methods=["GET"]),
+        Route("/api/read/{resource_id}", endpoint=handle_api_read, methods=["POST", "DELETE"]),
+        Route("/api/react", endpoint=handle_api_react, methods=["POST"]),
         Route("/api/search", endpoint=handle_api_search),
         Route("/api/resource/{id}", endpoint=handle_api_resource),
         Route("/api/note", endpoint=handle_api_note, methods=["POST"]),
