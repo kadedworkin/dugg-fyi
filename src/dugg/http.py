@@ -744,7 +744,7 @@ async function doSetup() {{
   .delete-btn:hover {{ color: #f87171; border-color: #7f1d1d; }}
   .save-btn {{ color: #4ade80; border-color: #166534; }}
   .save-btn:hover {{ background: #052e16; }}
-  .mark-unread-btn {{ color: #888; opacity: 0; pointer-events: none; transition: opacity 0.15s, color 0.15s; }}
+  .mark-unread-btn {{ color: #ccc; border-color: #555; opacity: 0; pointer-events: none; transition: opacity 0.15s, color 0.15s, border-color 0.15s, background 0.15s; }}
   .card.is-read:hover .mark-unread-btn, .card.is-read:focus-within .mark-unread-btn {{ opacity: 1; pointer-events: auto; }}
   .mark-unread-btn:hover {{ color: #fcd34d; border-color: #854d0e; background: #2a1b05; }}
   .publish-btn {{ color: #60a5fa; border-color: #1e3a5f; }}
