@@ -18,7 +18,7 @@ import logging
 import os
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 import httpx
 
@@ -237,6 +237,89 @@ def create_app(db_path: Optional[Path] = None, mode: str = "local") -> Starlette
             elif row["reaction_type"] == "thumbsup":
                 state[row["resource_id"]]["viewer_thumbsup"] = True
         return state
+
+    FEED_FILTER_OPTIONS = (
+        ("unread", "Unread"),
+        ("read", "Read"),
+        ("starred", "Starred"),
+        ("thumbsup", "Thumbs Up"),
+        ("noted", "Noted by You"),
+    )
+    FEED_FILTER_LABELS = {key: label for key, label in FEED_FILTER_OPTIONS}
+
+    def _normalize_feed_filter(raw: Optional[str]) -> str:
+        value = (raw or "").strip().lower()
+        return value if value in FEED_FILTER_LABELS else ""
+
+    def _resource_noted_by_viewer(d: DuggDB, resource: dict, user_id: str) -> bool:
+        if resource.get("submitted_by") == user_id and (resource.get("note") or "").strip():
+            return True
+        for note in d.list_resource_notes(resource["id"]):
+            if d.viewer_owns_note(note, user_id):
+                return True
+        return False
+
+    def _filter_resources_for_viewer(
+        d: DuggDB,
+        resources: list[dict],
+        user_id: str,
+        feed_filter: str,
+        read_states: dict[str, dict],
+        reaction_state: dict[str, dict],
+    ) -> list[dict]:
+        if not feed_filter:
+            return resources
+        filtered: list[dict] = []
+        for resource in resources:
+            resource_id = resource["id"]
+            is_read = resource_id in read_states
+            reactions = reaction_state.get(resource_id, {})
+            if feed_filter == "unread" and not is_read:
+                filtered.append(resource)
+            elif feed_filter == "read" and is_read:
+                filtered.append(resource)
+            elif feed_filter == "starred" and reactions.get("viewer_starred"):
+                filtered.append(resource)
+            elif feed_filter == "thumbsup" and reactions.get("viewer_thumbsup"):
+                filtered.append(resource)
+            elif feed_filter == "noted" and _resource_noted_by_viewer(d, resource, user_id):
+                filtered.append(resource)
+        return filtered
+
+    def _load_feed_resources(
+        d: DuggDB,
+        user: dict,
+        *,
+        query: str,
+        feed_filter: str,
+        limit: int,
+    ) -> tuple[list[dict], dict[str, dict], dict[str, dict]]:
+        fetch_limit = min(max(limit * 4, limit), 500)
+        if query:
+            candidates = d.search(query, user["id"], limit=fetch_limit)
+        else:
+            candidates = d.get_feed(user["id"], limit=fetch_limit)
+        resource_ids = [resource["id"] for resource in candidates]
+        read_states = d.batch_read_states(user["id"], resource_ids)
+        reaction_state = _batch_feed_reactions(d, resource_ids, user["id"])
+        filtered = _filter_resources_for_viewer(d, candidates, user["id"], feed_filter, read_states, reaction_state)
+        return filtered[:limit], read_states, reaction_state
+
+    def _feed_query_filter(request: Request) -> str:
+        feed_filter = _normalize_feed_filter(request.query_params.get("filter"))
+        if feed_filter:
+            return feed_filter
+        if _query_flag(request, "unread"):
+            return "unread"
+        return ""
+
+    def _feed_query_path(query: str = "", feed_filter: str = "") -> str:
+        params: dict[str, str] = {}
+        if query:
+            params["q"] = query
+        if feed_filter:
+            params["filter"] = feed_filter
+        return "/feed" + (f"?{urlencode(params)}" if params else "")
 
     def _slack_resource_action_buttons(resource_id: str) -> list[dict]:
         return [
@@ -718,21 +801,25 @@ async function doSetup() {{
                  font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }}
   .type-badge.yt {{ background: #dc2626; }}
   .type-badge.article {{ background: #2563eb; }}
-  .search-bar {{ margin-bottom: 1.5rem; display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }}
+  .search-bar {{ margin-bottom: 0.85rem; display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }}
   .search-input-wrap {{ flex: 1 1 320px; position: relative; min-width: 0; }}
   .search-bar input {{ width: 100%; padding: 0.6rem 2.2rem 0.6rem 0.8rem; background: #111; border: 1px solid #333;
                        border-radius: 8px; color: #fff; font-size: 0.9rem; }}
   .search-bar input:focus {{ outline: none; border-color: #6366f1; }}
   .search-bar input::placeholder {{ color: #555; }}
-  .unread-toggle {{ display: inline-flex; align-items: center; gap: 0.45rem; color: #aaa; font-size: 0.8rem; white-space: nowrap; }}
-  .unread-toggle input {{ margin: 0; accent-color: #6366f1; }}
+  .search-actions {{ display: inline-flex; gap: 0.5rem; align-items: center; }}
+  .filter-row {{ display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 1.25rem; }}
+  .filter-pill {{ display: inline-flex; align-items: center; justify-content: center; padding: 0.35rem 0.75rem; border-radius: 999px;
+                  border: 1px solid #333; color: #888; text-decoration: none; font-size: 0.8rem; background: transparent; }}
+  .filter-pill:hover {{ color: #ccc; border-color: #555; background: #1a1a1a; }}
+  .filter-pill.is-active {{ color: #fcd34d; border-color: #854d0e; background: rgba(133, 77, 14, 0.16); }}
   .search-clear {{ position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
                    background: none; border: none; color: #555; font-size: 1.1rem; cursor: pointer;
-                   padding: 0 4px; line-height: 1; display: none; width: auto; }}
+                   padding: 0 4px; line-height: 1; width: auto; text-decoration: none; }}
   .search-clear:hover {{ color: #ccc; background: none; }}
   .feed-stats {{ font-size: 0.8rem; color: #555; margin-bottom: 1rem; }}
   .empty {{ color: #666; text-align: center; padding: 2rem 0; }}
-  .item-actions {{ margin-top: 0.4rem; display: flex; gap: 0.5rem; }}
+  .item-actions {{ margin-top: 0.4rem; display: flex; gap: 0.5rem; flex-wrap: wrap; }}
   .action-btn {{ width: auto; padding: 0.2rem 0.5rem; font-size: 0.75rem; background: transparent;
                  color: #666; border: 1px solid #333; border-radius: 4px; cursor: pointer; font-weight: 400; }}
   .action-btn:hover {{ color: #ccc; border-color: #555; background: #1a1a1a; }}
@@ -741,12 +828,10 @@ async function doSetup() {{
   .reaction-btn .reaction-count {{ color: #888; min-width: 0.9rem; text-align: right; }}
   .reaction-btn.is-active {{ color: #fcd34d; border-color: #854d0e; background: rgba(133, 77, 14, 0.16); }}
   .reaction-btn.is-active .reaction-count {{ color: #fcd34d; }}
+  .read-state-btn .reaction-icon {{ font-size: 0.75rem; }}
   .delete-btn:hover {{ color: #f87171; border-color: #7f1d1d; }}
   .save-btn {{ color: #4ade80; border-color: #166534; }}
   .save-btn:hover {{ background: #052e16; }}
-  .mark-unread-btn {{ color: #ccc; border-color: #555; opacity: 0; pointer-events: none; transition: opacity 0.15s, color 0.15s, border-color 0.15s, background 0.15s; }}
-  .card.is-read:hover .mark-unread-btn, .card.is-read:focus-within .mark-unread-btn {{ opacity: 1; pointer-events: auto; }}
-  .mark-unread-btn:hover {{ color: #fcd34d; border-color: #854d0e; background: #2a1b05; }}
   .publish-btn {{ color: #60a5fa; border-color: #1e3a5f; }}
   .publish-btn:hover {{ background: #0c1f3a; }}
   .edit-form {{ margin-top: 0.4rem; }}
@@ -764,9 +849,6 @@ async function doSetup() {{
   .read-pill {{ font-size: 0.72rem; color: #888; }}
   .meta-read-state[data-state="read"] .unread-dot {{ display: none; }}
   .meta-read-state[data-state="unread"] .read-pill {{ display: none; }}
-  @media (hover: none) {{
-    .card.is-read .mark-unread-btn {{ opacity: 1; pointer-events: auto; }}
-  }}
   .step {{ display: flex; gap: 1rem; margin-bottom: 1.25rem; }}
   .step-num {{ flex-shrink: 0; width: 28px; height: 28px; background: #6366f1; color: #fff;
                border-radius: 50%; display: flex; align-items: center; justify-content: center;
@@ -1267,10 +1349,22 @@ async function doSetup() {{
     def _render_feed_html(request: Request, user: dict) -> HTMLResponse:
         """Render the HTML feed for a cookie-authed user. No key appears in URLs or JS."""
         d = get_db()
-        feed = d.get_feed(user["id"], limit=50)
+        query = (request.query_params.get("q") or "").strip()
+        feed_filter = _feed_query_filter(request)
+        feed, read_states, feed_reactions = _load_feed_resources(
+            d,
+            user,
+            query=query,
+            feed_filter=feed_filter,
+            limit=50,
+        )
         page_title = f"{user['name']}'s Dugg"
-        page_topic = ""
-        feed_reactions = _batch_feed_reactions(d, [r["id"] for r in feed], user["id"])
+        topic_parts: list[str] = []
+        if query:
+            topic_parts.append(f'Search results for "{_xml_escape(query)}"')
+        if feed_filter:
+            topic_parts.append(FEED_FILTER_LABELS.get(feed_filter, feed_filter.title()))
+        page_topic = " · ".join(topic_parts)
 
         submitter_cache: dict[str, str] = {}
         if not feed:
@@ -1380,16 +1474,29 @@ async function doSetup() {{
                 thumbsup_count = int(reaction_state.get("thumbsup_count", 0))
                 viewer_starred = "true" if reaction_state.get("viewer_starred") else "false"
                 viewer_thumbsup = "true" if reaction_state.get("viewer_thumbsup") else "false"
+                is_read = r["id"] in read_states
+                read_state = "read" if is_read else "unread"
+                read_card_class = " is-read" if is_read else ""
+                mark_read_active = "true" if is_read else "false"
+                mark_unread_active = "false" if is_read else "true"
 
-                items_html += f"""<div class="card" id="item-{r["id"]}" data-collection="{coll_id}" data-source-server="{_xml_escape(source_srv)}" data-url="{_xml_escape(r['url'])}" data-resource-id="{r["id"]}">
+                items_html += f"""<div class="card{read_card_class}" id="item-{r["id"]}" data-collection="{coll_id}" data-source-server="{_xml_escape(source_srv)}" data-url="{_xml_escape(r['url'])}" data-resource-id="{r["id"]}" data-read-state="{read_state}">
   {f'<div class="card-media">{thumb_html}</div>' if thumb_html else ""}
   <div class="card-body">
     <h3><a href="{url}" target="_blank" rel="noopener" data-dugg-resource-id="{r["id"]}">{_xml_escape(title)}</a> {type_badge}</h3>
-    <p class="meta"><span class="meta-read-state" data-state="unread"><span class="unread-dot" aria-hidden="true"></span><span class="read-pill">✓ read</span></span>{meta_html}</p>
+    <p class="meta"><span class="meta-read-state" data-state="{read_state}"><span class="unread-dot" aria-hidden="true"></span><span class="read-pill">✓ read</span></span>{meta_html}</p>
     {desc_html}
     <div class="notes-block">{notes_html}</div>
     {tags_html}
     <div class="item-actions">
+      <button class="action-btn reaction-btn read-state-btn mark-read-btn{" is-active" if is_read else ""}" onclick="markRead(this)" data-resource-id="{r["id"]}" data-active="{mark_read_active}" aria-pressed="{mark_read_active}">
+        <span class="reaction-icon" aria-hidden="true">✓</span>
+        <span class="reaction-label">Mark Read</span>
+      </button>
+      <button class="action-btn reaction-btn read-state-btn mark-unread-btn{" is-active" if not is_read else ""}" onclick="markUnread(this)" data-resource-id="{r["id"]}" data-active="{mark_unread_active}" aria-pressed="{mark_unread_active}">
+        <span class="reaction-icon" aria-hidden="true">•</span>
+        <span class="reaction-label">Mark Unread</span>
+      </button>
       <button class="action-btn reaction-btn" onclick="toggleReaction(this)" data-resource-id="{r["id"]}" data-reaction-type="star" data-active="{viewer_starred}" data-count="{star_count}" aria-pressed="{viewer_starred}">
         <span class="reaction-icon" aria-hidden="true">{"★" if viewer_starred == "true" else "☆"}</span>
         <span class="reaction-label">Star</span>
@@ -1400,7 +1507,6 @@ async function doSetup() {{
         <span class="reaction-label">Thumbs Up</span>
         <span class="reaction-count">{thumbsup_count}</span>
       </button>
-      <button class="action-btn mark-unread-btn" onclick="markUnread(this)" data-resource-id="{r["id"]}" aria-label="Mark item unread">mark unread</button>
       <button class="action-btn add-note-btn" onclick="beginAddNote(this)" data-resource-id="{r["id"]}">add note</button>
       <button class="action-btn delete-btn" onclick="deleteItem('{r["id"]}')">delete item</button>
     </div>
@@ -1427,33 +1533,66 @@ async function doSetup() {{
 </div>"""
 
         topic_html = f'<p class="topic">{page_topic}</p>' if page_topic else ""
-        search_bar = """<div class="search-bar">
+        clear_href = _feed_query_path(feed_filter=feed_filter)
+        hidden_filter = f'<input type="hidden" name="filter" value="{feed_filter}">' if feed_filter else ""
+        search_bar = f"""<form class="search-bar" method="get" action="/feed">
   <div class="search-input-wrap">
-    <input type="text" id="feedSearch" placeholder="Search this feed... (searches full article text)" autocomplete="off">
-    <button class="search-clear" id="searchClear" title="Clear search">&times;</button>
+    <input type="text" id="feedSearch" name="q" value="{_xml_escape(query)}" placeholder="Search this feed... (searches full article text)" autocomplete="off">
+    {f'<a class="search-clear" id="searchClear" title="Clear search" href="{clear_href}">&times;</a>' if query else ""}
   </div>
-  <label class="unread-toggle" for="unreadOnlyToggle">
-    <input type="checkbox" id="unreadOnlyToggle">
-    <span>Unread only</span>
-  </label>
-</div>
-<div id="searchStatus" style="font-size:0.75rem;color:#666;margin-top:-1rem;margin-bottom:1rem;display:none;"></div>"""
+  {hidden_filter}
+  <div class="search-actions">
+    <button type="submit" class="action-btn">Search</button>
+  </div>
+</form>"""
+        filter_pills: list[str] = []
+        for filter_key, filter_label in FEED_FILTER_OPTIONS:
+            is_active = feed_filter == filter_key
+            href = _feed_query_path(query=query, feed_filter="" if is_active else filter_key)
+            classes = "filter-pill is-active" if is_active else "filter-pill"
+            filter_pills.append(f'<a class="{classes}" href="{href}">{filter_label}</a>')
+        filter_row = f'<div class="filter-row">{"".join(filter_pills)}</div>'
         feed_js = """
 <script>
 // Same-origin fetch auto-includes the dugg_key cookie, so no X-Dugg-Key header
 // or API key is ever written into JS or URLs on this page.
 const BASE = window.location.origin;
 const READ_SINCE = '1970-01-01T00:00:00+00:00';
+const ACTIVE_FILTER = __ACTIVE_FILTER__;
 const readResourceIds = new Set();
-
-let searchTimeout = null;
-const searchInput = document.getElementById('feedSearch');
-const clearBtn = document.getElementById('searchClear');
-const unreadOnlyToggle = document.getElementById('unreadOnlyToggle');
-let fullTextMatchIds = null;
 
 function getFeedCards() {
   return Array.from(document.querySelectorAll('.card[data-resource-id]'));
+}
+
+function updateReadToggleButton(btn, isActive) {
+  if (!btn) return;
+  btn.dataset.active = isActive ? 'true' : 'false';
+  btn.classList.toggle('is-active', isActive);
+  btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+}
+
+function cardMatchesActiveFilter(card) {
+  if (!card) return true;
+  const resourceId = card.dataset.resourceId;
+  const isRead = readResourceIds.has(resourceId);
+  if (ACTIVE_FILTER === 'unread') return !isRead;
+  if (ACTIVE_FILTER === 'read') return isRead;
+  if (ACTIVE_FILTER === 'starred') {
+    const starBtn = card.querySelector('[data-reaction-type="star"]');
+    return !!starBtn && starBtn.dataset.active === 'true';
+  }
+  if (ACTIVE_FILTER === 'thumbsup') {
+    const thumbBtn = card.querySelector('[data-reaction-type="thumbsup"]');
+    return !!thumbBtn && thumbBtn.dataset.active === 'true';
+  }
+  return true;
+}
+
+function applyActiveFeedFilter() {
+  getFeedCards().forEach(card => {
+    card.style.display = cardMatchesActiveFilter(card) ? '' : 'none';
+  });
 }
 
 function updateCardReadUi(card) {
@@ -1461,15 +1600,15 @@ function updateCardReadUi(card) {
   const resourceId = card.dataset.resourceId;
   const isRead = readResourceIds.has(resourceId);
   const state = card.querySelector('.meta-read-state');
+  const markReadBtn = card.querySelector('.mark-read-btn');
   const markUnreadBtn = card.querySelector('.mark-unread-btn');
   card.classList.toggle('is-read', isRead);
   card.dataset.readState = isRead ? 'read' : 'unread';
   if (state) {
     state.dataset.state = isRead ? 'read' : 'unread';
   }
-  if (markUnreadBtn) {
-    markUnreadBtn.hidden = !isRead;
-  }
+  updateReadToggleButton(markReadBtn, isRead);
+  updateReadToggleButton(markUnreadBtn, !isRead);
 }
 
 function updateReactionButton(btn) {
@@ -1495,26 +1634,14 @@ function markCardRead(resourceId) {
   if (!resourceId) return;
   readResourceIds.add(resourceId);
   updateCardReadUi(document.getElementById('item-' + resourceId));
-  applyCardFilters();
+  applyActiveFeedFilter();
 }
 
 function markCardUnreadLocal(resourceId) {
   if (!resourceId) return;
   readResourceIds.delete(resourceId);
   updateCardReadUi(document.getElementById('item-' + resourceId));
-  applyCardFilters();
-}
-
-function applyCardFilters() {
-  const query = (searchInput.value || '').trim().toLowerCase();
-  const unreadOnly = unreadOnlyToggle.checked;
-  getFeedCards().forEach(card => {
-    const resourceId = card.dataset.resourceId;
-    const clientMatch = !query || card.textContent.toLowerCase().includes(query);
-    const serverMatch = !query || !fullTextMatchIds || fullTextMatchIds.has(resourceId);
-    const isUnreadVisible = !unreadOnly || !readResourceIds.has(resourceId);
-    card.style.display = (clientMatch || serverMatch) && isUnreadVisible ? '' : 'none';
-  });
+  applyActiveFeedFilter();
 }
 
 function attachOutboundReadBeacons() {
@@ -1542,65 +1669,11 @@ async function loadReadStateCache() {
       if (row && row.resource_id) readResourceIds.add(row.resource_id);
     });
     getFeedCards().forEach(updateCardReadUi);
-    applyCardFilters();
+    applyActiveFeedFilter();
   } catch (e) {
     // Keep the page usable even if read-state sync fails.
   }
 }
-
-function resetSearch() {
-  searchInput.value = '';
-  clearBtn.style.display = 'none';
-  clearTimeout(searchTimeout);
-  fullTextMatchIds = null;
-  applyCardFilters();
-  document.getElementById('searchStatus').style.display = 'none';
-}
-
-clearBtn.addEventListener('click', resetSearch);
-unreadOnlyToggle.addEventListener('change', applyCardFilters);
-
-searchInput.addEventListener('input', function() {
-  const q = this.value.trim();
-  clearBtn.style.display = q ? 'block' : 'none';
-  clearTimeout(searchTimeout);
-
-  if (!q) {
-    resetSearch();
-    return;
-  }
-
-  const ql = q.toLowerCase();
-  fullTextMatchIds = null;
-  applyCardFilters();
-
-  searchTimeout = setTimeout(async () => {
-    const status = document.getElementById('searchStatus');
-    status.textContent = 'Searching full text...';
-    status.style.display = 'block';
-    try {
-      const res = await fetch(BASE + '/tools/dugg_search', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: q, limit: 50 }),
-      });
-      if (!res.ok) throw new Error('search failed');
-      const data = await res.json();
-      const text = typeof data === 'string' ? data : (data.text || data.result || JSON.stringify(data));
-      const matchIds = new Set();
-      const idRegex = /(?:\\[|id[=: ]+)([a-f0-9]{12})/gi;
-      let m;
-      while ((m = idRegex.exec(String(text))) !== null) matchIds.add(m[1]);
-
-      fullTextMatchIds = matchIds;
-      applyCardFilters();
-      const visibleAfter = document.querySelectorAll('.card[data-url]:not([style*="display: none"])').length;
-      status.textContent = visibleAfter + ' result' + (visibleAfter !== 1 ? 's' : '') + (matchIds.size > 0 ? ' (includes full-text matches)' : '');
-    } catch (e) {
-      status.textContent = 'Full-text search unavailable';
-    }
-  }, 400);
-});
 
 // --- Per-note edit/delete (primary + siblings) ---
 //
@@ -1708,16 +1781,40 @@ async function deleteNoteRow(btn) {
   } catch (e) { alert('Error: ' + e.message); }
 }
 
-async function markUnread(btn) {
+async function setReadState(btn, shouldRead) {
   const resourceId = btn.dataset.resourceId;
-  if (!resourceId) return;
+  if (!resourceId || btn.dataset.pending === 'true') return;
+  const wasRead = readResourceIds.has(resourceId);
+  if (wasRead === shouldRead) return;
+  btn.dataset.pending = 'true';
+  btn.disabled = true;
+  shouldRead ? markCardRead(resourceId) : markCardUnreadLocal(resourceId);
   try {
     const res = await fetch(BASE + '/api/read/' + encodeURIComponent(resourceId), {
-      method: 'DELETE',
+      method: shouldRead ? 'POST' : 'DELETE',
+      headers: shouldRead ? { 'Content-Type': 'application/json' } : undefined,
+      body: shouldRead ? JSON.stringify({ source: 'web_button' }) : undefined,
     });
-    if (!res.ok) { alert('Failed to mark unread (' + res.status + ')'); return; }
-    markCardUnreadLocal(resourceId);
-  } catch (e) { alert('Error: ' + e.message); }
+    if (!res.ok) {
+      wasRead ? markCardRead(resourceId) : markCardUnreadLocal(resourceId);
+      alert('Failed to mark ' + (shouldRead ? 'read' : 'unread') + ' (' + res.status + ')');
+      return;
+    }
+  } catch (e) {
+    wasRead ? markCardRead(resourceId) : markCardUnreadLocal(resourceId);
+    alert('Error: ' + e.message);
+  } finally {
+    btn.dataset.pending = 'false';
+    btn.disabled = false;
+  }
+}
+
+async function markRead(btn) {
+  return setReadState(btn, true);
+}
+
+async function markUnread(btn) {
+  return setReadState(btn, false);
 }
 
 async function toggleReaction(btn) {
@@ -1765,6 +1862,7 @@ async function toggleReaction(btn) {
       btn.dataset.count = String(previousCount + 1);
       updateReactionButton(btn);
     }
+    applyActiveFeedFilter();
   } catch (e) {
     if (wasActive) {
       btn.dataset.active = 'true';
@@ -1773,6 +1871,7 @@ async function toggleReaction(btn) {
     } else if (!wasRead) {
       markCardUnreadLocal(resourceId);
     }
+    applyActiveFeedFilter();
     alert('Error: ' + e.message);
   } finally {
     btn.dataset.pending = 'false';
@@ -1868,10 +1967,16 @@ async function syncNow(e) {
 }
 
 attachOutboundReadBeacons();
+getFeedCards().forEach(card => {
+  if (card.dataset.readState === 'read') {
+    readResourceIds.add(card.dataset.resourceId);
+  }
+});
 getFeedCards().forEach(updateCardReadUi);
 document.querySelectorAll('.reaction-btn').forEach(updateReactionButton);
+applyActiveFeedFilter();
 loadReadStateCache();
-</script>"""
+</script>""".replace("__ACTIVE_FILTER__", json.dumps(feed_filter))
         # Stats bar
         n_items = len(feed)
         contributors = set(submitter_cache.values())
@@ -1901,6 +2006,7 @@ loadReadStateCache();
 {sync_html}
 {topic_html}
 {search_bar}
+{filter_row}
 {items_html}
 {feed_js}"""
         return HTMLResponse(_html_page(page_title, body, wide=True))
@@ -2009,7 +2115,9 @@ loadReadStateCache();
 
         # Browser visit: silent migrate to cookie-authed bare path.
         from starlette.responses import RedirectResponse
-        resp = RedirectResponse(url="/feed", status_code=303)
+        query_string = request.url.query
+        redirect_url = f"/feed?{query_string}" if query_string else "/feed"
+        resp = RedirectResponse(url=redirect_url, status_code=303)
         _set_session_cookie(resp, api_key, request)
         return resp
 
@@ -2018,7 +2126,8 @@ loadReadStateCache();
         user = _resolve_user_from_cookie_or_header(request)
         if not user:
             from starlette.responses import RedirectResponse
-            return RedirectResponse(url="/session/unlock?return_to=/feed", status_code=303)
+            return_to = request.url.path + (f"?{request.url.query}" if request.url.query else "")
+            return RedirectResponse(url="/session/unlock?" + urlencode({"return_to": return_to}), status_code=303)
         get_db().touch_user(user["id"])
         return _render_feed_html(request, user)
 
@@ -2213,11 +2322,17 @@ loadReadStateCache();
         except ValueError:
             limit = 50
         limit = max(1, min(limit, 500))
-        unread = _query_flag(request, "unread")
+        feed_filter = _feed_query_filter(request)
 
         d = get_db()
         d.mark_invite_onboarded(user["id"])
-        feed = d.get_feed(user["id"], limit=limit, unread=unread)
+        feed, _, _ = _load_feed_resources(
+            d,
+            user,
+            query="",
+            feed_filter=feed_filter,
+            limit=limit,
+        )
 
         submitter_cache: dict[str, str] = {}
         notes_by_id = d.batch_resource_notes([r["id"] for r in feed])
@@ -2239,11 +2354,17 @@ loadReadStateCache();
         except ValueError:
             limit = 500
         limit = max(1, min(limit, 500))
-        unread = _query_flag(request, "unread")
+        feed_filter = _feed_query_filter(request)
 
         d = get_db()
         d.mark_invite_onboarded(user["id"])
-        feed = d.get_feed(user["id"], limit=limit, unread=unread)
+        feed, _, _ = _load_feed_resources(
+            d,
+            user,
+            query="",
+            feed_filter=feed_filter,
+            limit=limit,
+        )
         entries = _serialize_feed_url_entries(d, user["id"], feed)
         return JSONResponse({"urls": entries, "count": len(entries)})
 
@@ -2350,10 +2471,17 @@ loadReadStateCache();
         except ValueError:
             limit = 20
         limit = max(1, min(limit, 100))
+        feed_filter = _feed_query_filter(request)
 
         d = get_db()
         d.mark_invite_onboarded(user["id"])
-        hits = d.search(query, user["id"], limit=limit)
+        hits, _, _ = _load_feed_resources(
+            d,
+            user,
+            query=query,
+            feed_filter=feed_filter,
+            limit=limit,
+        )
 
         submitter_cache: dict[str, str] = {}
         notes_by_id = d.batch_resource_notes([r["id"] for r in hits])

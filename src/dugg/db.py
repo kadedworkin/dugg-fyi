@@ -106,7 +106,7 @@ PUBLISH_TTL_DAYS = 30
 
 READ_STATE_SOURCES = (
     "ios_swipe", "ios_detail", "ios_outbound", "ios_react_implicit",
-    "web_detail", "web_outbound", "web_react_implicit",
+    "web_detail", "web_outbound", "web_button", "web_react_implicit",
     "chrome_outbound", "chrome_stumble", "chrome_react_implicit",
     "slack_button", "slack_react_implicit",
     "mcp_tool", "mcp_react_implicit",
