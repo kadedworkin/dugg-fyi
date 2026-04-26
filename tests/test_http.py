@@ -434,6 +434,19 @@ def test_api_read_post_delete_and_get(client, db_path, user):
     assert get_after_delete.json()["resources"] == []
 
 
+def test_api_read_accepts_web_button_source(client, db_path, user):
+    c, _ = client
+    res_id = _seed_resource(db_path, user, url="https://example.com/read-web-button")
+
+    resp = c.post(
+        f"/api/read/{res_id}",
+        json={"source": "web_button"},
+        headers={"X-Dugg-Key": user["api_key"]},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["source"] == "web_button"
+
+
 def test_api_read_get_paginates(client, db_path, user):
     c, _ = client
     res1 = _seed_resource(db_path, user, url="https://example.com/read-page-1")
@@ -1526,6 +1539,55 @@ def test_api_search_returns_structured_resources(client, db_path, user):
     assert any("rust" in r["title"].lower() for r in data["resources"])
 
 
+def test_api_feed_filter_query_params(client, db_path, user):
+    c, _ = client
+    unread_id = _seed_resource(db_path, user, url="https://example.com/filter-unread", title="Unread Item", note="")
+    read_id = _seed_resource(db_path, user, url="https://example.com/filter-read", title="Read Item", note="")
+    star_id = _seed_resource(db_path, user, url="https://example.com/filter-star", title="Star Item", note="")
+    thumb_id = _seed_resource(db_path, user, url="https://example.com/filter-thumb", title="Thumb Item", note="")
+    noted_id = _seed_resource(db_path, user, url="https://example.com/filter-note", title="Noted Item", note="my note")
+
+    d = DuggDB(db_path)
+    d.mark_read(user["id"], read_id, "cli")
+    d.react_to_resource(star_id, user["id"], "star")
+    d.react_to_resource(thumb_id, user["id"], "thumbsup")
+    d.close()
+
+    starred = c.get("/api/feed?filter=starred", headers={"X-Dugg-Key": user["api_key"]})
+    assert starred.status_code == 200
+    starred_ids = [resource["id"] for resource in starred.json()["resources"]]
+    assert star_id in starred_ids
+    assert thumb_id not in starred_ids
+
+    read_resp = c.get("/api/feed?filter=read", headers={"X-Dugg-Key": user["api_key"]})
+    assert read_resp.status_code == 200
+    read_ids = [resource["id"] for resource in read_resp.json()["resources"]]
+    assert read_id in read_ids
+    assert unread_id not in read_ids
+
+    noted_resp = c.get("/api/feed?filter=noted", headers={"X-Dugg-Key": user["api_key"]})
+    assert noted_resp.status_code == 200
+    noted_ids = [resource["id"] for resource in noted_resp.json()["resources"]]
+    assert noted_id in noted_ids
+    assert unread_id not in noted_ids
+
+
+def test_api_search_filter_query_param_applies_on_top_of_query(client, db_path, user):
+    c, _ = client
+    starred_rust_id = _seed_resource(db_path, user, url="https://example.com/rust-star", title="rust starred", note="")
+    _seed_resource(db_path, user, url="https://example.com/rust-plain", title="rust plain", note="")
+    _seed_resource(db_path, user, url="https://example.com/python-star", title="python starred", note="")
+
+    d = DuggDB(db_path)
+    d.react_to_resource(starred_rust_id, user["id"], "star")
+    d.close()
+
+    resp = c.get("/api/search?q=rust&filter=starred", headers={"X-Dugg-Key": user["api_key"]})
+    assert resp.status_code == 200
+    resources = resp.json()["resources"]
+    assert [resource["id"] for resource in resources] == [starred_rust_id]
+
+
 def test_api_search_empty_query(client):
     c, user = client
     resp = c.get("/api/search?q=", headers={"X-Dugg-Key": user["api_key"]})
@@ -2190,11 +2252,43 @@ def test_feed_html_includes_read_state_markup_and_reaction_buttons(client, db_pa
     resp = c.get("/feed")
     assert resp.status_code == 200
     assert f'data-dugg-resource-id="{res_id}"' in resp.text
-    assert 'id="unreadOnlyToggle"' in resp.text
+    assert 'class="filter-row"' in resp.text
+    assert '>Unread<' in resp.text
+    assert '>Read<' in resp.text
+    assert '>Starred<' in resp.text
+    assert '>Thumbs Up<' in resp.text
+    assert '>Noted by You<' in resp.text
     assert 'navigator.sendBeacon(\'/api/read/\'' in resp.text
+    assert 'markRead(this)' in resp.text
+    assert 'markUnread(this)' in resp.text
+    assert 'web_button' in resp.text
+    assert 'class="action-btn reaction-btn read-state-btn mark-read-btn' in resp.text
+    assert 'class="action-btn reaction-btn read-state-btn mark-unread-btn' in resp.text
     assert 'data-reaction-type="star"' in resp.text
     assert 'data-reaction-type="thumbsup"' in resp.text
     assert '>Thumbs Up<' in resp.text
+
+
+def test_feed_html_q_and_filter_render_server_side_results(client, db_path, user):
+    c, _ = client
+    starred_rust_id = _seed_resource(db_path, user, url="https://example.com/feed-rust-star", title="rust systems", note="")
+    _seed_resource(db_path, user, url="https://example.com/feed-rust-plain", title="rust plain", note="")
+    _seed_resource(db_path, user, url="https://example.com/feed-go-star", title="go starred", note="")
+
+    d = DuggDB(db_path)
+    d.react_to_resource(starred_rust_id, user["id"], "star")
+    d.close()
+
+    c.cookies.set("dugg_key", user["api_key"])
+    resp = c.get("/feed?q=rust&filter=starred")
+    assert resp.status_code == 200
+    html = resp.text
+    assert 'value="rust"' in html
+    assert 'filter-pill is-active' in html
+    assert f'data-resource-id="{starred_rust_id}"' in html
+    assert "rust systems" in html
+    assert "rust plain" not in html
+    assert "go starred" not in html
 
 
 # --- /paste: silent migration + cookie auth ---
