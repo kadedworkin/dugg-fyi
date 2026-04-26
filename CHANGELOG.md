@@ -2,6 +2,26 @@
 
 Dugg follows date-versioned releases: `vYYYY.MM.DD` on each shipped day, with `.N` suffixes if a day ships multiple times. Each release ships from `main` with the commit tagged at release time.
 
+## v2026.04.25.1
+
+Web Star/Thumbs Up could ADD a reaction but couldn't toggle it OFF. This ships the symmetric remove path across server, MCP, CLI, and the inline web feed JS.
+
+### Added
+
+- **`db.unreact(user_id, resource_id, reaction_type)`** — idempotent DELETE that returns `bool`, emits `reaction_removed` event with resource owner payload (mirrors `react_to_resource`).
+- **`reaction_removed` event type** in `EVENT_TYPES`.
+- **`DELETE /api/react/{resource_id}?type=star|thumbsup`** — same auth + collection-access checks as `POST /api/react`, returns `{"removed": bool}`.
+- **MCP tool `dugg_unreact`** + **CLI command `dugg unreact <target> --type star|thumbsup`**.
+- **Web feed/viewer toggle-off** — clicking an active reaction button now fires DELETE with optimistic UI decrement and rollback on failure.
+
+### Changed
+
+- **Webhook dispatch** — `reaction_removed` follows the same author-only filter as `reaction_added` (so removals don't leak to all collection subscribers) and renders a distinct Slack line ("X removed from your *resource*"). Slack aggregate-line gate flipped from `total > 1` to `total > 0` so users see the count after a removal.
+
+### Tests
+
+403 passing (+7 this release): DB removal/no-op/invalid-type/event emission; HTTP removal/no-op/invalid-type/auth.
+
 ## v2026.04.25
 
 - Removed `tap` reaction; replaced with first-class Read primitive (`read_states` table, `/api/read` endpoints, surface-tagged source enum, MCP/CLI/Slack parity).
