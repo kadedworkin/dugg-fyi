@@ -117,7 +117,7 @@ REACTION_TYPES = ("star", "thumbsup")
 EVENT_TYPES = (
     "resource_added", "resource_published", "resource_deleted",
     "member_joined", "member_banned", "publish_delivered",
-    "invite_created", "invite_redeemed", "reaction_added",
+    "invite_created", "invite_redeemed", "reaction_added", "reaction_removed",
     "read_added", "read_removed",
     "skill_added", "skill_forked", "skill_superseded", "skill_deleted",
 )
@@ -2326,6 +2326,30 @@ class DuggDB:
                             })
         return {"resource_id": resource_id, "user_id": user_id, "reaction_type": reaction_type, "created_at": now}
 
+    def unreact(self, user_id: str, resource_id: str, reaction_type: str) -> bool:
+        """Delete a reaction row. Returns True when a row was removed."""
+        if reaction_type not in REACTION_TYPES:
+            raise ValueError("Invalid reaction_type")
+        cursor = self.conn.execute(
+            """DELETE FROM reactions
+               WHERE user_id = ? AND resource_id = ? AND reaction_type = ?""",
+            (user_id, resource_id, reaction_type),
+        )
+        self.conn.commit()
+        if cursor.rowcount:
+            resource = self.get_resource(resource_id)
+            self.emit_event(
+                "reaction_removed",
+                actor_id=user_id,
+                collection_id=resource["collection_id"] if resource else None,
+                payload={
+                    "resource_id": resource_id,
+                    "reaction_type": reaction_type,
+                    "resource_owner_id": resource["submitted_by"] if resource else None,
+                },
+            )
+        return cursor.rowcount > 0
+
     def get_reactions(self, resource_id: str, requester_id: str) -> Optional[dict]:
         """Get reaction counts for a resource. Only the resource's submitter can see aggregates."""
         resource = self.get_resource(resource_id)
@@ -3654,7 +3678,7 @@ class DuggDB:
 
         # Reaction events are author-only: only notify the resource's submitter
         payload = event.get("payload", {})
-        if event["event_type"] == "reaction_added":
+        if event["event_type"] in {"reaction_added", "reaction_removed"}:
             owner_id = payload.get("resource_owner_id")
             if owner_id:
                 hooks = [h for h in hooks if h["user_id"] == owner_id]
@@ -3717,20 +3741,23 @@ class DuggDB:
         if "hooks.slack.com" in hook["callback_url"]:
             if event_type in {"read_added", "read_removed"}:
                 return
-            # For reaction_added events, look up the resource to get title/url
-            if event_type == "reaction_added":
+            # Reaction events include resource details and aggregate counts.
+            if event_type in {"reaction_added", "reaction_removed"}:
                 reaction_type = payload.get("reaction_type", "star")
                 emoji = {"star": "star", "thumbsup": "thumbsup"}.get(reaction_type, "sparkles")
                 res_title = payload.get("resource_title", "a resource")
                 res_url = payload.get("resource_url", "")
                 total = payload.get("reaction_total", 0)
                 breakdown = payload.get("reaction_breakdown", {})
-                lines = [f":{emoji}: Your resource *{res_title}* got a {reaction_type}"]
+                if event_type == "reaction_added":
+                    lines = [f":{emoji}: Your resource *{res_title}* got a {reaction_type}"]
+                else:
+                    lines = [f":{emoji}: A {reaction_type} was removed from your resource *{res_title}*"]
                 if res_url and not res_url.startswith("dugg://"):
                     lines.append(f"<{res_url}>")
                 # Aggregate summary
                 parts = [f"{v} {k}" for k, v in sorted(breakdown.items())]
-                if total > 1:
+                if total > 0:
                     lines.append(f"{total} total reactions ({', '.join(parts)})")
                 body = json.dumps({"text": "\n".join(lines)}).encode()
             elif event_type == "resource_added":

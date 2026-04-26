@@ -1029,7 +1029,7 @@ async function doSetup() {{
                     {
                         "step": 3,
                         "action": "Connect and explore",
-                        "tools": ["dugg_welcome", "dugg_feed", "dugg_search", "dugg_react"],
+                        "tools": ["dugg_welcome", "dugg_feed", "dugg_search", "dugg_react", "dugg_unreact"],
                         "what_happens": "Browse what others have shared, search for topics, react to signal value. Content is already in your local feed from step 2.",
                     },
                 ]
@@ -1724,30 +1724,55 @@ async function toggleReaction(btn) {
   const resourceId = btn.dataset.resourceId;
   const reactionType = btn.dataset.reactionType;
   if (!resourceId || !reactionType || btn.dataset.pending === 'true') return;
-  if (btn.dataset.active === 'true') return;
+  const wasActive = btn.dataset.active === 'true';
   const wasRead = readResourceIds.has(resourceId);
+  const previousCount = Number(btn.dataset.count || '0');
   btn.dataset.pending = 'true';
   btn.disabled = true;
-  markCardRead(resourceId);
+  if (!wasActive) markCardRead(resourceId);
   try {
-    const res = await fetch(BASE + '/api/react', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Dugg-Surface': 'web',
-      },
-      body: JSON.stringify({ resource_id: resourceId, type: reactionType }),
-    });
+    if (wasActive) {
+      btn.dataset.active = 'false';
+      btn.dataset.count = String(Math.max(0, previousCount - 1));
+      updateReactionButton(btn);
+    }
+    const res = await fetch(
+      wasActive
+        ? BASE + '/api/react/' + encodeURIComponent(resourceId) + '?type=' + encodeURIComponent(reactionType)
+        : BASE + '/api/react',
+      {
+        method: wasActive ? 'DELETE' : 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Dugg-Surface': 'web',
+        },
+        body: wasActive ? undefined : JSON.stringify({ resource_id: resourceId, type: reactionType }),
+      }
+    );
     if (!res.ok) {
-      if (!wasRead) markCardUnreadLocal(resourceId);
-      alert('Failed to react (' + res.status + ')');
+      if (wasActive) {
+        btn.dataset.active = 'true';
+        btn.dataset.count = String(previousCount);
+        updateReactionButton(btn);
+      } else if (!wasRead) {
+        markCardUnreadLocal(resourceId);
+      }
+      alert('Failed to ' + (wasActive ? 'remove reaction' : 'react') + ' (' + res.status + ')');
       return;
     }
-    btn.dataset.active = 'true';
-    btn.dataset.count = String(Number(btn.dataset.count || '0') + 1);
-    updateReactionButton(btn);
+    if (!wasActive) {
+      btn.dataset.active = 'true';
+      btn.dataset.count = String(previousCount + 1);
+      updateReactionButton(btn);
+    }
   } catch (e) {
-    if (!wasRead) markCardUnreadLocal(resourceId);
+    if (wasActive) {
+      btn.dataset.active = 'true';
+      btn.dataset.count = String(previousCount);
+      updateReactionButton(btn);
+    } else if (!wasRead) {
+      markCardUnreadLocal(resourceId);
+    }
     alert('Error: ' + e.message);
   } finally {
     btn.dataset.pending = 'false';
@@ -2268,13 +2293,17 @@ loadReadStateCache();
         except ValueError as e:
             return _problem_response(401, str(e))
 
-        try:
-            body = await request.json()
-        except Exception:
-            return _problem_response(400, "Invalid JSON payload")
+        if request.method == "DELETE":
+            resource_id = (request.path_params.get("resource_id") or "").strip()
+            reaction_type = (request.query_params.get("type") or "").strip().lower()
+        else:
+            try:
+                body = await request.json()
+            except Exception:
+                return _problem_response(400, "Invalid JSON payload")
+            resource_id = (body.get("resource_id") or "").strip()
+            reaction_type = (body.get("type") or "").strip().lower()
 
-        resource_id = (body.get("resource_id") or "").strip()
-        reaction_type = (body.get("type") or "").strip().lower()
         if not resource_id:
             return _problem_response(400, "Missing resource_id")
         if reaction_type == "tap":
@@ -2291,6 +2320,10 @@ loadReadStateCache();
             return _problem_response(404, "Resource not found")
         if resource.get("collection_id") not in d._accessible_collection_ids(user["id"]):
             return _problem_response(404, "Resource not found")
+
+        if request.method == "DELETE":
+            removed = d.unreact(user["id"], resource_id, reaction_type)
+            return JSONResponse({"removed": removed})
 
         reaction = d.react_to_resource(resource_id, user["id"], reaction_type)
         d.mark_read(user["id"], resource_id, _reaction_implicit_source(request))
@@ -4094,6 +4127,7 @@ loadReadStateCache();
         Route("/api/read", endpoint=handle_api_read, methods=["GET"]),
         Route("/api/read/{resource_id}", endpoint=handle_api_read, methods=["POST", "DELETE"]),
         Route("/api/react", endpoint=handle_api_react, methods=["POST"]),
+        Route("/api/react/{resource_id}", endpoint=handle_api_react, methods=["DELETE"]),
         Route("/api/search", endpoint=handle_api_search),
         Route("/api/resource/{id}", endpoint=handle_api_resource),
         Route("/api/note", endpoint=handle_api_note, methods=["POST"]),

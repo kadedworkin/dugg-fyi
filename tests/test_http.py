@@ -531,6 +531,63 @@ def test_api_react_marks_read_implicitly_for_web_surface(client, db_path, user):
     assert reactions["breakdown"]["thumbsup"] == 1
 
 
+def test_api_unreact_removes_existing_reaction(client, db_path, user):
+    c, _ = client
+    res_id = _seed_resource(db_path, user, url="https://example.com/unreact-http")
+    d = DuggDB(db_path)
+    d.react_to_resource(res_id, user["id"], "star")
+    d.close()
+
+    resp = c.delete(
+        f"/api/react/{res_id}?type=star",
+        headers={"X-Dugg-Key": user["api_key"]},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"removed": True}
+
+    d = DuggDB(db_path)
+    reactions = d.get_reactions(res_id, user["id"])
+    events = d.get_events(user["id"])
+    d.close()
+    assert reactions == {"resource_id": res_id, "total": 0, "breakdown": {}}
+    removed = [e for e in events if e["event_type"] == "reaction_removed"]
+    assert len(removed) == 1
+    assert removed[0]["payload"]["resource_id"] == res_id
+
+
+def test_api_unreact_returns_false_when_missing(client, db_path, user):
+    c, _ = client
+    res_id = _seed_resource(db_path, user, url="https://example.com/unreact-missing")
+
+    resp = c.delete(
+        f"/api/react/{res_id}?type=thumbsup",
+        headers={"X-Dugg-Key": user["api_key"]},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"removed": False}
+
+
+def test_api_unreact_rejects_invalid_type(client, db_path, user):
+    c, _ = client
+    res_id = _seed_resource(db_path, user, url="https://example.com/unreact-bad-type")
+
+    resp = c.delete(
+        f"/api/react/{res_id}?type=tap",
+        headers={"X-Dugg-Key": user["api_key"]},
+    )
+    assert resp.status_code == 400
+    assert resp.json() == {
+        "error": "reaction_type 'tap' is no longer supported; use POST /api/read instead"
+    }
+
+
+def test_api_unreact_requires_auth(client, db_path, user):
+    c, _ = client
+    res_id = _seed_resource(db_path, user, url="https://example.com/unreact-auth")
+    resp = c.delete(f"/api/react/{res_id}?type=star")
+    assert resp.status_code == 401
+
+
 def test_api_resource_requires_auth(client, db_path, user):
     c, _ = client
     res_id = _seed_resource(db_path, user)

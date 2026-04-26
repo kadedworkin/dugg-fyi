@@ -426,6 +426,19 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="dugg_unreact",
+            description="Remove your silent reaction from a resource. Reaction types: star, thumbsup.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "resource_id": {"type": "string", "description": "The resource to remove your reaction from"},
+                    "reaction": {"type": "string", "enum": ["star", "thumbsup"], "description": "Type of reaction", "default": "star"},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+                "required": ["resource_id"],
+            },
+        ),
+        Tool(
             name="dugg_mark_read",
             description="Mark a resource as read.",
             inputSchema={
@@ -627,7 +640,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="dugg_events",
-            description="Get recent events across your subscribed instances and collections. Events include resource_added, resource_published, resource_deleted, member_joined, member_banned, invite_created, invite_redeemed, publish_delivered, reaction_added.",
+            description="Get recent events across your subscribed instances and collections. Events include resource_added, resource_published, resource_deleted, member_joined, member_banned, invite_created, invite_redeemed, publish_delivered, reaction_added, reaction_removed.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1044,6 +1057,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = _handle_unpublish(d, user_id, arguments)
         elif name == "dugg_react":
             result = _handle_react(d, user_id, arguments)
+        elif name == "dugg_unreact":
+            result = _handle_unreact(d, user_id, arguments)
         elif name == "dugg_mark_read":
             result = _handle_mark_read(d, user_id, arguments)
         elif name == "dugg_mark_unread":
@@ -2278,6 +2293,7 @@ def _handle_invite_user(d: DuggDB, user_id: str, args: dict) -> list[TextContent
             f"   dugg_feed     — see what others have shared\n"
             f"   dugg_search   — find specific topics\n"
             f"   dugg_react    — signal value to publishers\n"
+            f"   dugg_unreact  — remove your own signal\n"
             f"\n   Content is already in your local feed from step 3.\n"
             f"   Use dugg_catchup later for incremental updates, or set up\n"
             f"   dugg_webhook_subscribe for push notifications.\n"
@@ -2307,7 +2323,7 @@ def _handle_invite_user(d: DuggDB, user_id: str, args: dict) -> list[TextContent
             f'   Body: {{"name": "{name}"}}\n'
             f"   → Returns human key + agent key\n"
             f"\n3. Explore what's already here\n"
-            f"\n   dugg_welcome, dugg_feed, dugg_search, dugg_react.\n"
+            f"\n   dugg_welcome, dugg_feed, dugg_search, dugg_react, dugg_unreact.\n"
             f"   Browse, search, react — that's the day-one experience.\n"
             f"\nPartner guide (read before first submission):\n"
             f"  https://github.com/kadedworkin/dugg-fyi/blob/main/PARTNER_AGENT.md"
@@ -2453,6 +2469,21 @@ def _handle_react(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
     d.react_to_resource(resource_id, user_id, reaction_type)
     d.mark_read(user_id, resource_id, "mcp_react_implicit")
     return [TextContent(type="text", text=f"Reacted to {resource_id} with {reaction_type}")]
+
+
+def _handle_unreact(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
+    resource_id = args["resource_id"]
+    reaction_type = args.get("reaction", "star")
+    resource = d.get_resource(resource_id)
+    if not resource:
+        return [TextContent(type="text", text=f"Resource {resource_id} not found")]
+    accessible = d._accessible_collection_ids(user_id)
+    if resource["collection_id"] not in accessible:
+        return [TextContent(type="text", text=f"Access denied to resource {resource_id}")]
+    removed = d.unreact(user_id, resource_id, reaction_type)
+    if removed:
+        return [TextContent(type="text", text=f"Removed {reaction_type} from {resource_id}")]
+    return [TextContent(type="text", text=f"No {reaction_type} reaction found on {resource_id}")]
 
 
 def _handle_mark_read(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:

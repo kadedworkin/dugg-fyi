@@ -241,6 +241,7 @@ def cmd_invite_user(args):
         print("   dugg_feed     — see what others have shared")
         print("   dugg_search   — find specific topics")
         print("   dugg_react    — signal value to publishers")
+        print("   dugg_unreact  — remove your own signal")
         print()
         print("   This is where day-one value lives. Browse, search, react.")
         print("   Use dugg_catchup later for incremental updates, or set up")
@@ -275,7 +276,7 @@ def cmd_invite_user(args):
         print()
         print("3. Explore what's already here")
         print()
-        print("   dugg_welcome, dugg_feed, dugg_search, dugg_react.")
+        print("   dugg_welcome, dugg_feed, dugg_search, dugg_react, dugg_unreact.")
         print("   Browse, search, react — that's the day-one experience.")
     print()
     print("Partner guide (read before first submission):")
@@ -1374,6 +1375,41 @@ def cmd_react(args):
     db.close()
 
 
+def cmd_unreact(args):
+    """Remove a reaction from a resource (star or thumbsup)."""
+    from pathlib import Path
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+    user = _resolve_user(db, args)
+
+    target = args.target
+    if target.startswith("http://") or target.startswith("https://") or target.startswith("dugg://"):
+        row = db.conn.execute(
+            "SELECT id, title, url FROM resources WHERE url = ?", (target,)
+        ).fetchone()
+    else:
+        row = db.conn.execute(
+            "SELECT id, title, url FROM resources WHERE id = ? OR id LIKE ?",
+            (target, target + "%"),
+        ).fetchone()
+
+    if not row:
+        print(f"Resource not found: {target}")
+        db.close()
+        sys.exit(1)
+
+    reaction_type = getattr(args, "type", "star") or "star"
+    emoji = {"star": "*", "thumbsup": "+1"}.get(reaction_type, "*")
+    removed = db.unreact(user["id"], row["id"], reaction_type)
+    title = row["title"] or row["url"]
+    if removed:
+        print(f"  Removed {emoji} from {title}")
+        db.wait_for_webhooks()
+    else:
+        print(f"  No {emoji} reaction on {title}")
+    db.close()
+
+
 def cmd_read(args):
     """Mark a resource as read."""
     from pathlib import Path
@@ -1935,6 +1971,12 @@ def main():
                          help="Reaction type (default: star)")
     p_react.add_argument("--key", default=None, help="Your API key")
 
+    p_unreact = sub.add_parser("unreact", help="Remove your reaction from a resource (star, thumbsup)")
+    p_unreact.add_argument("target", help="Resource ID (or prefix) or URL")
+    p_unreact.add_argument("--type", choices=["star", "thumbsup"], default="star",
+                           help="Reaction type (default: star)")
+    p_unreact.add_argument("--key", default=None, help="Your API key")
+
     p_read = sub.add_parser("read", help="Mark a resource as read")
     p_read.add_argument("target", help="Resource ID (or prefix) or URL")
     p_read.add_argument("--key", default=None, help="Your API key")
@@ -2142,6 +2184,8 @@ def main():
         cmd_tag(args)
     elif args.command == "react":
         cmd_react(args)
+    elif args.command == "unreact":
+        cmd_unreact(args)
     elif args.command == "read":
         cmd_read(args)
     elif args.command == "unmark":
