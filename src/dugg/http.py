@@ -776,9 +776,10 @@ async function doSetup() {{
   .card .author {{ color: #a78bfa; }}
   .card-desc {{ font-size: 0.85rem; color: #999; margin: 0.5rem 0; line-height: 1.5;
                 display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }}
-  .card .note {{ font-size: 0.85rem; color: #aaa; margin-top: 0.5rem; padding: 0.6rem 0.8rem;
-                border-radius: 6px; border-left: 3px solid #333; background: #111;
+  .card .note {{ --note-icon: #888; font-size: 0.85rem; color: #aaa; margin-top: 0.5rem; padding: 0.6rem 0.8rem;
+                background: #161616; border: 1px solid rgba(255,255,255,0.05); border-radius: 8px;
                 display: flex; align-items: flex-start; gap: 0.5rem; flex-wrap: wrap; }}
+  .card .note .note-icon {{ color: var(--note-icon); flex: 0 0 auto; display: flex; align-items: center; }}
   .card .note-body {{ flex: 1 1 auto; min-width: 0; word-break: break-word; }}
   .card .note-actions {{ flex: 0 0 auto; display: flex; gap: 0.25rem; opacity: 0.4; transition: opacity 0.15s; }}
   .card .note:hover .note-actions {{ opacity: 1; }}
@@ -788,9 +789,9 @@ async function doSetup() {{
   .card .note-action-btn.note-action-del:hover {{ color: #f87171; border-color: #7f1d1d; }}
   .card .note-edit-form, .card .add-note-form {{ flex: 1 1 100%; margin-top: 0.4rem; }}
   .card .add-note-form {{ margin-top: 0.6rem; padding: 0.5rem; border: 1px dashed #333; border-radius: 6px; }}
-  .card .note-local-mine {{ border-left-color: #6366f1; background: rgba(99, 102, 241, 0.08); color: #c7c8ff; }}
-  .card .note-remote-mine {{ border-left-color: #3b82f6; background: rgba(59, 130, 246, 0.08); color: #93c5fd; }}
-  .card .note-other {{ border-left-color: #f59e0b; background: rgba(245, 158, 11, 0.06); color: #fcd34d; }}
+  .card .note-local-mine {{ --note-icon: #6366f1; color: #a5a6e0; }}
+  .card .note-remote-mine {{ --note-icon: #3b82f6; color: #7aa8de; }}
+  .card .note-other {{ --note-icon: #f59e0b; color: #d6b55a; }}
   .card .note.sibling {{ margin-top: 0.3rem; }}
   .card .sib-who {{ font-weight: 600; margin-right: 0.3rem; }}
   .card .sib-origin {{ font-size: 0.75rem; color: #666; }}
@@ -1423,6 +1424,14 @@ async function doSetup() {{
                         f'data-note-id="{_xml_escape(note_id)}" '
                         f'data-note-kind="{kind}" '
                         f'data-resource-id="{r["id"]}">'
+                        '<span class="note-icon" aria-hidden="true">'
+                        '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" '
+                        'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+                        'stroke-linejoin="round">'
+                        '<path d="M12 20h9"/>'
+                        '<path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>'
+                        '</svg>'
+                        '</span>'
                         f'<span class="note-body">{who_html}<span class="note-text">{_xml_escape(text)}</span></span>'
                         f'{actions}'
                         f'</div>'
