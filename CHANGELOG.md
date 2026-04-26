@@ -2,6 +2,27 @@
 
 Dugg follows date-versioned releases: `vYYYY.MM.DD` on each shipped day, with `.N` suffixes if a day ships multiple times. Each release ships from `main` with the commit tagged at release time.
 
+## v2026.04.25.2
+
+Web feed gets first-class re-discovery primitives. Pairs Mark Read with the existing Mark Unread, replaces the inline "Unread only" checkbox with a dedicated filter pill row, and exposes the same filter logic on the API endpoints so iOS and other surfaces can adopt without duplicating predicate code.
+
+### Added
+
+- **Mark Read button** alongside the existing Mark Unread on every card. Both are now always visible (no hover-required), styled like the Star/Thumbs Up reaction buttons, with `is-active` reflecting the current read state. POST `/api/read/{id}` source = `web_button`.
+- **Filter pill row** under the search bar: `Unread`, `Read`, `Starred`, `Thumbs Up`, `Noted by You`. Single-select, persisted via `?filter=` query param so reload, share, and back-navigation preserve state.
+- **`?filter=` parameter on `/feed`, `/api/feed`, `/api/feed/urls`, `/api/search`.** Same predicate logic across HTML and API. iOS / MCP / future surfaces can adopt without re-implementing.
+- **`web_button`** added to `READ_STATE_SOURCES`.
+
+### Changed
+
+- **Feed search is now form-submit + server-side FTS.** The previous live-as-you-type client-side fuzzy match is replaced with `/feed?q=...` that hits the same `d.search()` path used by `/api/search`, so relevance now matches what iOS and MCP see. Clear-search is a link to the same path without `?q=`.
+- **Cookie-auth redirect on `/feed/{key}` preserves the query string** so a shared filtered URL survives the silent session migration.
+- **Removed** the hover-only `.mark-unread-btn` opacity rules (`.card.is-read:hover ...`) — both read-state buttons are always visible now.
+
+### Tests
+
+407 passing (+4 this release): `web_button` source accepted on POST `/api/read`; `/api/feed` honors `?filter=` for all five values; `/api/search` applies `?filter=` on top of the query; new HTML markup renders correctly with server-side `?q=` and `?filter=` results.
+
 ## v2026.04.25.1
 
 Web Star/Thumbs Up could ADD a reaction but couldn't toggle it OFF. This ships the symmetric remove path across server, MCP, CLI, and the inline web feed JS.
