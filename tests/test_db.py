@@ -412,6 +412,26 @@ def test_unmark_read_deletes_row_and_returns_bool(db):
     assert db.unmark_read(user["id"], res["id"]) is False
 
 
+def test_unreact_deletes_row_and_returns_bool(db):
+    user = db.create_user("Kade")
+    coll = db.create_collection("AI", user["id"])
+    res = db.add_resource(url="https://example.com/unreact", collection_id=coll["id"], submitted_by=user["id"])
+    db.react_to_resource(res["id"], user["id"], "star")
+
+    assert db.unreact(user["id"], res["id"], "star") is True
+    assert db.get_reactions(res["id"], user["id"]) == {"resource_id": res["id"], "total": 0, "breakdown": {}}
+    assert db.unreact(user["id"], res["id"], "star") is False
+
+
+def test_unreact_rejects_invalid_reaction_type(db):
+    user = db.create_user("Kade")
+    coll = db.create_collection("AI", user["id"])
+    res = db.add_resource(url="https://example.com/unreact-bad-type", collection_id=coll["id"], submitted_by=user["id"])
+
+    with pytest.raises(ValueError, match="Invalid reaction_type"):
+        db.unreact(user["id"], res["id"], "tap")
+
+
 def test_list_read_since_paginates_by_read_at_desc(db):
     user = db.create_user("Kade")
     coll = db.create_collection("AI", user["id"])
@@ -1625,6 +1645,23 @@ def test_unmark_read_emits_read_removed(db):
     removed = [e for e in events if e["event_type"] == "read_removed"]
     assert len(removed) == 1
     assert removed[0]["payload"]["resource_id"] == res["id"]
+
+
+def test_unreact_emits_reaction_removed(db):
+    kade = db.create_user("Kade")
+    rocco = db.create_user("Rocco")
+    coll = db.create_collection("AI", kade["id"], visibility="shared")
+    db.add_collection_member(coll["id"], rocco["id"])
+    res = db.add_resource(url="https://example.com/react-remove", collection_id=coll["id"], submitted_by=kade["id"])
+    db.react_to_resource(res["id"], rocco["id"], "thumbsup")
+
+    assert db.unreact(rocco["id"], res["id"], "thumbsup") is True
+    events = db.get_events(kade["id"])
+    removed = [e for e in events if e["event_type"] == "reaction_removed"]
+    assert len(removed) == 1
+    assert removed[0]["actor_id"] == rocco["id"]
+    assert removed[0]["payload"]["resource_id"] == res["id"]
+    assert removed[0]["payload"]["reaction_type"] == "thumbsup"
 
 
 # --- User Cursors ---
