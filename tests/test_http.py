@@ -2294,6 +2294,40 @@ def test_feed_html_q_and_filter_render_server_side_results(client, db_path, user
     assert "go starred" not in html
 
 
+def test_feed_html_category_row_uses_unfiltered_source_types_across_filters(client, db_path, user):
+    c, _ = client
+    starred_article_id = _seed_resource(
+        db_path,
+        user,
+        url="https://example.com/feed-category-article",
+        title="Starred article",
+        note="",
+        source_type="article",
+    )
+    youtube_id = _seed_resource(
+        db_path,
+        user,
+        url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        title="Read video",
+        note="",
+        source_type="youtube",
+    )
+
+    d = DuggDB(db_path)
+    d.react_to_resource(starred_article_id, user["id"], "star")
+    d.mark_read(user["id"], youtube_id, "cli")
+    d.close()
+
+    c.cookies.set("dugg_key", user["api_key"])
+    resp = c.get("/feed?filter=starred")
+    assert resp.status_code == 200
+    html = resp.text
+    assert f'data-resource-id="{starred_article_id}"' in html
+    assert f'data-resource-id="{youtube_id}"' not in html
+    assert 'data-category="article"' in html
+    assert 'data-category="youtube"' in html
+
+
 # --- /paste: silent migration + cookie auth ---
 
 

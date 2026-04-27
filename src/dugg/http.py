@@ -286,6 +286,18 @@ def create_app(db_path: Optional[Path] = None, mode: str = "local") -> Starlette
                 filtered.append(resource)
         return filtered
 
+    def _load_feed_candidates(
+        d: DuggDB,
+        user: dict,
+        *,
+        query: str,
+        limit: int,
+    ) -> list[dict]:
+        fetch_limit = min(max(limit * 4, limit), 500)
+        if query:
+            return d.search(query, user["id"], limit=fetch_limit)
+        return d.get_feed(user["id"], limit=fetch_limit)
+
     def _load_feed_resources(
         d: DuggDB,
         user: dict,
@@ -294,11 +306,7 @@ def create_app(db_path: Optional[Path] = None, mode: str = "local") -> Starlette
         feed_filter: str,
         limit: int,
     ) -> tuple[list[dict], dict[str, dict], dict[str, dict]]:
-        fetch_limit = min(max(limit * 4, limit), 500)
-        if query:
-            candidates = d.search(query, user["id"], limit=fetch_limit)
-        else:
-            candidates = d.get_feed(user["id"], limit=fetch_limit)
+        candidates = _load_feed_candidates(d, user, query=query, limit=limit)
         resource_ids = [resource["id"] for resource in candidates]
         read_states = d.batch_read_states(user["id"], resource_ids)
         reaction_state = _batch_feed_reactions(d, resource_ids, user["id"])
@@ -1387,6 +1395,7 @@ async function doSetup() {{
             feed_filter=feed_filter,
             limit=50,
         )
+        category_candidates = _load_feed_candidates(d, user, query=query, limit=50)
         page_title = f"{user['name']}'s Dugg"
         topic_parts: list[str] = []
         if query:
@@ -1587,10 +1596,11 @@ async function doSetup() {{
         filter_row = f'<div class="filter-row">{"".join(filter_pills)}</div>'
 
         # Source-type category row (mirrors iOS): "All" + one pill per source_type
-        # present in the current feed, derived dynamically. Client-side filter only.
+        # present in the current query scope before read/starred/thumbsup/noted
+        # filtering. Client-side filter only.
         category_row = ""
         seen_types: dict[str, str] = {}
-        for r in feed:
+        for r in category_candidates:
             st = (r.get("source_type") or "other").lower()
             if st in seen_types:
                 continue
