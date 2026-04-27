@@ -2039,6 +2039,38 @@ def test_resource_page_detail_renders_interactive_controls(client, db_path, user
     assert 'onclick="shareResource(' not in hidden_html
 
 
+def test_resource_page_detail_title_links_only_for_external_urls(client, db_path, user):
+    c, _ = client
+    d = DuggDB(db_path)
+    coll_id = d.ensure_default_collection(user["id"])
+    external = d.add_resource(
+        url="https://example.com/detail-title-link",
+        collection_id=coll_id,
+        submitted_by=user["id"],
+        title="External Detail",
+        source_type="article",
+    )
+    internal = d.add_resource(
+        url="dugg://content/local-detail-title",
+        collection_id=coll_id,
+        submitted_by=user["id"],
+        title="Local Detail",
+        source_type="paste",
+    )
+    d.close()
+
+    c.cookies.set("dugg_key", user["api_key"])
+
+    external_resp = c.get(f"/r/{external['id']}")
+    assert external_resp.status_code == 200
+    assert '<h1><a class="detail-title-link" href="https://example.com/detail-title-link"' in external_resp.text
+
+    internal_resp = c.get(f"/r/{internal['id']}")
+    assert internal_resp.status_code == 200
+    assert "<h1>Local Detail</h1>" in internal_resp.text
+    assert '<h1><a class="detail-title-link"' not in internal_resp.text
+
+
 def test_resource_unlock_invalid_key(client, db_path, user):
     c, _ = client
     res_id = _make_pasted_resource(db_path, user)

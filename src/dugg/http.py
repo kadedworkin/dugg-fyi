@@ -888,6 +888,8 @@ async function doSetup() {{
   .card.detail {{ max-width: 760px; margin: 0 auto; cursor: default; }}
   .card.detail .card-body {{ padding: 1.35rem; }}
   .detail h1 {{ font-size: 1.6rem; margin: 0 0 0.4rem; line-height: 1.3; }}
+  .detail .detail-title-link {{ color: inherit; text-decoration: none; }}
+  .detail .detail-title-link:hover {{ text-decoration: underline; }}
   .detail .detail-meta {{ font-size: 0.85rem; color: #888; margin-bottom: 0.6rem; }}
   .detail .detail-source-url a {{ color: #93c5fd; font-size: 0.85rem; text-decoration: none; }}
   .detail .detail-source-url a:hover {{ text-decoration: underline; }}
@@ -3250,12 +3252,17 @@ loadReadStateCache();
             tags_html = ""
 
         back_html = '<p class="detail-back"><a href="/feed">← Back to feed</a></p>'
+        title_html = (
+            f'<h1><a class="detail-title-link" href="{_xml_escape(url)}" target="_blank" rel="noopener">{_xml_escape(title)}</a></h1>'
+            if is_external_url
+            else f"<h1>{_xml_escape(title)}</h1>"
+        )
 
         body = f"""{back_html}
 <article class="card detail" id="item-{resource["id"]}" data-resource-id="{resource["id"]}" data-collection="{_xml_escape(collection_id)}" data-source-server="{_xml_escape(source_server)}" data-url="{_xml_escape(url)}" data-read-state="read" data-source-type="{_xml_escape(source_type or "other")}">
   {thumb_html}
   <div class="card-body">
-    <h1>{_xml_escape(title)}</h1>
+    {title_html}
     {f'<p class="meta detail-meta">{meta_html}</p>' if meta_html else ""}
     {actions_html}
     <section class="detail-section notes-block"><h2>Notes</h2>{notes_html}{add_note_form_html}</section>
