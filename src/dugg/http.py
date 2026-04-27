@@ -821,6 +821,7 @@ async function doSetup() {{
   .feed-stats {{ font-size: 0.8rem; color: #555; margin-bottom: 1rem; }}
   .empty {{ color: #666; text-align: center; padding: 2rem 0; }}
   .item-actions {{ margin-top: 0.4rem; display: flex; gap: 0.5rem; flex-wrap: wrap; }}
+  .item-actions-secondary {{ margin-top: 0.4rem; }}
   .action-btn {{ width: auto; padding: 0.2rem 0.5rem; font-size: 0.75rem; background: transparent;
                  color: #666; border: 1px solid #333; border-radius: 4px; cursor: pointer; font-weight: 400; }}
   .action-btn:hover {{ color: #ccc; border-color: #555; background: #1a1a1a; }}
@@ -1536,6 +1537,8 @@ async function doSetup() {{
         <span class="reaction-label">Thumbs Up</span>
         <span class="reaction-count">{thumbsup_count}</span>
       </button>
+    </div>
+    <div class="item-actions item-actions-secondary">
       <button class="action-btn add-note-btn" onclick="beginAddNote(this)" data-resource-id="{r["id"]}">add note</button>
       <button class="action-btn delete-btn" onclick="deleteItem('{r["id"]}')">delete item</button>
     </div>
