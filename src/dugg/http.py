@@ -810,7 +810,8 @@ async function doSetup() {{
   .search-actions {{ display: inline-flex; gap: 0.5rem; align-items: center; }}
   .filter-row {{ display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 1.25rem; }}
   .filter-pill {{ display: inline-flex; align-items: center; justify-content: center; padding: 0.35rem 0.75rem; border-radius: 999px;
-                  border: 1px solid #333; color: #888; text-decoration: none; font-size: 0.8rem; background: transparent; }}
+                  border: 1px solid #333; color: #888; text-decoration: none; font-size: 0.8rem; background: transparent;
+                  width: auto; cursor: pointer; }}
   .filter-pill:hover {{ color: #ccc; border-color: #555; background: #1a1a1a; }}
   .filter-pill.is-active {{ color: #fcd34d; border-color: #854d0e; background: rgba(133, 77, 14, 0.16); }}
   .search-clear {{ position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
@@ -1677,6 +1678,9 @@ function updateCardReadUi(card) {
 function updateReactionButton(btn) {
   if (!btn) return;
   const reactionType = btn.dataset.reactionType;
+  // Skip read-state toggle buttons — they share the .reaction-btn class for
+  // styling but have no data-reaction-type and own their own icon (📖/📚).
+  if (!reactionType) return;
   const isActive = btn.dataset.active === 'true';
   const count = Number(btn.dataset.count || '0');
   const icon = btn.querySelector('.reaction-icon');
@@ -2094,8 +2098,8 @@ loadReadStateCache();
 {sync_html}
 {topic_html}
 {search_bar}
-{filter_row}
 {category_row}
+{filter_row}
 {items_html}
 {feed_js}"""
         return HTMLResponse(_html_page(page_title, body, wide=True))
