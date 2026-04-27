@@ -882,12 +882,23 @@ async function doSetup() {{
   .filter-row.category-row .filter-pill {{ font-size: 0.78rem; padding: 0.3rem 0.7rem; }}
   .filter-row.category-row + .filter-row {{ margin-top: -0.85rem; }}
   .detail {{ max-width: 760px; margin: 0 auto; padding: 0 0.5rem; }}
+  .card.detail {{ max-width: 760px; margin: 0 auto; cursor: default; }}
+  .card.detail .card-body {{ padding: 1.35rem; }}
   .detail h1 {{ font-size: 1.6rem; margin: 0 0 0.4rem; line-height: 1.3; }}
   .detail .detail-meta {{ font-size: 0.85rem; color: #888; margin-bottom: 0.6rem; }}
   .detail .detail-source-url a {{ color: #93c5fd; font-size: 0.85rem; text-decoration: none; }}
   .detail .detail-source-url a:hover {{ text-decoration: underline; }}
   .detail-media {{ margin-bottom: 1rem; border-radius: 12px; overflow: hidden; background: #111; }}
   .detail-media img {{ display: block; width: 100%; height: auto; max-height: 420px; object-fit: cover; }}
+  .detail .detail-actions {{ margin: 1rem 0 0; }}
+  .detail .notes-block {{ margin-top: 1.5rem; }}
+  .detail .note {{ margin-top: 0.7rem; padding: 0.8rem 0.95rem; border-left-width: 2px; background: #111; }}
+  .detail .note:first-of-type {{ margin-top: 0; }}
+  .detail .note-body {{ display: block; }}
+  .detail .note-author {{ display: block; margin-bottom: 0.35rem; font-size: 0.78rem; font-weight: 600; color: #888; }}
+  .detail .note-text {{ display: block; color: #d4d4d8; line-height: 1.65; white-space: pre-wrap; }}
+  .detail .note-actions {{ opacity: 1; }}
+  .detail .add-note-form {{ margin-top: 1rem; padding: 0; border: 0; background: transparent; }}
   .detail-section {{ margin-top: 1.5rem; }}
   .detail-section h2 {{ font-size: 0.78rem; color: #888; text-transform: uppercase; letter-spacing: 0.06em;
                          font-weight: 600; margin: 0 0 0.6rem; }}
@@ -901,6 +912,514 @@ async function doSetup() {{
 </head>
 <body><div class="{wrap_class}">{body}</div></body>
 </html>"""
+
+    def _interactive_card_js(active_filter: str = "") -> str:
+        return """
+<script>
+// Same-origin fetch auto-includes the dugg_key cookie, so no X-Dugg-Key header
+// or API key is ever written into JS or URLs on this page.
+const BASE = window.location.origin;
+const READ_SINCE = '1970-01-01T00:00:00+00:00';
+const ACTIVE_FILTER = __ACTIVE_FILTER__;
+const readResourceIds = new Set();
+
+function getFeedCards() {
+  return Array.from(document.querySelectorAll('.card[data-resource-id]'));
+}
+
+function renderReadStateButton(resourceId, isRead, isPending) {
+  const buttonClass = isRead ? 'mark-unread-btn' : 'mark-read-btn';
+  const onClick = isRead ? 'markUnread(this)' : 'markRead(this)';
+  const active = isRead ? 'true' : 'false';
+  const icon = isRead ? '📚' : '📖';
+  const label = isRead ? 'Mark Unread' : 'Mark Read';
+  return '<button class="action-btn reaction-btn read-state-btn ' + buttonClass + '"'
+    + ' onclick="' + onClick + '"'
+    + ' data-resource-id="' + resourceId + '"'
+    + ' data-active="' + active + '"'
+    + ' data-pending="' + (isPending ? 'true' : 'false') + '"'
+    + ' aria-pressed="' + active + '"'
+    + (isPending ? ' disabled' : '')
+    + '>'
+    + '<span class="reaction-icon" aria-hidden="true">' + icon + '</span>'
+    + '<span class="reaction-label">' + label + '</span>'
+    + '</button>';
+}
+
+function cardMatchesActiveFilter(card) {
+  if (!card) return true;
+  const resourceId = card.dataset.resourceId;
+  const isRead = readResourceIds.has(resourceId);
+  if (ACTIVE_FILTER === 'unread' && isRead) return false;
+  if (ACTIVE_FILTER === 'read' && !isRead) return false;
+  if (ACTIVE_FILTER === 'starred') {
+    const starBtn = card.querySelector('[data-reaction-type="star"]');
+    if (!starBtn || starBtn.dataset.active !== 'true') return false;
+  }
+  if (ACTIVE_FILTER === 'thumbsup') {
+    const thumbBtn = card.querySelector('[data-reaction-type="thumbsup"]');
+    if (!thumbBtn || thumbBtn.dataset.active !== 'true') return false;
+  }
+  if (ACTIVE_CATEGORY !== '__all__') {
+    const cardType = (card.dataset.sourceType || '').toLowerCase();
+    if (cardType !== ACTIVE_CATEGORY) return false;
+  }
+  return true;
+}
+
+let ACTIVE_CATEGORY = '__all__';
+
+function applyActiveFeedFilter() {
+  getFeedCards().forEach(card => {
+    card.style.display = cardMatchesActiveFilter(card) ? '' : 'none';
+  });
+}
+
+function attachCategoryFilter() {
+  const pills = document.querySelectorAll('.filter-row.category-row .filter-pill');
+  pills.forEach(pill => {
+    pill.addEventListener('click', function() {
+      ACTIVE_CATEGORY = pill.dataset.category || '__all__';
+      pills.forEach(p => p.classList.toggle('is-active', p === pill));
+      applyActiveFeedFilter();
+    });
+  });
+}
+attachCategoryFilter();
+
+function updateCardReadUi(card) {
+  if (!card) return;
+  const resourceId = card.dataset.resourceId;
+  const isRead = readResourceIds.has(resourceId);
+  const state = card.querySelector('.meta-read-state');
+  const readStateBtn = card.querySelector('.read-state-btn');
+  const isPending = readStateBtn && readStateBtn.dataset.pending === 'true';
+  card.classList.toggle('is-read', isRead);
+  card.dataset.readState = isRead ? 'read' : 'unread';
+  if (state) {
+    state.dataset.state = isRead ? 'read' : 'unread';
+  }
+  if (readStateBtn) {
+    readStateBtn.outerHTML = renderReadStateButton(resourceId, isRead, isPending);
+  }
+}
+
+function updateReactionButton(btn) {
+  if (!btn) return;
+  const reactionType = btn.dataset.reactionType;
+  // Skip read-state toggle buttons — they share the .reaction-btn class for
+  // styling but have no data-reaction-type and own their own icon (📖/📚).
+  if (!reactionType) return;
+  const isActive = btn.dataset.active === 'true';
+  const count = Number(btn.dataset.count || '0');
+  const icon = btn.querySelector('.reaction-icon');
+  const countEl = btn.querySelector('.reaction-count');
+  btn.classList.toggle('is-active', isActive);
+  btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+  if (icon) {
+    icon.textContent = reactionType === 'star'
+      ? '⭐'
+      : '👍';
+  }
+  if (countEl) {
+    countEl.textContent = String(count);
+  }
+}
+
+function markCardRead(resourceId) {
+  if (!resourceId) return;
+  readResourceIds.add(resourceId);
+  updateCardReadUi(document.getElementById('item-' + resourceId));
+  applyActiveFeedFilter();
+}
+
+function markCardUnreadLocal(resourceId) {
+  if (!resourceId) return;
+  readResourceIds.delete(resourceId);
+  updateCardReadUi(document.getElementById('item-' + resourceId));
+  applyActiveFeedFilter();
+}
+
+function attachOutboundReadBeacons() {
+  document.querySelectorAll('a[data-dugg-resource-id]').forEach(link => {
+    link.addEventListener('click', function() {
+      const resourceId = this.dataset.duggResourceId;
+      if (!resourceId) return;
+      try {
+        const payload = new Blob([JSON.stringify({ source: 'web_outbound' })], { type: 'application/json' });
+        navigator.sendBeacon('/api/read/' + encodeURIComponent(resourceId), payload);
+      } catch (e) {
+        // Best-effort only; navigation should never be blocked.
+      }
+      markCardRead(resourceId);
+    });
+  });
+}
+
+async function loadReadStateCache() {
+  try {
+    const res = await fetch(BASE + '/api/read?since=' + encodeURIComponent(READ_SINCE));
+    if (!res.ok) return;
+    const data = await res.json();
+    (data.resources || []).forEach(row => {
+      if (row && row.resource_id) readResourceIds.add(row.resource_id);
+    });
+    getFeedCards().forEach(updateCardReadUi);
+    applyActiveFeedFilter();
+  } catch (e) {
+    // Keep the page usable even if read-state sync fails.
+  }
+}
+
+async function shareResource(url, title) {
+  try {
+    if (navigator.share) {
+      await navigator.share({ url: url, title: title });
+      return;
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(url);
+      alert('Link copied to clipboard.');
+      return;
+    }
+  } catch (e) {
+    alert('Share failed: ' + e.message);
+    return;
+  }
+  alert(url);
+}
+
+// --- Per-note edit/delete (primary + siblings) ---
+//
+// Notes render as `<div class="note" data-note-id="…" data-note-kind="primary|sibling" data-resource-id="…">`.
+// Primary notes carry empty note-id and route edits through /api/edit; sibling notes carry a real id
+// and route through /api/note/edit and /api/note/delete. Ownership was already decided server-side;
+// non-owners never see the buttons.
+
+function _findNoteRow(btn) {
+  return btn.closest('.note');
+}
+
+function beginNoteEdit(btn) {
+  const row = _findNoteRow(btn);
+  if (!row) return;
+  const textEl = row.querySelector('.note-text');
+  const current = textEl ? textEl.textContent : '';
+  // Stash the original so cancel restores it verbatim.
+  row.dataset.originalText = current;
+  const bodyEl = row.querySelector('.note-body');
+  const actionsEl = row.querySelector('.note-actions');
+  const editor = document.createElement('div');
+  editor.className = 'note-edit-form';
+  const ta = document.createElement('textarea');
+  ta.className = 'edit-input';
+  ta.value = current;
+  const btnRow = document.createElement('div');
+  btnRow.className = 'edit-buttons';
+  const save = document.createElement('button');
+  save.className = 'action-btn save-btn';
+  save.textContent = 'save';
+  save.onclick = () => saveNoteEdit(row, ta);
+  const cancel = document.createElement('button');
+  cancel.className = 'action-btn';
+  cancel.textContent = 'cancel';
+  cancel.onclick = () => cancelNoteEdit(row);
+  btnRow.appendChild(save);
+  btnRow.appendChild(cancel);
+  editor.appendChild(ta);
+  editor.appendChild(btnRow);
+  if (bodyEl) bodyEl.style.display = 'none';
+  if (actionsEl) actionsEl.style.display = 'none';
+  row.appendChild(editor);
+  ta.focus();
+}
+
+function cancelNoteEdit(row) {
+  const form = row.querySelector('.note-edit-form');
+  if (form) form.remove();
+  const body = row.querySelector('.note-body');
+  const actions = row.querySelector('.note-actions');
+  if (body) body.style.display = '';
+  if (actions) actions.style.display = '';
+}
+
+async function saveNoteEdit(row, ta) {
+  const newText = (ta.value || '').trim();
+  if (!newText) { alert('Note cannot be empty. Use delete instead.'); return; }
+  const kind = row.dataset.noteKind;
+  const noteId = row.dataset.noteId || '';
+  const resourceId = row.dataset.resourceId;
+  try {
+    let res;
+    if (kind === 'primary') {
+      res = await fetch(BASE + '/api/edit', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ resource_id: resourceId, note: newText }),
+      });
+    } else {
+      res = await fetch(BASE + '/api/note/edit', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ note_id: noteId, text: newText }),
+      });
+    }
+    if (!res.ok) { alert('Failed to save (' + res.status + ')'); return; }
+    const textEl = row.querySelector('.note-text');
+    if (textEl) textEl.textContent = newText;
+    cancelNoteEdit(row);
+  } catch (e) { alert('Error: ' + e.message); }
+}
+
+async function deleteNoteRow(btn) {
+  const row = _findNoteRow(btn);
+  if (!row) return;
+  if (!confirm('Delete this note?')) return;
+  const kind = row.dataset.noteKind;
+  const noteId = row.dataset.noteId || '';
+  const resourceId = row.dataset.resourceId;
+  try {
+    let res;
+    if (kind === 'primary') {
+      res = await fetch(BASE + '/api/edit', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ resource_id: resourceId, note: '' }),
+      });
+    } else {
+      res = await fetch(BASE + '/api/note/delete', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ note_id: noteId }),
+      });
+    }
+    if (!res.ok) { alert('Failed to delete (' + res.status + ')'); return; }
+    row.style.opacity = '0.3';
+    setTimeout(() => row.remove(), 250);
+  } catch (e) { alert('Error: ' + e.message); }
+}
+
+async function setReadState(btn, shouldRead) {
+  const resourceId = btn.dataset.resourceId;
+  if (!resourceId || btn.dataset.pending === 'true') return;
+  const wasRead = readResourceIds.has(resourceId);
+  if (wasRead === shouldRead) return;
+  btn.dataset.pending = 'true';
+  btn.disabled = true;
+  shouldRead ? markCardRead(resourceId) : markCardUnreadLocal(resourceId);
+  try {
+    const res = await fetch(BASE + '/api/read/' + encodeURIComponent(resourceId), {
+      method: shouldRead ? 'POST' : 'DELETE',
+      headers: shouldRead ? { 'Content-Type': 'application/json' } : undefined,
+      body: shouldRead ? JSON.stringify({ source: 'web_button' }) : undefined,
+    });
+    if (!res.ok) {
+      wasRead ? markCardRead(resourceId) : markCardUnreadLocal(resourceId);
+      alert('Failed to mark ' + (shouldRead ? 'read' : 'unread') + ' (' + res.status + ')');
+      return;
+    }
+  } catch (e) {
+    wasRead ? markCardRead(resourceId) : markCardUnreadLocal(resourceId);
+    alert('Error: ' + e.message);
+  } finally {
+    const currentBtn = document.querySelector('#item-' + resourceId + ' .read-state-btn');
+    if (currentBtn) {
+      currentBtn.dataset.pending = 'false';
+      currentBtn.disabled = false;
+    }
+  }
+}
+
+async function markRead(btn) {
+  return setReadState(btn, true);
+}
+
+async function markUnread(btn) {
+  return setReadState(btn, false);
+}
+
+async function toggleReaction(btn) {
+  const resourceId = btn.dataset.resourceId;
+  const reactionType = btn.dataset.reactionType;
+  if (!resourceId || !reactionType || btn.dataset.pending === 'true') return;
+  const wasActive = btn.dataset.active === 'true';
+  const wasRead = readResourceIds.has(resourceId);
+  const previousCount = Number(btn.dataset.count || '0');
+  btn.dataset.pending = 'true';
+  btn.disabled = true;
+  if (!wasActive) markCardRead(resourceId);
+  try {
+    if (wasActive) {
+      btn.dataset.active = 'false';
+      btn.dataset.count = String(Math.max(0, previousCount - 1));
+      updateReactionButton(btn);
+    }
+    const res = await fetch(
+      wasActive
+        ? BASE + '/api/react/' + encodeURIComponent(resourceId) + '?type=' + encodeURIComponent(reactionType)
+        : BASE + '/api/react',
+      {
+        method: wasActive ? 'DELETE' : 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Dugg-Surface': 'web',
+        },
+        body: wasActive ? undefined : JSON.stringify({ resource_id: resourceId, type: reactionType }),
+      }
+    );
+    if (!res.ok) {
+      if (wasActive) {
+        btn.dataset.active = 'true';
+        btn.dataset.count = String(previousCount);
+        updateReactionButton(btn);
+      } else if (!wasRead) {
+        markCardUnreadLocal(resourceId);
+      }
+      alert('Failed to ' + (wasActive ? 'remove reaction' : 'react') + ' (' + res.status + ')');
+      return;
+    }
+    if (!wasActive) {
+      btn.dataset.active = 'true';
+      btn.dataset.count = String(previousCount + 1);
+      updateReactionButton(btn);
+    }
+    applyActiveFeedFilter();
+  } catch (e) {
+    if (wasActive) {
+      btn.dataset.active = 'true';
+      btn.dataset.count = String(previousCount);
+      updateReactionButton(btn);
+    } else if (!wasRead) {
+      markCardUnreadLocal(resourceId);
+    }
+    applyActiveFeedFilter();
+    alert('Error: ' + e.message);
+  } finally {
+    btn.dataset.pending = 'false';
+    btn.disabled = false;
+  }
+}
+
+function beginAddNote(btn) {
+  const resourceId = btn.dataset.resourceId;
+  const card = document.getElementById('item-' + resourceId);
+  if (!card) return;
+  if (card.querySelector('.add-note-form')) return; // already open
+  const notesBlock = card.querySelector('.notes-block');
+  const form = document.createElement('div');
+  form.className = 'add-note-form';
+  const ta = document.createElement('textarea');
+  ta.className = 'edit-input';
+  ta.placeholder = 'Your note…';
+  const btnRow = document.createElement('div');
+  btnRow.className = 'edit-buttons';
+  const post = document.createElement('button');
+  post.className = 'action-btn save-btn';
+  post.textContent = 'post note';
+  post.onclick = () => submitNewNote(resourceId, ta, form, card);
+  const cancel = document.createElement('button');
+  cancel.className = 'action-btn';
+  cancel.textContent = 'cancel';
+  cancel.onclick = () => form.remove();
+  btnRow.appendChild(post);
+  btnRow.appendChild(cancel);
+  form.appendChild(ta);
+  form.appendChild(btnRow);
+  notesBlock.appendChild(form);
+  ta.focus();
+}
+
+async function submitNewNote(resourceId, ta, form, card) {
+  const text = (ta.value || '').trim();
+  if (!text) return;
+  try {
+    const res = await fetch(BASE + '/api/note', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ resource_id: resourceId, note: text }),
+    });
+    if (!res.ok) { alert('Failed to post (' + res.status + ')'); return; }
+    // Soft-reload the card by navigating — easier than re-rendering the
+    // sibling row client-side from the returned payload (we'd need the
+    // viewer's name and the ownership class logic).
+    window.location.reload();
+  } catch (e) { alert('Error: ' + e.message); }
+}
+
+async function deleteItem(id) {
+  if (!confirm('Delete this item?')) return;
+  try {
+    const collectionId = document.getElementById('item-' + id).dataset.collection;
+    const res = await fetch(BASE + '/tools/dugg_delete_resource', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ resource_id: id, collection_id: collectionId }),
+    });
+    if (!res.ok) { alert('Failed to delete'); return; }
+    const item = document.getElementById('item-' + id);
+    item.style.opacity = '0.3';
+    item.style.pointerEvents = 'none';
+    setTimeout(() => item.remove(), 300);
+  } catch (e) { alert('Error: ' + e.message); }
+}
+
+async function syncNow(e) {
+  e.preventDefault();
+  e.stopPropagation();
+  const btn = e.target;
+  btn.textContent = 'syncing...';
+  btn.disabled = true;
+  try {
+    const res = await fetch(BASE + '/tools/dugg_rss_poll', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    if (res.ok) {
+      btn.textContent = 'done!';
+      setTimeout(() => window.location.reload(), 1000);
+    } else {
+      btn.textContent = 'failed';
+      setTimeout(() => { btn.textContent = 'Sync now'; btn.disabled = false; }, 2000);
+    }
+  } catch (err) {
+    btn.textContent = 'error';
+    setTimeout(() => { btn.textContent = 'Sync now'; btn.disabled = false; }, 2000);
+  }
+}
+
+attachOutboundReadBeacons();
+function attachCardDetailNavigation() {
+  getFeedCards().forEach(card => {
+    if (card.classList.contains('detail')) return;
+    if (card.dataset.detailNavBound === '1') return;
+    card.dataset.detailNavBound = '1';
+    card.addEventListener('click', function(e) {
+      // Don't intercept clicks on interactive children (links, buttons, form fields)
+      // or anywhere inside the action rows / note editors.
+      if (e.target.closest('a, button, input, textarea, label, select, form,'
+          + ' .item-actions, .note-actions, .add-note-form, .note-edit-form')) {
+        return;
+      }
+      const resourceId = card.dataset.resourceId;
+      if (!resourceId) return;
+      // Mod-click and middle-click → open in new tab; plain click → in-place navigate.
+      const newTab = e.metaKey || e.ctrlKey || e.shiftKey || e.button === 1;
+      const href = '/r/' + encodeURIComponent(resourceId);
+      if (newTab) {
+        window.open(href, '_blank', 'noopener');
+      } else {
+        window.location.href = href;
+      }
+    });
+  });
+}
+attachCardDetailNavigation();
+getFeedCards().forEach(card => {
+  if (card.dataset.readState === 'read') {
+    readResourceIds.add(card.dataset.resourceId);
+  }
+});
+getFeedCards().forEach(updateCardReadUi);
+document.querySelectorAll('.reaction-btn').forEach(updateReactionButton);
+applyActiveFeedFilter();
+loadReadStateCache();
+</script>""".replace("__ACTIVE_FILTER__", json.dumps(active_filter))
 
     async def handle_invite_page(request: Request):
         """GET /invite/{token} — show the invite redemption page."""
@@ -1614,493 +2133,7 @@ async function doSetup() {{
                     f'<button type="button" class="filter-pill" data-category="{_xml_escape(st)}">{_xml_escape(label)}</button>'
                 )
             category_row = f'<div class="filter-row category-row">{"".join(cat_pills)}</div>'
-        feed_js = """
-<script>
-// Same-origin fetch auto-includes the dugg_key cookie, so no X-Dugg-Key header
-// or API key is ever written into JS or URLs on this page.
-const BASE = window.location.origin;
-const READ_SINCE = '1970-01-01T00:00:00+00:00';
-const ACTIVE_FILTER = __ACTIVE_FILTER__;
-const readResourceIds = new Set();
-
-function getFeedCards() {
-  return Array.from(document.querySelectorAll('.card[data-resource-id]'));
-}
-
-function renderReadStateButton(resourceId, isRead, isPending) {
-  const buttonClass = isRead ? 'mark-unread-btn' : 'mark-read-btn';
-  const onClick = isRead ? 'markUnread(this)' : 'markRead(this)';
-  const active = isRead ? 'true' : 'false';
-  const icon = isRead ? '📚' : '📖';
-  const label = isRead ? 'Mark Unread' : 'Mark Read';
-  return '<button class="action-btn reaction-btn read-state-btn ' + buttonClass + '"'
-    + ' onclick="' + onClick + '"'
-    + ' data-resource-id="' + resourceId + '"'
-    + ' data-active="' + active + '"'
-    + ' data-pending="' + (isPending ? 'true' : 'false') + '"'
-    + ' aria-pressed="' + active + '"'
-    + (isPending ? ' disabled' : '')
-    + '>'
-    + '<span class="reaction-icon" aria-hidden="true">' + icon + '</span>'
-    + '<span class="reaction-label">' + label + '</span>'
-    + '</button>';
-}
-
-function cardMatchesActiveFilter(card) {
-  if (!card) return true;
-  const resourceId = card.dataset.resourceId;
-  const isRead = readResourceIds.has(resourceId);
-  if (ACTIVE_FILTER === 'unread' && isRead) return false;
-  if (ACTIVE_FILTER === 'read' && !isRead) return false;
-  if (ACTIVE_FILTER === 'starred') {
-    const starBtn = card.querySelector('[data-reaction-type="star"]');
-    if (!starBtn || starBtn.dataset.active !== 'true') return false;
-  }
-  if (ACTIVE_FILTER === 'thumbsup') {
-    const thumbBtn = card.querySelector('[data-reaction-type="thumbsup"]');
-    if (!thumbBtn || thumbBtn.dataset.active !== 'true') return false;
-  }
-  if (ACTIVE_CATEGORY !== '__all__') {
-    const cardType = (card.dataset.sourceType || '').toLowerCase();
-    if (cardType !== ACTIVE_CATEGORY) return false;
-  }
-  return true;
-}
-
-let ACTIVE_CATEGORY = '__all__';
-
-function applyActiveFeedFilter() {
-  getFeedCards().forEach(card => {
-    card.style.display = cardMatchesActiveFilter(card) ? '' : 'none';
-  });
-}
-
-function attachCategoryFilter() {
-  const pills = document.querySelectorAll('.filter-row.category-row .filter-pill');
-  pills.forEach(pill => {
-    pill.addEventListener('click', function() {
-      ACTIVE_CATEGORY = pill.dataset.category || '__all__';
-      pills.forEach(p => p.classList.toggle('is-active', p === pill));
-      applyActiveFeedFilter();
-    });
-  });
-}
-attachCategoryFilter();
-
-function updateCardReadUi(card) {
-  if (!card) return;
-  const resourceId = card.dataset.resourceId;
-  const isRead = readResourceIds.has(resourceId);
-  const state = card.querySelector('.meta-read-state');
-  const readStateBtn = card.querySelector('.read-state-btn');
-  const isPending = readStateBtn && readStateBtn.dataset.pending === 'true';
-  card.classList.toggle('is-read', isRead);
-  card.dataset.readState = isRead ? 'read' : 'unread';
-  if (state) {
-    state.dataset.state = isRead ? 'read' : 'unread';
-  }
-  if (readStateBtn) {
-    readStateBtn.outerHTML = renderReadStateButton(resourceId, isRead, isPending);
-  }
-}
-
-function updateReactionButton(btn) {
-  if (!btn) return;
-  const reactionType = btn.dataset.reactionType;
-  // Skip read-state toggle buttons — they share the .reaction-btn class for
-  // styling but have no data-reaction-type and own their own icon (📖/📚).
-  if (!reactionType) return;
-  const isActive = btn.dataset.active === 'true';
-  const count = Number(btn.dataset.count || '0');
-  const icon = btn.querySelector('.reaction-icon');
-  const countEl = btn.querySelector('.reaction-count');
-  btn.classList.toggle('is-active', isActive);
-  btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
-  if (icon) {
-    icon.textContent = reactionType === 'star'
-      ? '⭐'
-      : '👍';
-  }
-  if (countEl) {
-    countEl.textContent = String(count);
-  }
-}
-
-function markCardRead(resourceId) {
-  if (!resourceId) return;
-  readResourceIds.add(resourceId);
-  updateCardReadUi(document.getElementById('item-' + resourceId));
-  applyActiveFeedFilter();
-}
-
-function markCardUnreadLocal(resourceId) {
-  if (!resourceId) return;
-  readResourceIds.delete(resourceId);
-  updateCardReadUi(document.getElementById('item-' + resourceId));
-  applyActiveFeedFilter();
-}
-
-function attachOutboundReadBeacons() {
-  document.querySelectorAll('a[data-dugg-resource-id]').forEach(link => {
-    link.addEventListener('click', function() {
-      const resourceId = this.dataset.duggResourceId;
-      if (!resourceId) return;
-      try {
-        const payload = new Blob([JSON.stringify({ source: 'web_outbound' })], { type: 'application/json' });
-        navigator.sendBeacon('/api/read/' + encodeURIComponent(resourceId), payload);
-      } catch (e) {
-        // Best-effort only; navigation should never be blocked.
-      }
-      markCardRead(resourceId);
-    });
-  });
-}
-
-async function loadReadStateCache() {
-  try {
-    const res = await fetch(BASE + '/api/read?since=' + encodeURIComponent(READ_SINCE));
-    if (!res.ok) return;
-    const data = await res.json();
-    (data.resources || []).forEach(row => {
-      if (row && row.resource_id) readResourceIds.add(row.resource_id);
-    });
-    getFeedCards().forEach(updateCardReadUi);
-    applyActiveFeedFilter();
-  } catch (e) {
-    // Keep the page usable even if read-state sync fails.
-  }
-}
-
-// --- Per-note edit/delete (primary + siblings) ---
-//
-// Notes render as `<div class="note" data-note-id="…" data-note-kind="primary|sibling" data-resource-id="…">`.
-// Primary notes carry empty note-id and route edits through /api/edit; sibling notes carry a real id
-// and route through /api/note/edit and /api/note/delete. Ownership was already decided server-side;
-// non-owners never see the buttons.
-
-function _findNoteRow(btn) {
-  return btn.closest('.note');
-}
-
-function beginNoteEdit(btn) {
-  const row = _findNoteRow(btn);
-  if (!row) return;
-  const textEl = row.querySelector('.note-text');
-  const current = textEl ? textEl.textContent : '';
-  // Stash the original so cancel restores it verbatim.
-  row.dataset.originalText = current;
-  const bodyEl = row.querySelector('.note-body');
-  const actionsEl = row.querySelector('.note-actions');
-  const editor = document.createElement('div');
-  editor.className = 'note-edit-form';
-  const ta = document.createElement('textarea');
-  ta.className = 'edit-input';
-  ta.value = current;
-  const btnRow = document.createElement('div');
-  btnRow.className = 'edit-buttons';
-  const save = document.createElement('button');
-  save.className = 'action-btn save-btn';
-  save.textContent = 'save';
-  save.onclick = () => saveNoteEdit(row, ta);
-  const cancel = document.createElement('button');
-  cancel.className = 'action-btn';
-  cancel.textContent = 'cancel';
-  cancel.onclick = () => cancelNoteEdit(row);
-  btnRow.appendChild(save);
-  btnRow.appendChild(cancel);
-  editor.appendChild(ta);
-  editor.appendChild(btnRow);
-  if (bodyEl) bodyEl.style.display = 'none';
-  if (actionsEl) actionsEl.style.display = 'none';
-  row.appendChild(editor);
-  ta.focus();
-}
-
-function cancelNoteEdit(row) {
-  const form = row.querySelector('.note-edit-form');
-  if (form) form.remove();
-  const body = row.querySelector('.note-body');
-  const actions = row.querySelector('.note-actions');
-  if (body) body.style.display = '';
-  if (actions) actions.style.display = '';
-}
-
-async function saveNoteEdit(row, ta) {
-  const newText = (ta.value || '').trim();
-  if (!newText) { alert('Note cannot be empty. Use delete instead.'); return; }
-  const kind = row.dataset.noteKind;
-  const noteId = row.dataset.noteId || '';
-  const resourceId = row.dataset.resourceId;
-  try {
-    let res;
-    if (kind === 'primary') {
-      res = await fetch(BASE + '/api/edit', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ resource_id: resourceId, note: newText }),
-      });
-    } else {
-      res = await fetch(BASE + '/api/note/edit', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ note_id: noteId, text: newText }),
-      });
-    }
-    if (!res.ok) { alert('Failed to save (' + res.status + ')'); return; }
-    const textEl = row.querySelector('.note-text');
-    if (textEl) textEl.textContent = newText;
-    cancelNoteEdit(row);
-  } catch (e) { alert('Error: ' + e.message); }
-}
-
-async function deleteNoteRow(btn) {
-  const row = _findNoteRow(btn);
-  if (!row) return;
-  if (!confirm('Delete this note?')) return;
-  const kind = row.dataset.noteKind;
-  const noteId = row.dataset.noteId || '';
-  const resourceId = row.dataset.resourceId;
-  try {
-    let res;
-    if (kind === 'primary') {
-      res = await fetch(BASE + '/api/edit', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ resource_id: resourceId, note: '' }),
-      });
-    } else {
-      res = await fetch(BASE + '/api/note/delete', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ note_id: noteId }),
-      });
-    }
-    if (!res.ok) { alert('Failed to delete (' + res.status + ')'); return; }
-    row.style.opacity = '0.3';
-    setTimeout(() => row.remove(), 250);
-  } catch (e) { alert('Error: ' + e.message); }
-}
-
-async function setReadState(btn, shouldRead) {
-  const resourceId = btn.dataset.resourceId;
-  if (!resourceId || btn.dataset.pending === 'true') return;
-  const wasRead = readResourceIds.has(resourceId);
-  if (wasRead === shouldRead) return;
-  btn.dataset.pending = 'true';
-  btn.disabled = true;
-  shouldRead ? markCardRead(resourceId) : markCardUnreadLocal(resourceId);
-  try {
-    const res = await fetch(BASE + '/api/read/' + encodeURIComponent(resourceId), {
-      method: shouldRead ? 'POST' : 'DELETE',
-      headers: shouldRead ? { 'Content-Type': 'application/json' } : undefined,
-      body: shouldRead ? JSON.stringify({ source: 'web_button' }) : undefined,
-    });
-    if (!res.ok) {
-      wasRead ? markCardRead(resourceId) : markCardUnreadLocal(resourceId);
-      alert('Failed to mark ' + (shouldRead ? 'read' : 'unread') + ' (' + res.status + ')');
-      return;
-    }
-  } catch (e) {
-    wasRead ? markCardRead(resourceId) : markCardUnreadLocal(resourceId);
-    alert('Error: ' + e.message);
-  } finally {
-    const currentBtn = document.querySelector('#item-' + resourceId + ' .read-state-btn');
-    if (currentBtn) {
-      currentBtn.dataset.pending = 'false';
-      currentBtn.disabled = false;
-    }
-  }
-}
-
-async function markRead(btn) {
-  return setReadState(btn, true);
-}
-
-async function markUnread(btn) {
-  return setReadState(btn, false);
-}
-
-async function toggleReaction(btn) {
-  const resourceId = btn.dataset.resourceId;
-  const reactionType = btn.dataset.reactionType;
-  if (!resourceId || !reactionType || btn.dataset.pending === 'true') return;
-  const wasActive = btn.dataset.active === 'true';
-  const wasRead = readResourceIds.has(resourceId);
-  const previousCount = Number(btn.dataset.count || '0');
-  btn.dataset.pending = 'true';
-  btn.disabled = true;
-  if (!wasActive) markCardRead(resourceId);
-  try {
-    if (wasActive) {
-      btn.dataset.active = 'false';
-      btn.dataset.count = String(Math.max(0, previousCount - 1));
-      updateReactionButton(btn);
-    }
-    const res = await fetch(
-      wasActive
-        ? BASE + '/api/react/' + encodeURIComponent(resourceId) + '?type=' + encodeURIComponent(reactionType)
-        : BASE + '/api/react',
-      {
-        method: wasActive ? 'DELETE' : 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Dugg-Surface': 'web',
-        },
-        body: wasActive ? undefined : JSON.stringify({ resource_id: resourceId, type: reactionType }),
-      }
-    );
-    if (!res.ok) {
-      if (wasActive) {
-        btn.dataset.active = 'true';
-        btn.dataset.count = String(previousCount);
-        updateReactionButton(btn);
-      } else if (!wasRead) {
-        markCardUnreadLocal(resourceId);
-      }
-      alert('Failed to ' + (wasActive ? 'remove reaction' : 'react') + ' (' + res.status + ')');
-      return;
-    }
-    if (!wasActive) {
-      btn.dataset.active = 'true';
-      btn.dataset.count = String(previousCount + 1);
-      updateReactionButton(btn);
-    }
-    applyActiveFeedFilter();
-  } catch (e) {
-    if (wasActive) {
-      btn.dataset.active = 'true';
-      btn.dataset.count = String(previousCount);
-      updateReactionButton(btn);
-    } else if (!wasRead) {
-      markCardUnreadLocal(resourceId);
-    }
-    applyActiveFeedFilter();
-    alert('Error: ' + e.message);
-  } finally {
-    btn.dataset.pending = 'false';
-    btn.disabled = false;
-  }
-}
-
-function beginAddNote(btn) {
-  const resourceId = btn.dataset.resourceId;
-  const card = document.getElementById('item-' + resourceId);
-  if (!card) return;
-  if (card.querySelector('.add-note-form')) return; // already open
-  const notesBlock = card.querySelector('.notes-block');
-  const form = document.createElement('div');
-  form.className = 'add-note-form';
-  const ta = document.createElement('textarea');
-  ta.className = 'edit-input';
-  ta.placeholder = 'Your note…';
-  const btnRow = document.createElement('div');
-  btnRow.className = 'edit-buttons';
-  const post = document.createElement('button');
-  post.className = 'action-btn save-btn';
-  post.textContent = 'post note';
-  post.onclick = () => submitNewNote(resourceId, ta, form, card);
-  const cancel = document.createElement('button');
-  cancel.className = 'action-btn';
-  cancel.textContent = 'cancel';
-  cancel.onclick = () => form.remove();
-  btnRow.appendChild(post);
-  btnRow.appendChild(cancel);
-  form.appendChild(ta);
-  form.appendChild(btnRow);
-  notesBlock.appendChild(form);
-  ta.focus();
-}
-
-async function submitNewNote(resourceId, ta, form, card) {
-  const text = (ta.value || '').trim();
-  if (!text) return;
-  try {
-    const res = await fetch(BASE + '/api/note', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ resource_id: resourceId, note: text }),
-    });
-    if (!res.ok) { alert('Failed to post (' + res.status + ')'); return; }
-    // Soft-reload the card by navigating — easier than re-rendering the
-    // sibling row client-side from the returned payload (we'd need the
-    // viewer's name and the ownership class logic).
-    window.location.reload();
-  } catch (e) { alert('Error: ' + e.message); }
-}
-
-async function deleteItem(id) {
-  if (!confirm('Delete this item?')) return;
-  try {
-    const collectionId = document.getElementById('item-' + id).dataset.collection;
-    const res = await fetch(BASE + '/tools/dugg_delete_resource', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ resource_id: id, collection_id: collectionId }),
-    });
-    if (!res.ok) { alert('Failed to delete'); return; }
-    const item = document.getElementById('item-' + id);
-    item.style.opacity = '0.3';
-    item.style.pointerEvents = 'none';
-    setTimeout(() => item.remove(), 300);
-  } catch (e) { alert('Error: ' + e.message); }
-}
-
-async function syncNow(e) {
-  e.preventDefault();
-  e.stopPropagation();
-  const btn = e.target;
-  btn.textContent = 'syncing...';
-  btn.disabled = true;
-  try {
-    const res = await fetch(BASE + '/tools/dugg_rss_poll', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({}),
-    });
-    if (res.ok) {
-      btn.textContent = 'done!';
-      setTimeout(() => window.location.reload(), 1000);
-    } else {
-      btn.textContent = 'failed';
-      setTimeout(() => { btn.textContent = 'Sync now'; btn.disabled = false; }, 2000);
-    }
-  } catch (err) {
-    btn.textContent = 'error';
-    setTimeout(() => { btn.textContent = 'Sync now'; btn.disabled = false; }, 2000);
-  }
-}
-
-attachOutboundReadBeacons();
-function attachCardDetailNavigation() {
-  getFeedCards().forEach(card => {
-    if (card.dataset.detailNavBound === '1') return;
-    card.dataset.detailNavBound = '1';
-    card.addEventListener('click', function(e) {
-      // Don't intercept clicks on interactive children (links, buttons, form fields)
-      // or anywhere inside the action rows / note editors.
-      if (e.target.closest('a, button, input, textarea, label, select, form,'
-          + ' .item-actions, .note-actions, .add-note-form, .note-edit-form')) {
-        return;
-      }
-      const resourceId = card.dataset.resourceId;
-      if (!resourceId) return;
-      // Mod-click and middle-click → open in new tab; plain click → in-place navigate.
-      const newTab = e.metaKey || e.ctrlKey || e.shiftKey || e.button === 1;
-      const href = '/r/' + encodeURIComponent(resourceId);
-      if (newTab) {
-        window.open(href, '_blank', 'noopener');
-      } else {
-        window.location.href = href;
-      }
-    });
-  });
-}
-attachCardDetailNavigation();
-getFeedCards().forEach(card => {
-  if (card.dataset.readState === 'read') {
-    readResourceIds.add(card.dataset.resourceId);
-  }
-});
-getFeedCards().forEach(updateCardReadUi);
-document.querySelectorAll('.reaction-btn').forEach(updateReactionButton);
-applyActiveFeedFilter();
-loadReadStateCache();
-</script>""".replace("__ACTIVE_FILTER__", json.dumps(feed_filter))
+        feed_js = _interactive_card_js(feed_filter)
         # Stats bar
         n_items = len(feed)
         contributors = set(submitter_cache.values())
@@ -3043,7 +3076,12 @@ loadReadStateCache();
         resp.delete_cookie(COOKIE_NAME, path="/")
         return resp
 
-    def _render_resource(resource: dict, sibling_notes: Optional[list] = None) -> str:
+    def _render_resource(
+        resource: dict,
+        sibling_notes: Optional[list] = None,
+        reaction_state: Optional[dict] = None,
+        viewer_id: str = "",
+    ) -> str:
         title = resource.get("title") or "Untitled"
         url = resource.get("url") or ""
         # Some content rows live at synthetic dugg://content URLs; don't expose those as a clickable link.
@@ -3054,20 +3092,22 @@ loadReadStateCache();
         author = resource.get("author") or ""
         source_type = (resource.get("source_type") or "").lower()
         created = (resource.get("created_at") or "")[:10]
-        pub_date = _resource_pub_date(resource)
-        note = resource.get("note") or ""
         tags = resource.get("tags") or []
+        collection_id = resource.get("collection_id") or ""
+        source_server = resource.get("source_server") or ""
+        submitted_by = resource.get("submitted_by") or ""
+        submitter_name = resource.get("submitter_name") or "someone"
+        reaction_state = reaction_state or {}
 
-        meta_parts = []
+        author_label = author or "Unknown"
+        meta_bits = [f"by {_xml_escape(author_label)}"]
         if created:
-            meta_parts.append(created)
-        if pub_date and pub_date != created:
-            meta_parts.append(f"published {pub_date}")
-        if author:
-            meta_parts.append(author)
+            meta_bits.append(f"on {_xml_escape(created)}")
         if source_type:
-            meta_parts.append(source_type)
-        meta_html = " · ".join(meta_parts)
+            meta_bits.append(_xml_escape(source_type))
+        meta_html = " ".join(meta_bits[:2])
+        if len(meta_bits) > 2:
+            meta_html += f" · {meta_bits[2]}"
 
         thumb_html = (
             f'<div class="detail-media"><img src="{_xml_escape(thumbnail)}" alt="" loading="lazy"></div>'
@@ -3075,33 +3115,105 @@ loadReadStateCache();
             else ""
         )
 
-        open_link_html = (
-            f'<p class="detail-source-url"><a href="{_xml_escape(url)}" target="_blank" rel="noopener">Open original →</a></p>'
-            if is_external_url
-            else ""
-        )
-
-        note_html = (
-            f'<section class="detail-section"><h2>Your note</h2>'
-            f'<p class="note" style="font-style:italic;">{_xml_escape(note)}</p></section>'
-            if note
-            else ""
-        )
-
-        siblings_html = ""
-        if sibling_notes:
-            parts = []
-            for sn in sibling_notes:
-                who = _xml_escape(sn.get("submitter_name") or "someone")
-                origin = sn.get("source_server") or ""
-                origin_html = f' <span style="color:#888;">via {_xml_escape(origin)}</span>' if origin else ""
-                parts.append(
-                    f'<p class="note sibling" style="margin-top:0.5rem;padding-left:0.75rem;border-left:2px solid #333;font-style:italic;color:#ccc;">'
-                    f'<span style="color:#aaa;font-style:normal;">{who}{origin_html}:</span> {_xml_escape(sn["note"])}</p>'
+        def _render_note_row(
+            note_id: str,
+            kind: str,
+            who: str,
+            text: str,
+            origin: str,
+            can_mutate: bool,
+            color_class: str,
+        ) -> str:
+            origin_html = f' <span class="sib-origin">via {_xml_escape(origin)}</span>' if origin else ""
+            actions = ""
+            if can_mutate:
+                actions = (
+                    '<span class="note-actions">'
+                    '<button class="note-action-btn" onclick="beginNoteEdit(this)">edit</button>'
+                    '<button class="note-action-btn note-action-del" onclick="deleteNoteRow(this)">delete</button>'
+                    '</span>'
                 )
-            siblings_html = (
-                f'<section class="detail-section"><h2>Notes</h2>{"".join(parts)}</section>'
+            return (
+                f'<div class="note {color_class}" '
+                f'data-note-id="{_xml_escape(note_id)}" '
+                f'data-note-kind="{kind}" '
+                f'data-resource-id="{resource["id"]}">'
+                f'<span class="note-body">'
+                f'<span class="note-author">{_xml_escape(who)}{origin_html}</span>'
+                f'<span class="note-text">{_xml_escape(text)}</span>'
+                f'</span>'
+                f'{actions}'
+                f'</div>'
             )
+
+        notes_html_parts: list[str] = []
+        primary_note = resource.get("note") or ""
+        is_submitter = submitted_by == viewer_id
+        is_local = not source_server
+        if primary_note:
+            primary_class = "note-local-mine" if is_submitter and is_local else ("note-remote-mine" if is_submitter else "note-other")
+            notes_html_parts.append(
+                _render_note_row(
+                    note_id="",
+                    kind="primary",
+                    who=submitter_name,
+                    text=primary_note,
+                    origin="",
+                    can_mutate=is_submitter,
+                    color_class=primary_class,
+                )
+            )
+        for sn in sibling_notes or []:
+            sib_is_mine = bool(sn.get("can_mutate"))
+            sib_class = "sibling note-local-mine" if sib_is_mine else "sibling note-other"
+            notes_html_parts.append(
+                _render_note_row(
+                    note_id=sn.get("id", ""),
+                    kind="sibling",
+                    who=sn.get("submitter_name") or "someone",
+                    text=sn.get("note") or "",
+                    origin=sn.get("source_server") or "",
+                    can_mutate=sib_is_mine,
+                    color_class=sib_class,
+                )
+            )
+        notes_html = "".join(notes_html_parts)
+
+        add_note_form_html = f"""<div class="add-note-form">
+  <textarea class="edit-input" placeholder="Your note…"></textarea>
+  <div class="edit-buttons">
+    <button class="action-btn save-btn" onclick="submitNewNote('{resource["id"]}', this.closest('.add-note-form').querySelector('textarea'), this.closest('.add-note-form'), this.closest('.card'))">Post note</button>
+    <button class="action-btn" onclick="this.closest('.add-note-form').querySelector('textarea').value = ''">Cancel</button>
+  </div>
+</div>"""
+
+        star_count = int(reaction_state.get("star_count", 0))
+        thumbsup_count = int(reaction_state.get("thumbsup_count", 0))
+        viewer_starred = "true" if reaction_state.get("viewer_starred") else "false"
+        viewer_thumbsup = "true" if reaction_state.get("viewer_thumbsup") else "false"
+        action_buttons = []
+        if is_external_url:
+            action_buttons.append(
+                f'<a class="action-btn" href="{_xml_escape(url)}" target="_blank" rel="noopener" data-dugg-resource-id="{resource["id"]}">Open Original</a>'
+            )
+            action_buttons.append(
+                f'<button class="action-btn" onclick="shareResource({json.dumps(url)}, {json.dumps(title)})">Share</button>'
+            )
+        action_buttons.append(
+            f"""<button class="action-btn reaction-btn" onclick="toggleReaction(this)" data-resource-id="{resource["id"]}" data-reaction-type="star" data-active="{viewer_starred}" data-count="{star_count}" aria-pressed="{viewer_starred}">
+  <span class="reaction-icon" aria-hidden="true">⭐</span>
+  <span class="reaction-label">Star</span>
+  <span class="reaction-count">{star_count}</span>
+</button>"""
+        )
+        action_buttons.append(
+            f"""<button class="action-btn reaction-btn" onclick="toggleReaction(this)" data-resource-id="{resource["id"]}" data-reaction-type="thumbsup" data-active="{viewer_thumbsup}" data-count="{thumbsup_count}" aria-pressed="{viewer_thumbsup}">
+  <span class="reaction-icon" aria-hidden="true">👍</span>
+  <span class="reaction-label">Thumbsup</span>
+  <span class="reaction-count">{thumbsup_count}</span>
+</button>"""
+        )
+        actions_html = f'<div class="item-actions detail-actions">{"".join(action_buttons)}</div>'
 
         description_html = (
             f'<section class="detail-section"><h2>Description</h2>'
@@ -3140,17 +3252,19 @@ loadReadStateCache();
         back_html = '<p class="detail-back"><a href="/feed">← Back to feed</a></p>'
 
         body = f"""{back_html}
-<article class="detail">
+<article class="card detail" id="item-{resource["id"]}" data-resource-id="{resource["id"]}" data-collection="{_xml_escape(collection_id)}" data-source-server="{_xml_escape(source_server)}" data-url="{_xml_escape(url)}" data-read-state="read" data-source-type="{_xml_escape(source_type or "other")}">
   {thumb_html}
-  <h1>{_xml_escape(title)}</h1>
-  {f'<p class="meta detail-meta">{meta_html}</p>' if meta_html else ""}
-  {open_link_html}
-  {note_html}
-  {siblings_html}
-  {description_html}
-  {body_section_html}
-  {tags_html}
-</article>"""
+  <div class="card-body">
+    <h1>{_xml_escape(title)}</h1>
+    {f'<p class="meta detail-meta">{meta_html}</p>' if meta_html else ""}
+    {actions_html}
+    <section class="detail-section notes-block"><h2>Notes</h2>{notes_html}{add_note_form_html}</section>
+    {description_html}
+    {body_section_html}
+    {tags_html}
+  </div>
+</article>
+{_interactive_card_js()}"""
         return _html_page(_xml_escape(title), body, wide=True)
 
     def _render_skill_page(
@@ -3235,8 +3349,18 @@ loadReadStateCache();
             return HTMLResponse(_html_page("Not Found", "<h1>Not found</h1>"), status_code=404)
 
         siblings = d.list_resource_notes(resource["id"])
+        for sn in siblings:
+            sn["can_mutate"] = d.viewer_owns_note(sn, user["id"])
+        reaction_state = _batch_feed_reactions(d, [resource["id"]], user["id"]).get(resource["id"], {})
         d.mark_read(user["id"], resource["id"], "web_detail")
-        return HTMLResponse(_render_resource(resource, sibling_notes=siblings))
+        return HTMLResponse(
+            _render_resource(
+                resource,
+                sibling_notes=siblings,
+                reaction_state=reaction_state,
+                viewer_id=user["id"],
+            )
+        )
 
     async def handle_resource_unlock(request: Request):
         """POST /r/{resource_id}/unlock — legacy alias for /session/unlock with resource return_to.

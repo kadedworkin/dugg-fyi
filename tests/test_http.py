@@ -1989,6 +1989,56 @@ def test_resource_page_marks_read_on_render(client, db_path, user):
     assert read_state["source"] == "web_detail"
 
 
+def test_resource_page_detail_renders_interactive_controls(client, db_path, user):
+    c, _ = client
+    d = DuggDB(db_path)
+    coll_id = d.ensure_default_collection(user["id"])
+    resource = d.add_resource(
+        url="https://example.com/detail",
+        collection_id=coll_id,
+        submitted_by=user["id"],
+        title="Detail Page",
+        note="primary note",
+        description="Detailed description",
+        transcript="first line\nsecond line",
+        source_type="article",
+        author="Ada",
+    )
+    d.add_resource_note(
+        resource["id"],
+        "sibling note",
+        submitter_user_id=user["id"],
+        submitter_name=user["name"],
+    )
+    hidden = d.add_resource(
+        url="dugg://content/secret-detail",
+        collection_id=coll_id,
+        submitted_by=user["id"],
+        title="Secret Detail",
+        description="Private description",
+        transcript="private line",
+        source_type="email",
+        author="Ada",
+    )
+    d.close()
+
+    c.cookies.set("dugg_key", user["api_key"])
+    resp = c.get(f"/r/{resource['id']}")
+    assert resp.status_code == 200
+    html = resp.text
+    assert 'data-reaction-type="star"' in html
+    assert 'data-reaction-type="thumbsup"' in html
+    assert 'shareResource(' in html
+    assert 'class="add-note-form"' in html
+    assert 'class="note-action-btn note-action-del"' in html
+
+    hidden_resp = c.get(f"/r/{hidden['id']}")
+    assert hidden_resp.status_code == 200
+    hidden_html = hidden_resp.text
+    assert "Open Original" not in hidden_html
+    assert 'onclick="shareResource(' not in hidden_html
+
+
 def test_resource_unlock_invalid_key(client, db_path, user):
     c, _ = client
     res_id = _make_pasted_resource(db_path, user)
