@@ -1504,8 +1504,17 @@ async function doSetup() {{
                 is_read = r["id"] in read_states
                 read_state = "read" if is_read else "unread"
                 read_card_class = " is-read" if is_read else ""
-                mark_read_active = "true" if is_read else "false"
-                mark_unread_active = "false" if is_read else "true"
+                read_button_html = (
+                    f"""<button class="action-btn reaction-btn read-state-btn mark-unread-btn" onclick="markUnread(this)" data-resource-id="{r["id"]}" data-active="true" aria-pressed="true">
+        <span class="reaction-icon" aria-hidden="true">📚</span>
+        <span class="reaction-label">Mark Unread</span>
+      </button>"""
+                    if is_read
+                    else f"""<button class="action-btn reaction-btn read-state-btn mark-read-btn" onclick="markRead(this)" data-resource-id="{r["id"]}" data-active="false" aria-pressed="false">
+        <span class="reaction-icon" aria-hidden="true">📖</span>
+        <span class="reaction-label">Mark Read</span>
+      </button>"""
+                )
 
                 items_html += f"""<div class="card{read_card_class}" id="item-{r["id"]}" data-collection="{coll_id}" data-source-server="{_xml_escape(source_srv)}" data-url="{_xml_escape(r['url'])}" data-resource-id="{r["id"]}" data-read-state="{read_state}" data-source-type="{_xml_escape(source_type or "other")}">
   {f'<div class="card-media">{thumb_html}</div>' if thumb_html else ""}
@@ -1516,16 +1525,9 @@ async function doSetup() {{
     <div class="notes-block">{notes_html}</div>
     {tags_html}
     <div class="item-actions">
-      <button class="action-btn reaction-btn read-state-btn mark-read-btn{" is-active" if is_read else ""}" onclick="markRead(this)" data-resource-id="{r["id"]}" data-active="{mark_read_active}" aria-pressed="{mark_read_active}">
-        <span class="reaction-icon" aria-hidden="true">📖</span>
-        <span class="reaction-label">Mark Read</span>
-      </button>
-      <button class="action-btn reaction-btn read-state-btn mark-unread-btn{" is-active" if not is_read else ""}" onclick="markUnread(this)" data-resource-id="{r["id"]}" data-active="{mark_unread_active}" aria-pressed="{mark_unread_active}">
-        <span class="reaction-icon" aria-hidden="true">📚</span>
-        <span class="reaction-label">Mark Unread</span>
-      </button>
+      {read_button_html}
       <button class="action-btn reaction-btn" onclick="toggleReaction(this)" data-resource-id="{r["id"]}" data-reaction-type="star" data-active="{viewer_starred}" data-count="{star_count}" aria-pressed="{viewer_starred}">
-        <span class="reaction-icon" aria-hidden="true">{"★" if viewer_starred == "true" else "☆"}</span>
+        <span class="reaction-icon" aria-hidden="true">★</span>
         <span class="reaction-label">Star</span>
         <span class="reaction-count">{star_count}</span>
       </button>
@@ -1611,11 +1613,23 @@ function getFeedCards() {
   return Array.from(document.querySelectorAll('.card[data-resource-id]'));
 }
 
-function updateReadToggleButton(btn, isActive) {
-  if (!btn) return;
-  btn.dataset.active = isActive ? 'true' : 'false';
-  btn.classList.toggle('is-active', isActive);
-  btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+function renderReadStateButton(resourceId, isRead, isPending) {
+  const buttonClass = isRead ? 'mark-unread-btn is-active' : 'mark-read-btn';
+  const onClick = isRead ? 'markUnread(this)' : 'markRead(this)';
+  const active = isRead ? 'true' : 'false';
+  const icon = isRead ? '📚' : '📖';
+  const label = isRead ? 'Mark Unread' : 'Mark Read';
+  return '<button class="action-btn reaction-btn read-state-btn ' + buttonClass + '"'
+    + ' onclick="' + onClick + '"'
+    + ' data-resource-id="' + resourceId + '"'
+    + ' data-active="' + active + '"'
+    + ' data-pending="' + (isPending ? 'true' : 'false') + '"'
+    + ' aria-pressed="' + active + '"'
+    + (isPending ? ' disabled' : '')
+    + '>'
+    + '<span class="reaction-icon" aria-hidden="true">' + icon + '</span>'
+    + '<span class="reaction-label">' + label + '</span>'
+    + '</button>';
 }
 
 function cardMatchesActiveFilter(card) {
@@ -1664,15 +1678,16 @@ function updateCardReadUi(card) {
   const resourceId = card.dataset.resourceId;
   const isRead = readResourceIds.has(resourceId);
   const state = card.querySelector('.meta-read-state');
-  const markReadBtn = card.querySelector('.mark-read-btn');
-  const markUnreadBtn = card.querySelector('.mark-unread-btn');
+  const readStateBtn = card.querySelector('.read-state-btn');
+  const isPending = readStateBtn && readStateBtn.dataset.pending === 'true';
   card.classList.toggle('is-read', isRead);
   card.dataset.readState = isRead ? 'read' : 'unread';
   if (state) {
     state.dataset.state = isRead ? 'read' : 'unread';
   }
-  updateReadToggleButton(markReadBtn, isRead);
-  updateReadToggleButton(markUnreadBtn, !isRead);
+  if (readStateBtn) {
+    readStateBtn.outerHTML = renderReadStateButton(resourceId, isRead, isPending);
+  }
 }
 
 function updateReactionButton(btn) {
@@ -1689,7 +1704,7 @@ function updateReactionButton(btn) {
   btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
   if (icon) {
     icon.textContent = reactionType === 'star'
-      ? (isActive ? '★' : '☆')
+      ? '★'
       : '👍';
   }
   if (countEl) {
@@ -1871,8 +1886,11 @@ async function setReadState(btn, shouldRead) {
     wasRead ? markCardRead(resourceId) : markCardUnreadLocal(resourceId);
     alert('Error: ' + e.message);
   } finally {
-    btn.dataset.pending = 'false';
-    btn.disabled = false;
+    const currentBtn = document.querySelector('#item-' + resourceId + ' .read-state-btn');
+    if (currentBtn) {
+      currentBtn.dataset.pending = 'false';
+      currentBtn.disabled = false;
+    }
   }
 }
 
