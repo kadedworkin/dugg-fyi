@@ -804,7 +804,7 @@ async function doSetup() {{
   .search-bar {{ margin-bottom: 0.85rem; display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }}
   .search-input-wrap {{ flex: 1 1 320px; position: relative; min-width: 0; }}
   .search-bar input {{ width: 100%; padding: 0.6rem 2.2rem 0.6rem 0.8rem; background: #111; border: 1px solid #333;
-                       border-radius: 8px; color: #fff; font-size: 0.9rem; }}
+                       border-radius: 8px; color: #fff; font-size: 0.9rem; margin-bottom: 0; }}
   .search-bar input:focus {{ outline: none; border-color: #6366f1; }}
   .search-bar input::placeholder {{ color: #555; }}
   .search-actions {{ display: inline-flex; gap: 0.5rem; align-items: center; }}
