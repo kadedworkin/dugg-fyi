@@ -1527,7 +1527,7 @@ async function doSetup() {{
     <div class="item-actions">
       {read_button_html}
       <button class="action-btn reaction-btn" onclick="toggleReaction(this)" data-resource-id="{r["id"]}" data-reaction-type="star" data-active="{viewer_starred}" data-count="{star_count}" aria-pressed="{viewer_starred}">
-        <span class="reaction-icon" aria-hidden="true">★</span>
+        <span class="reaction-icon" aria-hidden="true">⭐</span>
         <span class="reaction-label">Star</span>
         <span class="reaction-count">{star_count}</span>
       </button>
@@ -1614,7 +1614,7 @@ function getFeedCards() {
 }
 
 function renderReadStateButton(resourceId, isRead, isPending) {
-  const buttonClass = isRead ? 'mark-unread-btn is-active' : 'mark-read-btn';
+  const buttonClass = isRead ? 'mark-unread-btn' : 'mark-read-btn';
   const onClick = isRead ? 'markUnread(this)' : 'markRead(this)';
   const active = isRead ? 'true' : 'false';
   const icon = isRead ? '📚' : '📖';
@@ -1704,7 +1704,7 @@ function updateReactionButton(btn) {
   btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
   if (icon) {
     icon.textContent = reactionType === 'star'
-      ? '★'
+      ? '⭐'
       : '👍';
   }
   if (countEl) {

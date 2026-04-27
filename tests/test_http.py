@@ -2266,7 +2266,7 @@ def test_feed_html_includes_read_state_markup_and_reaction_buttons(client, db_pa
     assert 'class="action-btn reaction-btn read-state-btn mark-read-btn' in resp.text
     assert 'class="action-btn reaction-btn read-state-btn mark-unread-btn' not in resp.text
     assert 'data-reaction-type="star"' in resp.text
-    assert '<span class="reaction-icon" aria-hidden="true">★</span>' in resp.text
+    assert '<span class="reaction-icon" aria-hidden="true">⭐</span>' in resp.text
     assert '☆' not in resp.text
     assert 'data-reaction-type="thumbsup"' in resp.text
     assert '>Thumbs Up<' in resp.text
