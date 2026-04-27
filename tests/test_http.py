@@ -2322,6 +2322,25 @@ def test_feed_html_includes_read_state_markup_and_reaction_buttons(client, db_pa
     assert '>Thumbs Up<' in resp.text
 
 
+def test_feed_html_renders_multiline_primary_note_with_note_text_span(client, db_path, user):
+    c, _ = client
+    _seed_resource(
+        db_path,
+        user,
+        url="https://example.com/feed-multiline-note",
+        title="Feed Multiline Note",
+        note="Step 1: foo\nStep 2: bar",
+    )
+
+    c.cookies.set("dugg_key", user["api_key"])
+    resp = c.get("/feed")
+    assert resp.status_code == 200
+    html = resp.text
+    assert 'class="note-text"' in html
+    assert "Step 1: foo" in html
+    assert "Step 2: bar" in html
+
+
 def test_feed_html_q_and_filter_render_server_side_results(client, db_path, user):
     c, _ = client
     starred_rust_id = _seed_resource(db_path, user, url="https://example.com/feed-rust-star", title="rust systems", note="")

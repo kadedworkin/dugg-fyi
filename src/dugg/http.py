@@ -787,7 +787,10 @@ async function doSetup() {{
   .card .note {{ font-size: 0.85rem; color: #aaa; margin-top: 0.5rem; padding: 0.6rem 0.8rem;
                 border-radius: 6px; border-left: 3px solid #333; background: #111;
                 display: flex; align-items: flex-start; gap: 0.5rem; flex-wrap: wrap; }}
-  .card .note-body {{ flex: 1 1 auto; min-width: 0; word-break: break-word; }}
+  .note-body {{ display: block; min-width: 0; word-break: break-word; }}
+  .note-author {{ display: block; margin-bottom: 0.35rem; font-size: 0.78rem; font-weight: 600; color: #888; }}
+  .note-text {{ display: block; color: #d4d4d8; line-height: 1.65; white-space: pre-wrap; }}
+  .card .note-body {{ flex: 1 1 100%; }}
   .card .note-actions {{ flex: 0 0 auto; display: flex; gap: 0.25rem; opacity: 0.4; transition: opacity 0.15s; }}
   .card .note:hover .note-actions {{ opacity: 1; }}
   .card .note-action-btn {{ font-size: 0.7rem; padding: 0.1rem 0.4rem; background: transparent;
@@ -894,9 +897,6 @@ async function doSetup() {{
   .detail .notes-block {{ margin-top: 1.5rem; }}
   .detail .note {{ margin-top: 0.7rem; padding: 0.8rem 0.95rem; border-left-width: 2px; background: #111; }}
   .detail .note:first-of-type {{ margin-top: 0; }}
-  .detail .note-body {{ display: block; }}
-  .detail .note-author {{ display: block; margin-bottom: 0.35rem; font-size: 0.78rem; font-weight: 600; color: #888; }}
-  .detail .note-text {{ display: block; color: #d4d4d8; line-height: 1.65; white-space: pre-wrap; }}
   .detail .note-actions {{ opacity: 1; }}
   .detail .add-note-form {{ margin-top: 1rem; padding: 0; border: 0; background: transparent; }}
   .detail-section {{ margin-top: 1.5rem; }}
