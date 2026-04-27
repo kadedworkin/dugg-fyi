@@ -497,6 +497,7 @@ class DuggDB:
     def _migrate(self):
         """Run idempotent schema migrations for new columns."""
         self._ensure_read_states_schema()
+        self._rebuild_read_states_table()
         self._migrate_tap_reactions_to_read_states()
         self._rebuild_reactions_table_without_tap()
         inst_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(dugg_instances)").fetchall()}
@@ -654,10 +655,11 @@ class DuggDB:
 
         self.conn.commit()
 
-    def _ensure_read_states_schema(self):
+    def _read_states_table_sql(self, *, if_not_exists: bool) -> str:
+        clause = "IF NOT EXISTS " if if_not_exists else ""
         read_sources_sql = ", ".join(f"'{source}'" for source in READ_STATE_SOURCES)
-        self.conn.executescript("""
-            CREATE TABLE IF NOT EXISTS read_states (
+        return """
+            CREATE TABLE """ + clause + """read_states (
                 id TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL,
                 resource_id TEXT NOT NULL,
@@ -668,9 +670,44 @@ class DuggDB:
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
                 UNIQUE(user_id, resource_id)
             );
+        """
+
+    def _read_states_indexes_sql(self) -> str:
+        return """
             CREATE INDEX IF NOT EXISTS idx_read_states_user_resource ON read_states(user_id, resource_id);
             CREATE INDEX IF NOT EXISTS idx_read_states_user_read_at ON read_states(user_id, read_at DESC);
-        """)
+        """
+
+    def _ensure_read_states_schema(self):
+        self.conn.executescript(
+            self._read_states_table_sql(if_not_exists=True)
+            + self._read_states_indexes_sql()
+        )
+
+    def _rebuild_read_states_table(self):
+        row = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='read_states'"
+        ).fetchone()
+        sql = (row[0] or "") if row else ""
+        needs_rebuild = not row or any(source not in sql for source in READ_STATE_SOURCES)
+        if not needs_rebuild:
+            return
+        rebuild_sql = self._read_states_table_sql(if_not_exists=False) + self._read_states_indexes_sql()
+        if row:
+            rebuild_sql = (
+                self._read_states_table_sql(if_not_exists=False)
+                + """
+                INSERT INTO read_states (id, user_id, resource_id, read_at, last_read_at, source)
+                    SELECT id, user_id, resource_id, read_at, last_read_at, source FROM read_states_old;
+                DROP TABLE read_states_old;
+                """
+                + self._read_states_indexes_sql()
+            )
+        with self.conn:
+            self.conn.execute("DROP TABLE IF EXISTS read_states_old")
+            if row:
+                self.conn.execute("ALTER TABLE read_states RENAME TO read_states_old")
+            self.conn.executescript(rebuild_sql)
 
     def _migrate_tap_reactions_to_read_states(self):
         reaction_table = self.conn.execute(

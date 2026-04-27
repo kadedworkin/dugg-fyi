@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 import dugg.db as db_module
-from dugg.db import DuggDB
+from dugg.db import DuggDB, READ_STATE_SOURCES
 
 
 @pytest.fixture
@@ -378,6 +378,58 @@ def test_tap_migration_runs_once_and_is_idempotent(tmp_path):
     assert migrated_again.conn.execute("SELECT COUNT(*) FROM read_states").fetchone()[0] == 1
     assert migrated_again.conn.execute("SELECT COUNT(*) FROM reactions").fetchone()[0] == 0
     migrated_again.close()
+
+
+def test_read_states_check_constraint_rebuilds_when_stale(tmp_path):
+    db_path = tmp_path / "stale-read-states.db"
+    d = DuggDB(db_path)
+    user = d.create_user("Kade")
+    coll = d.create_collection("AI", user["id"])
+    res = d.add_resource(url="https://example.com/stale-read-state", collection_id=coll["id"], submitted_by=user["id"])
+    d.close()
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    conn.execute("DROP INDEX IF EXISTS idx_read_states_user_resource")
+    conn.execute("DROP INDEX IF EXISTS idx_read_states_user_read_at")
+    conn.execute("DROP TABLE IF EXISTS read_states")
+    conn.execute("""
+        CREATE TABLE read_states (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            resource_id TEXT NOT NULL,
+            read_at TEXT NOT NULL,
+            last_read_at TEXT NOT NULL,
+            source TEXT NOT NULL CHECK(source IN ('migration')),
+            FOREIGN KEY (resource_id) REFERENCES resources(id) ON DELETE CASCADE,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+            UNIQUE(user_id, resource_id)
+        )
+    """)
+    conn.execute(
+        """INSERT INTO read_states (id, user_id, resource_id, read_at, last_read_at, source)
+           VALUES (?, ?, ?, ?, ?, 'migration')""",
+        ("legacyread01", user["id"], res["id"], "2026-04-24T12:00:00+00:00", "2026-04-24T12:00:00+00:00"),
+    )
+    conn.commit()
+    conn.close()
+
+    migrated = DuggDB(db_path)
+    stored_sql = migrated.conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='read_states'"
+    ).fetchone()[0]
+    for source in READ_STATE_SOURCES:
+        assert source in stored_sql
+
+    preserved = migrated.get_read_state(user["id"], res["id"])
+    assert preserved is not None
+    assert preserved["id"] == "legacyread01"
+    assert preserved["source"] == "migration"
+
+    res2 = migrated.add_resource(url="https://example.com/web-button", collection_id=coll["id"], submitted_by=user["id"])
+    inserted = migrated.mark_read(user["id"], res2["id"], "web_button")
+    assert inserted["source"] == "web_button"
+    migrated.close()
 
 
 def test_mark_read_is_idempotent_and_first_source_sticky(db, monkeypatch):
