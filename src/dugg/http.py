@@ -860,6 +860,32 @@ async function doSetup() {{
   .step-example code {{ font-size: 0.8rem; color: #4ade80; display: block; word-break: break-all; }}
   .step-label {{ font-size: 0.75rem; color: #666; margin-bottom: 0.25rem; text-transform: uppercase;
                  letter-spacing: 0.03em; }}
+  .card[data-resource-id] {{ cursor: pointer; }}
+  .card[data-resource-id] a, .card[data-resource-id] button,
+  .card[data-resource-id] textarea, .card[data-resource-id] input,
+  .card[data-resource-id] form, .card[data-resource-id] .item-actions,
+  .card[data-resource-id] .note-actions, .card[data-resource-id] .add-note-form,
+  .card[data-resource-id] .note-edit-form {{ cursor: auto; }}
+  .search-bar .action-btn {{ padding: 0.6rem 1.1rem; font-size: 0.9rem; line-height: 1.2;
+                              border-radius: 8px; }}
+  .filter-row.category-row {{ margin-top: -0.25rem; margin-bottom: 1.25rem; }}
+  .filter-row.category-row .filter-pill {{ font-size: 0.78rem; padding: 0.3rem 0.7rem; }}
+  .detail {{ max-width: 760px; margin: 0 auto; padding: 0 0.5rem; }}
+  .detail h1 {{ font-size: 1.6rem; margin: 0 0 0.4rem; line-height: 1.3; }}
+  .detail .detail-meta {{ font-size: 0.85rem; color: #888; margin-bottom: 0.6rem; }}
+  .detail .detail-source-url a {{ color: #93c5fd; font-size: 0.85rem; text-decoration: none; }}
+  .detail .detail-source-url a:hover {{ text-decoration: underline; }}
+  .detail-media {{ margin-bottom: 1rem; border-radius: 12px; overflow: hidden; background: #111; }}
+  .detail-media img {{ display: block; width: 100%; height: auto; max-height: 420px; object-fit: cover; }}
+  .detail-section {{ margin-top: 1.5rem; }}
+  .detail-section h2 {{ font-size: 0.78rem; color: #888; text-transform: uppercase; letter-spacing: 0.06em;
+                         font-weight: 600; margin: 0 0 0.6rem; }}
+  .detail-description {{ font-size: 0.95rem; color: #cbd5e1; line-height: 1.6; margin: 0; }}
+  .detail-body {{ font-size: 0.92rem; color: #cbd5e1; line-height: 1.7; white-space: pre-wrap;
+                   word-break: break-word; }}
+  .detail-back {{ margin: 0 0 1rem; }}
+  .detail-back a {{ color: #93c5fd; font-size: 0.85rem; text-decoration: none; }}
+  .detail-back a:hover {{ text-decoration: underline; }}
 </style>
 </head>
 <body><div class="{wrap_class}">{body}</div></body>
@@ -1480,7 +1506,7 @@ async function doSetup() {{
                 mark_read_active = "true" if is_read else "false"
                 mark_unread_active = "false" if is_read else "true"
 
-                items_html += f"""<div class="card{read_card_class}" id="item-{r["id"]}" data-collection="{coll_id}" data-source-server="{_xml_escape(source_srv)}" data-url="{_xml_escape(r['url'])}" data-resource-id="{r["id"]}" data-read-state="{read_state}">
+                items_html += f"""<div class="card{read_card_class}" id="item-{r["id"]}" data-collection="{coll_id}" data-source-server="{_xml_escape(source_srv)}" data-url="{_xml_escape(r['url'])}" data-resource-id="{r["id"]}" data-read-state="{read_state}" data-source-type="{_xml_escape(source_type or "other")}">
   {f'<div class="card-media">{thumb_html}</div>' if thumb_html else ""}
   <div class="card-body">
     <h3><a href="{url}" target="_blank" rel="noopener" data-dugg-resource-id="{r["id"]}">{_xml_escape(title)}</a> {type_badge}</h3>
@@ -1490,11 +1516,11 @@ async function doSetup() {{
     {tags_html}
     <div class="item-actions">
       <button class="action-btn reaction-btn read-state-btn mark-read-btn{" is-active" if is_read else ""}" onclick="markRead(this)" data-resource-id="{r["id"]}" data-active="{mark_read_active}" aria-pressed="{mark_read_active}">
-        <span class="reaction-icon" aria-hidden="true">✓</span>
+        <span class="reaction-icon" aria-hidden="true">📖</span>
         <span class="reaction-label">Mark Read</span>
       </button>
       <button class="action-btn reaction-btn read-state-btn mark-unread-btn{" is-active" if not is_read else ""}" onclick="markUnread(this)" data-resource-id="{r["id"]}" data-active="{mark_unread_active}" aria-pressed="{mark_unread_active}">
-        <span class="reaction-icon" aria-hidden="true">•</span>
+        <span class="reaction-icon" aria-hidden="true">📚</span>
         <span class="reaction-label">Mark Unread</span>
       </button>
       <button class="action-btn reaction-btn" onclick="toggleReaction(this)" data-resource-id="{r["id"]}" data-reaction-type="star" data-active="{viewer_starred}" data-count="{star_count}" aria-pressed="{viewer_starred}">
@@ -1503,7 +1529,7 @@ async function doSetup() {{
         <span class="reaction-count">{star_count}</span>
       </button>
       <button class="action-btn reaction-btn" onclick="toggleReaction(this)" data-resource-id="{r["id"]}" data-reaction-type="thumbsup" data-active="{viewer_thumbsup}" data-count="{thumbsup_count}" aria-pressed="{viewer_thumbsup}">
-        <span class="reaction-icon" aria-hidden="true">{"👍" if viewer_thumbsup == "true" else "◦"}</span>
+        <span class="reaction-icon" aria-hidden="true">👍</span>
         <span class="reaction-label">Thumbs Up</span>
         <span class="reaction-count">{thumbsup_count}</span>
       </button>
@@ -1552,6 +1578,25 @@ async function doSetup() {{
             classes = "filter-pill is-active" if is_active else "filter-pill"
             filter_pills.append(f'<a class="{classes}" href="{href}">{filter_label}</a>')
         filter_row = f'<div class="filter-row">{"".join(filter_pills)}</div>'
+
+        # Source-type category row (mirrors iOS): "All" + one pill per source_type
+        # present in the current feed, derived dynamically. Client-side filter only.
+        category_row = ""
+        seen_types: dict[str, str] = {}
+        for r in feed:
+            st = (r.get("source_type") or "other").lower()
+            if st in seen_types:
+                continue
+            hints = hints_for(st, r.get("url") or "")
+            label = (hints or {}).get("badge", {}).get("label") if hints else None
+            seen_types[st] = label or st.title()
+        if len(seen_types) >= 2:
+            cat_pills = ['<button type="button" class="filter-pill is-active" data-category="__all__">All</button>']
+            for st, label in sorted(seen_types.items(), key=lambda kv: kv[1].lower()):
+                cat_pills.append(
+                    f'<button type="button" class="filter-pill" data-category="{_xml_escape(st)}">{_xml_escape(label)}</button>'
+                )
+            category_row = f'<div class="filter-row category-row">{"".join(cat_pills)}</div>'
         feed_js = """
 <script>
 // Same-origin fetch auto-includes the dugg_key cookie, so no X-Dugg-Key header
@@ -1576,24 +1621,42 @@ function cardMatchesActiveFilter(card) {
   if (!card) return true;
   const resourceId = card.dataset.resourceId;
   const isRead = readResourceIds.has(resourceId);
-  if (ACTIVE_FILTER === 'unread') return !isRead;
-  if (ACTIVE_FILTER === 'read') return isRead;
+  if (ACTIVE_FILTER === 'unread' && isRead) return false;
+  if (ACTIVE_FILTER === 'read' && !isRead) return false;
   if (ACTIVE_FILTER === 'starred') {
     const starBtn = card.querySelector('[data-reaction-type="star"]');
-    return !!starBtn && starBtn.dataset.active === 'true';
+    if (!starBtn || starBtn.dataset.active !== 'true') return false;
   }
   if (ACTIVE_FILTER === 'thumbsup') {
     const thumbBtn = card.querySelector('[data-reaction-type="thumbsup"]');
-    return !!thumbBtn && thumbBtn.dataset.active === 'true';
+    if (!thumbBtn || thumbBtn.dataset.active !== 'true') return false;
+  }
+  if (ACTIVE_CATEGORY !== '__all__') {
+    const cardType = (card.dataset.sourceType || '').toLowerCase();
+    if (cardType !== ACTIVE_CATEGORY) return false;
   }
   return true;
 }
+
+let ACTIVE_CATEGORY = '__all__';
 
 function applyActiveFeedFilter() {
   getFeedCards().forEach(card => {
     card.style.display = cardMatchesActiveFilter(card) ? '' : 'none';
   });
 }
+
+function attachCategoryFilter() {
+  const pills = document.querySelectorAll('.filter-row.category-row .filter-pill');
+  pills.forEach(pill => {
+    pill.addEventListener('click', function() {
+      ACTIVE_CATEGORY = pill.dataset.category || '__all__';
+      pills.forEach(p => p.classList.toggle('is-active', p === pill));
+      applyActiveFeedFilter();
+    });
+  });
+}
+attachCategoryFilter();
 
 function updateCardReadUi(card) {
   if (!card) return;
@@ -1623,7 +1686,7 @@ function updateReactionButton(btn) {
   if (icon) {
     icon.textContent = reactionType === 'star'
       ? (isActive ? '★' : '☆')
-      : (isActive ? '👍' : '◦');
+      : '👍';
   }
   if (countEl) {
     countEl.textContent = String(count);
@@ -1967,6 +2030,31 @@ async function syncNow(e) {
 }
 
 attachOutboundReadBeacons();
+function attachCardDetailNavigation() {
+  getFeedCards().forEach(card => {
+    if (card.dataset.detailNavBound === '1') return;
+    card.dataset.detailNavBound = '1';
+    card.addEventListener('click', function(e) {
+      // Don't intercept clicks on interactive children (links, buttons, form fields)
+      // or anywhere inside the action rows / note editors.
+      if (e.target.closest('a, button, input, textarea, label, select, form,'
+          + ' .item-actions, .note-actions, .add-note-form, .note-edit-form')) {
+        return;
+      }
+      const resourceId = card.dataset.resourceId;
+      if (!resourceId) return;
+      // Mod-click and middle-click → open in new tab; plain click → in-place navigate.
+      const newTab = e.metaKey || e.ctrlKey || e.shiftKey || e.button === 1;
+      const href = '/r/' + encodeURIComponent(resourceId);
+      if (newTab) {
+        window.open(href, '_blank', 'noopener');
+      } else {
+        window.location.href = href;
+      }
+    });
+  });
+}
+attachCardDetailNavigation();
 getFeedCards().forEach(card => {
   if (card.dataset.readState === 'read') {
     readResourceIds.add(card.dataset.resourceId);
@@ -2007,6 +2095,7 @@ loadReadStateCache();
 {topic_html}
 {search_bar}
 {filter_row}
+{category_row}
 {items_html}
 {feed_js}"""
         return HTMLResponse(_html_page(page_title, body, wide=True))
@@ -2920,19 +3009,49 @@ loadReadStateCache();
 
     def _render_resource(resource: dict, sibling_notes: Optional[list] = None) -> str:
         title = resource.get("title") or "Untitled"
-        transcript = resource.get("transcript") or ""
+        url = resource.get("url") or ""
+        # Some content rows live at synthetic dugg://content URLs; don't expose those as a clickable link.
+        is_external_url = bool(url) and not url.startswith("dugg://")
+        transcript = resource.get("transcript") or resource.get("body") or ""
+        description = resource.get("description") or ""
+        thumbnail = resource.get("thumbnail") or ""
         author = resource.get("author") or ""
+        source_type = (resource.get("source_type") or "").lower()
         created = (resource.get("created_at") or "")[:10]
         pub_date = _resource_pub_date(resource)
         note = resource.get("note") or ""
         tags = resource.get("tags") or []
-        meta_parts = [created]
+
+        meta_parts = []
+        if created:
+            meta_parts.append(created)
         if pub_date and pub_date != created:
             meta_parts.append(f"published {pub_date}")
         if author:
             meta_parts.append(author)
+        if source_type:
+            meta_parts.append(source_type)
         meta_html = " · ".join(meta_parts)
-        note_html = f'<p class="note" style="margin-top:1rem;font-style:italic;">{_xml_escape(note)}</p>' if note else ""
+
+        thumb_html = (
+            f'<div class="detail-media"><img src="{_xml_escape(thumbnail)}" alt="" loading="lazy"></div>'
+            if thumbnail
+            else ""
+        )
+
+        open_link_html = (
+            f'<p class="detail-source-url"><a href="{_xml_escape(url)}" target="_blank" rel="noopener">Open original →</a></p>'
+            if is_external_url
+            else ""
+        )
+
+        note_html = (
+            f'<section class="detail-section"><h2>Your note</h2>'
+            f'<p class="note" style="font-style:italic;">{_xml_escape(note)}</p></section>'
+            if note
+            else ""
+        )
+
         siblings_html = ""
         if sibling_notes:
             parts = []
@@ -2944,16 +3063,59 @@ loadReadStateCache();
                     f'<p class="note sibling" style="margin-top:0.5rem;padding-left:0.75rem;border-left:2px solid #333;font-style:italic;color:#ccc;">'
                     f'<span style="color:#aaa;font-style:normal;">{who}{origin_html}:</span> {_xml_escape(sn["note"])}</p>'
                 )
-            siblings_html = "".join(parts)
-        tags_html = f'<p style="margin-top:0.5rem;font-size:0.8rem;color:#666;">{", ".join(_xml_escape(t) for t in tags)}</p>' if tags else ""
+            siblings_html = (
+                f'<section class="detail-section"><h2>Notes</h2>{"".join(parts)}</section>'
+            )
+
+        description_html = (
+            f'<section class="detail-section"><h2>Description</h2>'
+            f'<p class="detail-description">{_xml_escape(description)}</p></section>'
+            if description
+            else ""
+        )
+
+        body_label = {
+            "youtube": "Transcript",
+            "podcast": "Transcript",
+            "article": "Article",
+            "paste": "Body",
+            "email": "Body",
+        }.get(source_type, "Content")
         content_html = _xml_escape(transcript).replace("\n", "<br>")
-        body = f"""<h1>{_xml_escape(title)}</h1>
-<p class="meta" style="margin-bottom:1rem;">{meta_html}</p>
-{note_html}
-{siblings_html}
-{tags_html}
-<div style="margin-top:1.5rem;line-height:1.6;font-size:0.9rem;color:#ccc;white-space:pre-wrap;word-break:break-word;">{content_html}</div>"""
-        return _html_page(_xml_escape(title), body)
+        body_section_html = (
+            f'<section class="detail-section"><h2>{body_label}</h2>'
+            f'<div class="detail-body">{content_html}</div></section>'
+            if transcript
+            else ""
+        )
+
+        if tags:
+            tag_labels = [t["label"] if isinstance(t, dict) else t for t in tags]
+            tag_spans = "".join(
+                f'<span class="tag">{_xml_escape(t)}</span>' for t in tag_labels
+            )
+            tags_html = (
+                f'<section class="detail-section"><h2>Tags</h2>'
+                f'<div class="card-tags">{tag_spans}</div></section>'
+            )
+        else:
+            tags_html = ""
+
+        back_html = '<p class="detail-back"><a href="/feed">← Back to feed</a></p>'
+
+        body = f"""{back_html}
+<article class="detail">
+  {thumb_html}
+  <h1>{_xml_escape(title)}</h1>
+  {f'<p class="meta detail-meta">{meta_html}</p>' if meta_html else ""}
+  {open_link_html}
+  {note_html}
+  {siblings_html}
+  {description_html}
+  {body_section_html}
+  {tags_html}
+</article>"""
+        return _html_page(_xml_escape(title), body, wide=True)
 
     def _render_skill_page(
         skill: dict,
