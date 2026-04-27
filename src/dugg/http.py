@@ -872,6 +872,7 @@ async function doSetup() {{
                               border-radius: 8px; }}
   .filter-row.category-row {{ margin-top: -0.25rem; margin-bottom: 1.25rem; }}
   .filter-row.category-row .filter-pill {{ font-size: 0.78rem; padding: 0.3rem 0.7rem; }}
+  .filter-row.category-row + .filter-row {{ margin-top: -0.85rem; }}
   .detail {{ max-width: 760px; margin: 0 auto; padding: 0 0.5rem; }}
   .detail h1 {{ font-size: 1.6rem; margin: 0 0 0.4rem; line-height: 1.3; }}
   .detail .detail-meta {{ font-size: 0.85rem; color: #888; margin-bottom: 0.6rem; }}
