@@ -118,7 +118,7 @@ EVENT_TYPES = (
     "resource_added", "resource_published", "resource_deleted",
     "member_joined", "member_banned", "publish_delivered",
     "invite_created", "invite_redeemed", "reaction_added", "reaction_removed",
-    "read_added", "read_removed",
+    "read_added", "read_removed", "note_added",
     "skill_added", "skill_forked", "skill_superseded", "skill_deleted",
 )
 
@@ -154,7 +154,8 @@ class DuggDB:
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 api_key TEXT UNIQUE NOT NULL,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                notifications_seen_at TEXT DEFAULT NULL
             );
 
             CREATE TABLE IF NOT EXISTS collections (
@@ -540,6 +541,10 @@ class DuggDB:
         if "role" not in inv_cols:
             self.conn.execute("ALTER TABLE invite_tokens ADD COLUMN role TEXT DEFAULT 'contributor'")
 
+        user_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(users)").fetchall()}
+        if "notifications_seen_at" not in user_cols:
+            self.conn.execute("ALTER TABLE users ADD COLUMN notifications_seen_at TEXT DEFAULT NULL")
+
         coll_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(collections)").fetchall()}
         if "publish_scope" not in coll_cols:
             self.conn.execute("ALTER TABLE collections ADD COLUMN publish_scope TEXT DEFAULT 'auto'")
@@ -773,7 +778,7 @@ class DuggDB:
         sql = (ev_row[0] or "") if ev_row else ""
         if not ev_row:
             return
-        needs_rebuild = "skill_added" not in sql or "read_added" not in sql or "read_removed" not in sql
+        needs_rebuild = any(event_type not in sql for event_type in EVENT_TYPES)
         if needs_rebuild:
             event_types_sql = ", ".join(f"'{event_type}'" for event_type in EVENT_TYPES)
             # Disable FK enforcement during the rebuild — SQLite's recommended
@@ -1748,6 +1753,12 @@ class DuggDB:
                 (now, tomb["id"]),
             )
             self.conn.commit()
+            self._emit_note_added_event(
+                note_id=tomb["id"],
+                resource_id=resource_id,
+                actor_id=submitter_user_id,
+                actor_name=submitter_name,
+            )
             return {"id": tomb["id"], "resource_id": resource_id, "note": note,
                     "source_server": source_server, "submitter_name": submitter_name,
                     "added_at": now}
@@ -1764,9 +1775,37 @@ class DuggDB:
              note, now),
         )
         self.conn.commit()
+        existing = self.get_resource_note(note_id, include_deleted=True)
+        if existing:
+            self._emit_note_added_event(
+                note_id=note_id,
+                resource_id=resource_id,
+                actor_id=submitter_user_id,
+                actor_name=submitter_name,
+            )
         return {"id": note_id, "resource_id": resource_id, "note": note,
                 "source_server": source_server, "submitter_name": submitter_name,
                 "added_at": now}
+
+    def _emit_note_added_event(self, *, note_id: str, resource_id: str,
+                               actor_id: str = "", actor_name: str = "") -> None:
+        resource = self.get_resource(resource_id)
+        if not resource:
+            return
+        self.emit_event(
+            "note_added",
+            actor_id=actor_id or None,
+            collection_id=resource.get("collection_id"),
+            payload={
+                "resource_id": resource_id,
+                "resource_owner_id": resource.get("submitted_by"),
+                "note_id": note_id,
+                "actor_id": actor_id,
+                "actor_name": actor_name,
+                "resource_title": resource.get("title") or resource.get("url", ""),
+                "resource_url": resource.get("url", ""),
+            },
+        )
 
     def list_resource_notes(self, resource_id: str,
                             include_deleted: bool = False) -> list[dict]:
@@ -3716,15 +3755,15 @@ class DuggDB:
 
         # Reaction events are author-only: only notify the resource's submitter
         payload = event.get("payload", {})
-        if event["event_type"] in {"reaction_added", "reaction_removed"}:
+        if event["event_type"] in {"reaction_added", "reaction_removed", "note_added"}:
             owner_id = payload.get("resource_owner_id")
             if owner_id:
                 hooks = [h for h in hooks if h["user_id"] == owner_id]
             if not hooks:
                 return
-            # Enrich payload with resource details and aggregate counts
+            # Enrich reaction payload with resource details and aggregate counts.
             resource_id = payload.get("resource_id")
-            if resource_id:
+            if resource_id and event["event_type"] in {"reaction_added", "reaction_removed"}:
                 res = self.get_resource(resource_id)
                 if res:
                     payload = dict(payload)
@@ -3945,6 +3984,98 @@ class DuggDB:
             d["payload"] = json.loads(d["payload"]) if d["payload"] else {}
             results.append(d)
         return results
+
+    def get_notifications_seen_at(self, user_id: str) -> Optional[str]:
+        row = self.conn.execute(
+            "SELECT notifications_seen_at FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+        if not row:
+            return None
+        return row["notifications_seen_at"]
+
+    def set_notifications_seen_at(self, user_id: str, seen_at: Optional[str] = None) -> Optional[str]:
+        user = self.get_user(user_id)
+        if not user:
+            return None
+        timestamp = seen_at or _now()
+        self.conn.execute(
+            "UPDATE users SET notifications_seen_at = ? WHERE id = ?",
+            (timestamp, user_id),
+        )
+        self.conn.commit()
+        return timestamp
+
+    def list_notifications(self, user_id: str, *, since: Optional[str] = None,
+                           limit: int = 50, unseen_only: bool = False) -> list[dict]:
+        capped_limit = max(1, min(limit, 200))
+        params: list[Union[str, int]] = [user_id, user_id]
+        where = [
+            "e.event_type IN ('reaction_added', 'reaction_removed', 'note_added')",
+            "json_extract(e.payload, '$.resource_owner_id') = ?",
+            "(e.actor_id IS NULL OR e.actor_id != ?)",
+        ]
+        if since:
+            where.append("e.created_at > ?")
+            params.append(since)
+        seen_at = self.get_notifications_seen_at(user_id)
+        if unseen_only and seen_at:
+            where.append("e.created_at > ?")
+            params.append(seen_at)
+        params.append(capped_limit)
+        rows = self.conn.execute(
+            f"""SELECT e.id, e.event_type, e.actor_id, e.payload, e.created_at,
+                       u.name AS actor_name,
+                       rn.note AS note_text,
+                       r.title AS resource_title,
+                       r.url AS resource_url
+                FROM event_log e
+                LEFT JOIN users u ON u.id = e.actor_id
+                LEFT JOIN resource_notes rn
+                  ON rn.id = json_extract(e.payload, '$.note_id')
+                LEFT JOIN resources r
+                  ON r.id = json_extract(e.payload, '$.resource_id')
+                WHERE {' AND '.join(where)}
+                ORDER BY e.created_at DESC
+                LIMIT ?""",
+            params,
+        ).fetchall()
+        results = []
+        for row in rows:
+            item = dict(row)
+            item["payload"] = json.loads(item["payload"]) if item["payload"] else {}
+            results.append(item)
+        return results
+
+    def count_unseen_notifications(self, user_id: str) -> int:
+        seen_at = self.get_notifications_seen_at(user_id)
+        params: list[str] = [user_id, user_id]
+        where = [
+            "event_type IN ('reaction_added', 'reaction_removed', 'note_added')",
+            "json_extract(payload, '$.resource_owner_id') = ?",
+            "(actor_id IS NULL OR actor_id != ?)",
+        ]
+        if seen_at:
+            where.append("created_at > ?")
+            params.append(seen_at)
+        row = self.conn.execute(
+            f"SELECT COUNT(*) AS count FROM event_log WHERE {' AND '.join(where)}",
+            params,
+        ).fetchone()
+        return int(row["count"]) if row else 0
+
+    def latest_notification_created_at(self, user_id: str) -> Optional[str]:
+        row = self.conn.execute(
+            """SELECT MAX(created_at) AS latest_created_at
+               FROM event_log
+               WHERE event_type IN ('reaction_added', 'reaction_removed', 'note_added')
+                 AND json_extract(payload, '$.resource_owner_id') = ?
+                 AND (actor_id IS NULL OR actor_id != ?)""",
+            (user_id, user_id),
+        ).fetchone()
+        if not row:
+            return None
+        return row["latest_created_at"]
 
     # --- User Cursors ---
 

@@ -87,6 +87,20 @@ def _short_date(value) -> str:
     return ""
 
 
+def _parse_iso_datetime(value: str) -> datetime:
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    return datetime.fromisoformat(normalized)
+
+
+def _truncate_notification_text(value: str, limit: int = 280) -> str:
+    text = (value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit]
+
+
 def _resolve_display_url(url: str, server_url: str = "") -> str:
     """Resolve dugg:// internal URLs to web-accessible /r/ URLs."""
     if url.startswith("dugg://content/"):
@@ -2610,6 +2624,83 @@ loadReadStateCache();
         d.mark_read(user["id"], resource_id, _reaction_implicit_source(request))
         return JSONResponse({"reaction": reaction})
 
+    async def handle_api_notifications(request: Request):
+        try:
+            user = resolve_user_from_request(request)
+        except ValueError as e:
+            return _problem_response(401, str(e))
+
+        since = (request.query_params.get("since") or "").strip()
+        if since:
+            if " " in since and "+" not in since:
+                since = since.replace(" ", "+", 1)
+            try:
+                _parse_iso_datetime(since)
+            except ValueError:
+                return _problem_response(400, "Invalid since")
+        try:
+            limit = int(request.query_params.get("limit", "50"))
+        except ValueError:
+            return _problem_response(400, "Invalid limit")
+        if limit < 1:
+            return _problem_response(400, "Invalid limit")
+        limit = min(limit, 200)
+        unseen_only = _query_flag(request, "unseen")
+
+        d = get_db()
+        rows = d.list_notifications(user["id"], since=since or None, limit=limit, unseen_only=unseen_only)
+        notifications = []
+        for row in rows:
+            payload = row.get("payload") or {}
+            item = {
+                "id": row["id"],
+                "event_type": row["event_type"],
+                "created_at": row["created_at"],
+                "actor_id": payload.get("actor_id") or row.get("actor_id") or "",
+                "actor_name": payload.get("actor_name") or row.get("actor_name") or "",
+                "resource_id": payload.get("resource_id") or "",
+                "resource_title": row.get("resource_title") or payload.get("resource_title") or "",
+                "resource_url": row.get("resource_url") or payload.get("resource_url") or "",
+            }
+            if row["event_type"].startswith("reaction_"):
+                item["reaction_type"] = payload.get("reaction_type") or ""
+            if row["event_type"] == "note_added":
+                item["note_id"] = payload.get("note_id") or ""
+                item["note_text"] = _truncate_notification_text(row.get("note_text") or "")
+            notifications.append(item)
+
+        return JSONResponse(
+            {
+                "notifications": notifications,
+                "unseen_count": d.count_unseen_notifications(user["id"]),
+                "latest_seen_at": d.latest_notification_created_at(user["id"]),
+            }
+        )
+
+    async def handle_api_notifications_seen(request: Request):
+        try:
+            user = resolve_user_from_request(request)
+        except ValueError as e:
+            return _problem_response(401, str(e))
+
+        seen_at = ""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if body and not isinstance(body, dict):
+            return _problem_response(400, "Invalid JSON payload")
+        seen_at = (body.get("seen_at") or "").strip() if isinstance(body, dict) else ""
+        if seen_at:
+            try:
+                _parse_iso_datetime(seen_at)
+            except ValueError:
+                return _problem_response(400, "Invalid seen_at")
+
+        d = get_db()
+        updated_seen_at = d.set_notifications_seen_at(user["id"], seen_at or None)
+        return JSONResponse({"status": "ok", "seen_at": updated_seen_at})
+
     async def handle_api_search(request: Request):
         """GET /api/search?q=... — structured JSON search for typed clients.
 
@@ -4581,6 +4672,8 @@ loadReadStateCache();
         Route("/feed/{key}", endpoint=handle_feed),
         Route("/api/feed", endpoint=handle_api_feed),
         Route("/api/feed/urls", endpoint=handle_api_feed_urls),
+        Route("/api/notifications", endpoint=handle_api_notifications, methods=["GET"]),
+        Route("/api/notifications/seen", endpoint=handle_api_notifications_seen, methods=["POST"]),
         Route("/api/read", endpoint=handle_api_read, methods=["GET"]),
         Route("/api/read/{resource_id}", endpoint=handle_api_read, methods=["POST", "DELETE"]),
         Route("/api/react", endpoint=handle_api_react, methods=["POST"]),

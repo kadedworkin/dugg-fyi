@@ -601,6 +601,156 @@ def test_api_unreact_requires_auth(client, db_path, user):
     assert resp.status_code == 401
 
 
+def test_api_notifications_returns_received_reaction_events(client, db_path, user):
+    c, _ = client
+    d = DuggDB(db_path)
+    actor = d.create_user("Rocco")
+    coll = d.create_collection("Shared", user["id"], visibility="shared")
+    d.add_collection_member(coll["id"], actor["id"])
+    res = d.add_resource(
+        url="https://example.com/notifications-received",
+        collection_id=coll["id"],
+        submitted_by=user["id"],
+        title="Inbox Item",
+    )
+    d.react_to_resource(res["id"], actor["id"], "star")
+    d.close()
+
+    resp = c.get("/api/notifications", headers={"X-Dugg-Key": user["api_key"]})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["unseen_count"] == 1
+    assert body["latest_seen_at"]
+    assert len(body["notifications"]) == 1
+    note = body["notifications"][0]
+    assert note["event_type"] == "reaction_added"
+    assert note["actor_id"] == actor["id"]
+    assert note["actor_name"] == "Rocco"
+    assert note["resource_id"] == res["id"]
+    assert note["resource_title"] == "Inbox Item"
+    assert note["resource_url"] == "https://example.com/notifications-received"
+    assert note["reaction_type"] == "star"
+
+
+def test_api_notifications_excludes_self_actions(client, db_path, user):
+    c, _ = client
+    d = DuggDB(db_path)
+    coll = d.create_collection("Shared", user["id"], visibility="shared")
+    res = d.add_resource(
+        url="https://example.com/notifications-self",
+        collection_id=coll["id"],
+        submitted_by=user["id"],
+        title="Mine",
+    )
+    d.react_to_resource(res["id"], user["id"], "thumbsup")
+    d.close()
+
+    resp = c.get("/api/notifications", headers={"X-Dugg-Key": user["api_key"]})
+    assert resp.status_code == 200
+    assert resp.json()["notifications"] == []
+    assert resp.json()["unseen_count"] == 0
+    assert resp.json()["latest_seen_at"] is None
+
+
+def test_api_notifications_filters_by_since(client, db_path, user):
+    c, _ = client
+    d = DuggDB(db_path)
+    actor = d.create_user("Rocco")
+    coll = d.create_collection("Shared", user["id"], visibility="shared")
+    d.add_collection_member(coll["id"], actor["id"])
+    old_res = d.add_resource(
+        url="https://example.com/notifications-old",
+        collection_id=coll["id"],
+        submitted_by=user["id"],
+        title="Old",
+    )
+    new_res = d.add_resource(
+        url="https://example.com/notifications-new",
+        collection_id=coll["id"],
+        submitted_by=user["id"],
+        title="New",
+    )
+    d.react_to_resource(old_res["id"], actor["id"], "star")
+    d.react_to_resource(new_res["id"], actor["id"], "thumbsup")
+    rows = d.conn.execute(
+        "SELECT id FROM event_log WHERE event_type = 'reaction_added' ORDER BY created_at ASC"
+    ).fetchall()
+    d.conn.execute("UPDATE event_log SET created_at = ? WHERE id = ?", ("2026-04-20T00:00:00+00:00", rows[0]["id"]))
+    d.conn.execute("UPDATE event_log SET created_at = ? WHERE id = ?", ("2026-04-25T00:00:00+00:00", rows[1]["id"]))
+    d.conn.commit()
+    d.close()
+
+    resp = c.get(
+        "/api/notifications?since=2026-04-22T00:00:00+00:00",
+        headers={"X-Dugg-Key": user["api_key"]},
+    )
+    assert resp.status_code == 200
+    notifications = resp.json()["notifications"]
+    assert len(notifications) == 1
+    assert notifications[0]["resource_title"] == "New"
+
+
+def test_api_notifications_unseen_honors_seen_watermark(client, db_path, user):
+    c, _ = client
+    d = DuggDB(db_path)
+    actor = d.create_user("Rocco")
+    coll = d.create_collection("Shared", user["id"], visibility="shared")
+    d.add_collection_member(coll["id"], actor["id"])
+    res = d.add_resource(
+        url="https://example.com/notifications-unseen",
+        collection_id=coll["id"],
+        submitted_by=user["id"],
+        title="Unseen Item",
+    )
+    note = d.add_resource_note(
+        res["id"],
+        "x" * 300,
+        submitter_user_id=actor["id"],
+        submitter_name=actor["name"],
+    )
+    event = d.conn.execute(
+        "SELECT id FROM event_log WHERE event_type = 'note_added' ORDER BY created_at DESC LIMIT 1"
+    ).fetchone()
+    d.conn.execute("UPDATE event_log SET created_at = ? WHERE id = ?", ("2026-04-25T00:00:00+00:00", event["id"]))
+    d.set_notifications_seen_at(user["id"], "2026-04-24T00:00:00+00:00")
+    d.conn.commit()
+    d.close()
+
+    resp = c.get("/api/notifications?unseen=true", headers={"X-Dugg-Key": user["api_key"]})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["unseen_count"] == 1
+    assert len(body["notifications"]) == 1
+    item = body["notifications"][0]
+    assert item["event_type"] == "note_added"
+    assert item["note_id"] == note["id"]
+    assert item["note_text"] == "x" * 280
+
+    d = DuggDB(db_path)
+    d.set_notifications_seen_at(user["id"], "2026-04-26T00:00:00+00:00")
+    d.close()
+    resp = c.get("/api/notifications?unseen=true", headers={"X-Dugg-Key": user["api_key"]})
+    assert resp.status_code == 200
+    assert resp.json()["notifications"] == []
+    assert resp.json()["unseen_count"] == 0
+
+
+def test_api_notifications_seen_advances_timestamp(client, db_path, user):
+    c, _ = client
+    resp = c.post(
+        "/api/notifications/seen",
+        json={"seen_at": "2026-04-26T12:30:00+00:00"},
+        headers={"X-Dugg-Key": user["api_key"]},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok", "seen_at": "2026-04-26T12:30:00+00:00"}
+
+    d = DuggDB(db_path)
+    refreshed = d.get_user(user["id"])
+    d.close()
+    assert refreshed["notifications_seen_at"] == "2026-04-26T12:30:00+00:00"
+
+
 def test_api_resource_requires_auth(client, db_path, user):
     c, _ = client
     res_id = _seed_resource(db_path, user)
