@@ -220,7 +220,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         let resourceId = null;
         if (addData) {
           const text = typeof addData === "string" ? addData : (addData.text || addData.result || JSON.stringify(addData));
-          const idMatch = String(text).match(/id[=: ]+([a-f0-9]{12})/i);
+          const idMatch = String(text).match(/^ID:\s+([a-f0-9]{12})/m);
           if (idMatch) resourceId = idMatch[1];
         }
 
