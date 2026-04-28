@@ -97,6 +97,22 @@ def _resolve_display_url(url: str, server_url: str = "") -> str:
     return url
 
 
+def _canonicalize_url_for_match(url: str) -> str:
+    """Normalize URLs for exact-match lookups used by popup/browser clients."""
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = urlparse(raw)
+    except Exception:
+        return raw
+    if not parsed.scheme or not parsed.netloc:
+        return raw
+    path = parsed.path.rstrip("/") or "/"
+    normalized = parsed._replace(netloc=parsed.netloc.lower(), path=path)
+    return normalized.geturl()
+
+
 def _resource_pub_date(resource: dict) -> str:
     """Pull a publication date (YYYY-MM-DD) out of the resource's raw_metadata, if any."""
     raw = resource.get("raw_metadata")
@@ -2048,7 +2064,7 @@ loadReadStateCache();
       </button>"""
                 )
 
-                items_html += f"""<div class="card{read_card_class}" id="item-{r["id"]}" data-collection="{coll_id}" data-source-server="{_xml_escape(source_srv)}" data-url="{_xml_escape(r['url'])}" data-resource-id="{r["id"]}" data-read-state="{read_state}" data-source-type="{_xml_escape(source_type or "other")}">
+                items_html += f"""<div class="card{read_card_class}" id="r-{r["id"]}" data-legacy-id="item-{r["id"]}" data-collection="{coll_id}" data-source-server="{_xml_escape(source_srv)}" data-url="{_xml_escape(r['url'])}" data-resource-id="{r["id"]}" data-read-state="{read_state}" data-source-type="{_xml_escape(source_type or "other")}">
   {f'<div class="card-media">{thumb_html}</div>' if thumb_html else ""}
   <div class="card-body">
     <h3><a href="{url}" target="_blank" rel="noopener" data-dugg-resource-id="{r["id"]}">{_xml_escape(title)}</a> {type_badge}</h3>
@@ -2514,6 +2530,7 @@ loadReadStateCache();
         except ValueError:
             limit = 500
         limit = max(1, min(limit, 500))
+        exact_url = _canonicalize_url_for_match(request.query_params.get("url") or "")
         feed_filter = _feed_query_filter(request)
 
         d = get_db()
@@ -2525,7 +2542,36 @@ loadReadStateCache();
             feed_filter=feed_filter,
             limit=limit,
         )
+        if exact_url:
+            feed = [r for r in feed if _canonicalize_url_for_match(r.get("url") or "") == exact_url]
         entries = _serialize_feed_url_entries(d, user["id"], feed)
+        if exact_url and feed:
+            notes_by_id = d.batch_resource_notes([r["id"] for r in feed])
+            reaction_state = _batch_feed_reactions(d, [r["id"] for r in feed], user["id"])
+            by_id = {entry["id"]: entry for entry in entries}
+            for resource in feed:
+                entry = by_id.get(resource["id"])
+                if not entry:
+                    continue
+                notes = []
+                if resource.get("note"):
+                    notes.append(resource["note"])
+                notes.extend(
+                    (note.get("note") or "").strip()
+                    for note in notes_by_id.get(resource["id"]) or []
+                    if (note.get("note") or "").strip()
+                )
+                reactions = reaction_state.get(resource["id"], {})
+                entry["notes_count"] = len(notes)
+                entry["primary_note_preview"] = notes[0][:100] if notes else ""
+                entry["viewer_reactions"] = {
+                    "star": bool(reactions.get("viewer_starred")),
+                    "thumbsup": bool(reactions.get("viewer_thumbsup")),
+                }
+                entry["reaction_counts"] = {
+                    "star": int(reactions.get("star_count", 0)),
+                    "thumbsup": int(reactions.get("thumbsup_count", 0)),
+                }
         return JSONResponse({"urls": entries, "count": len(entries)})
 
     async def handle_api_read(request: Request):
@@ -2582,8 +2628,8 @@ loadReadStateCache();
                 body = await request.json()
             except Exception:
                 return _problem_response(400, "Invalid JSON payload")
-            resource_id = (body.get("resource_id") or "").strip()
-            reaction_type = (body.get("type") or "").strip().lower()
+            resource_id = (request.path_params.get("resource_id") or body.get("resource_id") or "").strip()
+            reaction_type = (body.get("type") or body.get("reaction") or "").strip().lower()
 
         if not resource_id:
             return _problem_response(400, "Missing resource_id")
@@ -3259,7 +3305,7 @@ loadReadStateCache();
         )
 
         body = f"""{back_html}
-<article class="card detail" id="item-{resource["id"]}" data-resource-id="{resource["id"]}" data-collection="{_xml_escape(collection_id)}" data-source-server="{_xml_escape(source_server)}" data-url="{_xml_escape(url)}" data-read-state="read" data-source-type="{_xml_escape(source_type or "other")}">
+<article class="card detail" id="r-{resource["id"]}" data-legacy-id="item-{resource["id"]}" data-resource-id="{resource["id"]}" data-collection="{_xml_escape(collection_id)}" data-source-server="{_xml_escape(source_server)}" data-url="{_xml_escape(url)}" data-read-state="read" data-source-type="{_xml_escape(source_type or "other")}">
   {thumb_html}
   <div class="card-body">
     {title_html}
@@ -4584,6 +4630,7 @@ loadReadStateCache();
         Route("/api/read", endpoint=handle_api_read, methods=["GET"]),
         Route("/api/read/{resource_id}", endpoint=handle_api_read, methods=["POST", "DELETE"]),
         Route("/api/react", endpoint=handle_api_react, methods=["POST"]),
+        Route("/api/react/{resource_id}", endpoint=handle_api_react, methods=["POST"]),
         Route("/api/react/{resource_id}", endpoint=handle_api_react, methods=["DELETE"]),
         Route("/api/search", endpoint=handle_api_search),
         Route("/api/resource/{id}", endpoint=handle_api_resource),

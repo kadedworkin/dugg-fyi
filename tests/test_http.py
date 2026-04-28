@@ -400,6 +400,38 @@ def test_api_feed_urls_includes_read_at_and_unread_filter(client, db_path, user)
     assert read_id not in unread_ids
 
 
+def test_api_feed_urls_exact_match_returns_popup_metadata(client, db_path, user):
+    c, _ = client
+    exact_id = _seed_resource(
+        db_path,
+        user,
+        url="https://example.com/match-me/",
+        title="Match Me",
+        note="Primary note for popup preview",
+    )
+    _seed_resource(db_path, user, url="https://example.com/other", title="Other")
+
+    d = DuggDB(db_path)
+    d.react_to_resource(exact_id, user["id"], "star")
+    d.add_resource_note(exact_id, "Secondary note that should only affect the count", submitter_user_id=user["id"], submitter_name=user["name"])
+    d.close()
+
+    resp = c.get(
+        "/api/feed/urls?url=https://example.com/match-me",
+        headers={"X-Dugg-Key": user["api_key"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["count"] == 1
+    entry = body["urls"][0]
+    assert entry["id"] == exact_id
+    assert entry["title"] == "Match Me"
+    assert entry["notes_count"] == 2
+    assert entry["primary_note_preview"] == "Primary note for popup preview"
+    assert entry["viewer_reactions"] == {"star": True, "thumbsup": False}
+    assert entry["reaction_counts"] == {"star": 1, "thumbsup": 0}
+
+
 def test_api_read_post_delete_and_get(client, db_path, user):
     c, _ = client
     res_id = _seed_resource(db_path, user, url="https://example.com/read-endpoint")
@@ -517,6 +549,19 @@ def test_api_react_marks_read_implicitly(client, db_path, user):
     assert read_state["source"] == "mcp_react_implicit"
     assert reactions is not None
     assert reactions["breakdown"]["star"] == 1
+
+
+def test_api_react_accepts_resource_path_and_reaction_field(client, db_path, user):
+    c, _ = client
+    res_id = _seed_resource(db_path, user, url="https://example.com/react-path")
+
+    resp = c.post(
+        f"/api/react/{res_id}",
+        json={"reaction": "thumbsup"},
+        headers={"X-Dugg-Key": user["api_key"]},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["reaction"]["reaction_type"] == "thumbsup"
 
 
 def test_api_react_marks_read_implicitly_for_web_surface(client, db_path, user):
@@ -2352,6 +2397,7 @@ def test_feed_html_includes_read_state_markup_and_reaction_buttons(client, db_pa
     assert '☆' not in resp.text
     assert 'data-reaction-type="thumbsup"' in resp.text
     assert '>Thumbs Up<' in resp.text
+    assert f'id="r-{res_id}"' in resp.text
 
 
 def test_feed_html_renders_multiline_primary_note_with_note_text_span(client, db_path, user):
