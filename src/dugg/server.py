@@ -1159,7 +1159,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         elif name == "dugg_email":
             result = _handle_email(d, user_id, user)
         elif name == "dugg_email_test":
-            result = _handle_email_test(d, user, arguments.get("server_url", ""))
+            result = await _handle_email_test(d, user, arguments.get("server_url", ""))
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
@@ -1613,14 +1613,16 @@ def _handle_email(d: DuggDB, user_id: str, user: dict) -> list[TextContent]:
     return [TextContent(type="text", text="\n".join(lines))]
 
 
-def _handle_email_test(d: DuggDB, user: dict, server_url: str = "") -> list[TextContent]:
+async def _handle_email_test(d: DuggDB, user: dict, server_url: str = "") -> list[TextContent]:
     from dugg.email_forwarding import format_probe_result, probe_forwarding
 
     target_url = server_url or d.get_config("server_url", "")
     if not target_url:
         return [TextContent(type="text", text="No server URL configured. Set server_url in config first.")]
 
-    result = probe_forwarding(user["api_key"], target_url)
+    # Run sync urllib in a thread so probing self (the common case) doesn't
+    # deadlock the async event loop handling this request.
+    result = await asyncio.to_thread(probe_forwarding, user["api_key"], target_url)
     return [TextContent(type="text", text=format_probe_result(result))]
 
 
