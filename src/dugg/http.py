@@ -903,6 +903,18 @@ async function doSetup() {{
   .sync-status ul {{ margin: 0.5rem 0 0 1rem; padding: 0; list-style: none; }}
   .sync-status li {{ color: #666; margin-bottom: 0.25rem; }}
   .sync-btn {{ font-size: 0.7rem; padding: 0.15rem 0.4rem; }}
+  .feed-email-widget {{ margin-bottom: 1rem; padding: 1rem 1.1rem; border: 1px solid #2a2a2a;
+                        border-radius: 12px; background: #141414; }}
+  .feed-email-widget h2 {{ font-size: 0.95rem; margin-bottom: 0.35rem; color: #fff; }}
+  .feed-email-widget p {{ font-size: 0.85rem; color: #888; line-height: 1.45; }}
+  .feed-email-widget .key-box {{ margin: 0.85rem 0 0; min-height: 3.4rem; display: flex;
+                                 align-items: center; }}
+  .feed-email-placeholder {{ color: #666; letter-spacing: 0.08em; user-select: none; }}
+  .feed-email-actions {{ margin-top: 0.75rem; display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }}
+  .feed-email-copy-btn {{ color: #4ade80; border-color: #166534; }}
+  .feed-email-copy-btn:hover {{ background: #052e16; }}
+  .feed-email-status {{ font-size: 0.78rem; color: #666; min-height: 1em; }}
+  .feed-email-status.is-visible {{ color: #4ade80; }}
   .meta-read-state {{ display: inline-flex; align-items: center; gap: 0.35rem; margin-right: 0.2rem; }}
   .unread-dot {{ width: 6px; height: 6px; border-radius: 50%; background: #f59e0b; display: inline-block; flex: 0 0 auto; }}
   .read-pill {{ font-size: 0.72rem; color: #888; }}
@@ -970,6 +982,7 @@ const BASE = window.location.origin;
 const READ_SINCE = '1970-01-01T00:00:00+00:00';
 const ACTIVE_FILTER = __ACTIVE_FILTER__;
 const readResourceIds = new Set();
+let feedEmailStatusTimer = null;
 
 function getFeedCards() {
   return Array.from(document.querySelectorAll('.card[data-resource-id]'));
@@ -1117,6 +1130,70 @@ async function loadReadStateCache() {
   } catch (e) {
     // Keep the page usable even if read-state sync fails.
   }
+}
+
+function setFeedEmailStatus(message, isVisible) {
+  const status = document.getElementById('feedEmailStatus');
+  if (!status) return;
+  status.textContent = message || '';
+  status.classList.toggle('is-visible', !!isVisible);
+}
+
+function fallbackCopyText(text) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', '');
+  ta.style.position = 'absolute';
+  ta.style.left = '-9999px';
+  document.body.appendChild(ta);
+  ta.select();
+  ta.setSelectionRange(0, ta.value.length);
+  const copied = document.execCommand('copy');
+  document.body.removeChild(ta);
+  return copied;
+}
+
+async function copyFeedEmailAddress() {
+  const addressBox = document.getElementById('feedEmailAddress');
+  if (!addressBox) return;
+  const email = addressBox.dataset.email || '';
+  if (!email) return;
+  let copied = false;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(email);
+      copied = true;
+    } else {
+      copied = fallbackCopyText(email);
+    }
+  } catch (e) {
+    copied = fallbackCopyText(email);
+  }
+  if (!copied) {
+    setFeedEmailStatus('Copy failed. Select and copy manually.', false);
+    return;
+  }
+  setFeedEmailStatus('Copied!', true);
+  if (feedEmailStatusTimer) window.clearTimeout(feedEmailStatusTimer);
+  feedEmailStatusTimer = window.setTimeout(() => setFeedEmailStatus('', false), 1600);
+}
+
+function initFeedEmailWidget() {
+  const addressBox = document.getElementById('feedEmailAddress');
+  const revealBtn = document.getElementById('feedEmailRevealBtn');
+  const copyBtn = document.getElementById('feedEmailCopyBtn');
+  if (!addressBox || !revealBtn || !copyBtn) return;
+  revealBtn.addEventListener('click', () => {
+    addressBox.textContent = addressBox.dataset.email || '';
+    revealBtn.hidden = true;
+    revealBtn.setAttribute('aria-expanded', 'true');
+    copyBtn.hidden = false;
+    copyBtn.focus();
+    setFeedEmailStatus('', false);
+  });
+  copyBtn.addEventListener('click', () => {
+    copyFeedEmailAddress();
+  });
 }
 
 async function shareResource(url, title) {
@@ -1467,6 +1544,7 @@ getFeedCards().forEach(updateCardReadUi);
 document.querySelectorAll('.reaction-btn').forEach(updateReactionButton);
 applyActiveFeedFilter();
 loadReadStateCache();
+initFeedEmailWidget();
 </script>""".replace("__ACTIVE_FILTER__", json.dumps(active_filter))
 
     async def handle_invite_page(request: Request):
@@ -1955,6 +2033,8 @@ loadReadStateCache();
         d = get_db()
         query = (request.query_params.get("q") or "").strip()
         feed_filter = _feed_query_filter(request)
+        from dugg.db import dugg_email_address
+        feed_email_addr = dugg_email_address(user["api_key"], d.get_config("server_url", "") or "")
         feed, read_states, feed_reactions = _load_feed_resources(
             d,
             user,
@@ -2189,6 +2269,21 @@ loadReadStateCache();
                     f'<button type="button" class="filter-pill" data-category="{_xml_escape(st)}">{_xml_escape(label)}</button>'
                 )
             category_row = f'<div class="filter-row category-row">{"".join(cat_pills)}</div>'
+        feed_email_widget = ""
+        if feed_email_addr:
+            hidden_email = "*" * min(max(len(feed_email_addr), 24), 64)
+            feed_email_widget = f"""<section class="feed-email-widget" aria-label="Email forwarding address">
+  <h2>Your email forwarding address</h2>
+  <p>Forward newsletters, articles, or anything else you want indexed. Reveal it when you need it, then copy with one click.</p>
+  <div class="key-box" id="feedEmailAddress" data-email="{_xml_escape(feed_email_addr)}">
+    <span class="feed-email-placeholder" aria-hidden="true">{hidden_email}</span>
+  </div>
+  <div class="feed-email-actions">
+    <button type="button" class="action-btn" id="feedEmailRevealBtn" aria-controls="feedEmailAddress" aria-expanded="false">Reveal address</button>
+    <button type="button" class="action-btn feed-email-copy-btn" id="feedEmailCopyBtn" hidden>Copy address</button>
+    <span class="feed-email-status" id="feedEmailStatus" aria-live="polite"></span>
+  </div>
+</section>"""
         feed_js = _interactive_card_js(feed_filter)
         # Stats bar
         n_items = len(feed)
@@ -2216,6 +2311,7 @@ loadReadStateCache();
 
         body = f"""<h1>{page_title}</h1>
 {stats_html}
+{feed_email_widget}
 {sync_html}
 {topic_html}
 {search_bar}
