@@ -28,16 +28,29 @@ export default {
       if (!isNaN(d.getTime())) publishedAt = d.toISOString();
     }
 
-    await fetch(`https://${host}/tools/dugg_paste`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Dugg-Key": userKey },
-      body: JSON.stringify({
-        title: subject,
-        body: body,
-        source_type: "email",
-        source_label: "email",
-        published_at: publishedAt,
-      }),
-    });
+    try {
+      const response = await fetch(`https://${host}/tools/dugg_paste`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Dugg-Key": userKey },
+        body: JSON.stringify({
+          title: subject,
+          body: body,
+          source_type: "email",
+          source_label: "email",
+          published_at: publishedAt,
+        }),
+      });
+      if (!response.ok) {
+        const responseBody = (await response.text()).slice(0, 200);
+        console.warn(
+          `dugg-email-worker upstream-error status=${response.status} host=${host} rcpt=${to} body=${JSON.stringify(responseBody)}`,
+        );
+      }
+    } catch (error) {
+      const messageText = String(error?.message || error).slice(0, 200);
+      console.error(
+        `dugg-email-worker upstream-error status=exception host=${host} rcpt=${to} error=${JSON.stringify(messageText)}`,
+      );
+    }
   },
 };
