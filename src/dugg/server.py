@@ -994,6 +994,17 @@ async def list_tools() -> list[Tool]:
                 },
             },
         ),
+        Tool(
+            name="dugg_email_test",
+            description="Send an end-to-end probe through the email forwarding bridge for this server. On success, it creates a real test resource in your feed.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "server_url": {"type": "string", "description": "Server URL to test (defaults to this server's configured URL)", "default": ""},
+                    "api_key": {"type": "string", "description": "API key for authentication", "default": ""},
+                },
+            },
+        ),
     ]
 
 
@@ -1147,6 +1158,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = _handle_share_link(d, arguments)
         elif name == "dugg_email":
             result = _handle_email(d, user_id, user)
+        elif name == "dugg_email_test":
+            result = _handle_email_test(d, user, arguments.get("server_url", ""))
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
@@ -1598,6 +1611,17 @@ def _handle_email(d: DuggDB, user_id: str, user: dict) -> list[TextContent]:
     lines.append("")
     lines.append("Forward emails to any of these addresses to add them as resources.")
     return [TextContent(type="text", text="\n".join(lines))]
+
+
+def _handle_email_test(d: DuggDB, user: dict, server_url: str = "") -> list[TextContent]:
+    from dugg.email_forwarding import format_probe_result, probe_forwarding
+
+    target_url = server_url or d.get_config("server_url", "")
+    if not target_url:
+        return [TextContent(type="text", text="No server URL configured. Set server_url in config first.")]
+
+    result = probe_forwarding(user["api_key"], target_url)
+    return [TextContent(type="text", text=format_probe_result(result))]
 
 
 def _json_result(payload: object) -> list[TextContent]:

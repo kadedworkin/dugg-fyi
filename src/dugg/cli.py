@@ -2047,6 +2047,10 @@ def main():
     p_email = sub.add_parser("email", help="Show your email forwarding address for each connected instance")
     p_email.add_argument("--key", default=None, help="API key (uses local user if omitted)")
 
+    p_email_test = sub.add_parser("email-test", help="Send an end-to-end probe through your email forwarding bridge")
+    p_email_test.add_argument("--key", default=None, help="API key (uses local user if omitted)")
+    p_email_test.add_argument("--server", default=None, help="Server URL to test (defaults to configured server_url)")
+
     p_rss = sub.add_parser("rss", help="Subscribe to RSS / Atom feeds and ingest entries as resources")
     rss_sub = p_rss.add_subparsers(dest="rss_action")
 
@@ -2210,6 +2214,8 @@ def main():
         cmd_welcome(args)
     elif args.command == "email":
         cmd_email(args)
+    elif args.command == "email-test":
+        cmd_email_test(args)
     elif args.command == "rss":
         cmd_rss(args)
     elif args.command == "export":
@@ -2445,6 +2451,27 @@ def cmd_email(args):
     db.close()
     print()
     print("Forward emails to any of these addresses to add them as resources.")
+
+
+def cmd_email_test(args):
+    """Send a live probe through the email forwarding bridge."""
+    from pathlib import Path
+    from dugg.email_forwarding import format_probe_result, probe_forwarding
+
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    if not db_path.exists():
+        print("No Dugg database found. Run: dugg init")
+        sys.exit(1)
+    db = DuggDB(db_path)
+    user = _resolve_user(db, args)
+    server_url = getattr(args, "server", None) or db.get_config("server_url", "")
+    db.close()
+
+    if not server_url:
+        print("No server URL configured. Run: dugg set-config server_url https://your-server")
+        sys.exit(1)
+
+    print(format_probe_result(probe_forwarding(user["api_key"], server_url)))
 
 
 def cmd_skill(args):
