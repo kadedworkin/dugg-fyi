@@ -77,7 +77,7 @@ _DEFAULT_ACTION_KEYS = {
     "edit": ["view", "delete", "react", "note", "share"],
     "delete": ["list", "add"],
     "react": ["view", "list"],
-    "note": ["view"],
+    "note": ["view", "note"],
 }
 
 

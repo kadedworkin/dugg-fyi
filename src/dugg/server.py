@@ -3306,8 +3306,12 @@ def _maybe_prepend_banner(user: dict, api_key: Optional[str], result: list[TextC
         banner += "Run dugg_welcome for full orientation."
     else:
         banner = f"Welcome to Dugg, {user['name']}. Run dugg_welcome for orientation."
-
-    return [TextContent(type="text", text=f"[{banner}]\n\n{result[0].text}")] + result[1:]
+    if result:
+        try:
+            json.loads(result[0].text)
+        except (TypeError, ValueError):
+            return [TextContent(type="text", text=f"[{banner}]\n\n{result[0].text}")] + result[1:]
+    return [TextContent(type="text", text=f"[{banner}]")] + result
 
 
 def _handle_welcome(d: DuggDB, user_id: str, user: dict) -> list[TextContent]:
