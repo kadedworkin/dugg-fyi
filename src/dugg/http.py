@@ -815,7 +815,22 @@ async function doSetup() {{
         try:
             results = await call_tool(tool_name, args)
             texts = [r.text for r in results if hasattr(r, "text")]
-            full_result = "\n".join(texts)
+            structured_payload = None
+            raw_result_texts = list(texts)
+            if raw_result_texts:
+                try:
+                    candidate = json.loads(raw_result_texts[-1])
+                except (TypeError, ValueError):
+                    candidate = None
+                if isinstance(candidate, dict) and "result" in candidate:
+                    structured_payload = candidate
+                    raw_result_texts = raw_result_texts[:-1]
+
+            full_result = "\n".join(raw_result_texts)
+            if structured_payload:
+                if full_result:
+                    structured_payload["result"] = f"{full_result}\n\n{structured_payload['result']}"
+                full_result = structured_payload["result"]
 
             # RFC 6585: return 429 with Retry-After when rate-limited
             if full_result.startswith("Rate limit exceeded"):
@@ -830,12 +845,19 @@ async function doSetup() {{
             if format_mode == "compact":
                 lines = [ln for ln in full_result.split("\n") if ln.strip()]
                 full_result = "\n".join(lines)
-
-            return JSONResponse({
+                if structured_payload:
+                    structured_payload["result"] = full_result
+            response_data = {
                 "tool": tool_name,
                 "result": full_result,
                 "format": format_mode,
-            })
+            }
+            if structured_payload:
+                response_data.update({
+                    k: v for k, v in structured_payload.items()
+                    if k not in {"result"}
+                })
+            return JSONResponse(response_data)
         except Exception as e:
             return _problem_response(500, str(e))
 
