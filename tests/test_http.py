@@ -294,10 +294,155 @@ def _seed_resource(db_path, user, *, url="https://example.com/post",
     return res["id"]
 
 
+def _seed_skill(
+    db_path,
+    *,
+    user,
+    collection_id,
+    name,
+    title=None,
+    description=None,
+    body=None,
+):
+    d = DuggDB(db_path)
+    try:
+        return d.add_skill(
+            name=name,
+            body=body or f"Body for {name}\n",
+            frontmatter={
+                "name": name,
+                "title": title or name,
+                "description": description or f"Description for {name}",
+            },
+            title=title or name,
+            description=description or f"Description for {name}",
+            author=user["name"],
+            collection_id=collection_id,
+            submitted_by=user["id"],
+        )
+    finally:
+        d.close()
+
+
 def test_api_feed_requires_auth(client):
     c, _ = client
     resp = c.get("/api/feed")
     assert resp.status_code == 401
+
+
+def test_api_skills_requires_auth(client):
+    c, _ = client
+    resp = c.get("/api/skills")
+    assert resp.status_code == 401
+
+
+def test_api_skills_returns_visible_skills_paginated(client, db_path, user):
+    c, _ = client
+    d = DuggDB(db_path)
+    coll_id = d.ensure_default_collection(user["id"])
+    d.close()
+    first_id = _seed_skill(
+        db_path,
+        user=user,
+        collection_id=coll_id,
+        name="first-skill",
+        title="First Skill",
+    )
+    second_id = _seed_skill(
+        db_path,
+        user=user,
+        collection_id=coll_id,
+        name="second-skill",
+        title="Second Skill",
+    )
+
+    resp = c.get(
+        "/api/skills?limit=1",
+        headers={"Authorization": f"Bearer {user['api_key']}"},
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["next_offset"] == 1
+    assert [skill["id"] for skill in data["skills"]] == [second_id]
+    skill = data["skills"][0]
+    assert skill["name"] == "second-skill"
+    assert skill["title"] == "Second Skill"
+    assert "body" not in skill
+
+    next_resp = c.get(
+        f"/api/skills?limit=1&offset={data['next_offset']}",
+        headers={"Authorization": f"Bearer {user['api_key']}"},
+    )
+    assert next_resp.status_code == 200
+    assert next_resp.json()["next_offset"] is None
+    assert [skill["id"] for skill in next_resp.json()["skills"]] == [first_id]
+
+
+def test_api_skills_filters_by_collection_id(client, db_path, user):
+    c, _ = client
+    d = DuggDB(db_path)
+    visible = d.create_collection("Visible", user["id"])
+    other = d.create_collection("Other", user["id"])
+    d.close()
+    visible_skill = _seed_skill(db_path, user=user, collection_id=visible["id"], name="visible-skill")
+    _seed_skill(db_path, user=user, collection_id=other["id"], name="other-skill")
+
+    resp = c.get(
+        f"/api/skills?collection_id={visible['id']}",
+        headers={"X-Dugg-Key": user["api_key"]},
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["next_offset"] is None
+    assert [skill["id"] for skill in data["skills"]] == [visible_skill]
+    assert data["skills"][0]["collection_id"] == visible["id"]
+
+
+def test_api_skill_returns_body_when_accessible(client, db_path, user):
+    c, _ = client
+    d = DuggDB(db_path)
+    coll_id = d.ensure_default_collection(user["id"])
+    d.close()
+    skill_id = _seed_skill(
+        db_path,
+        user=user,
+        collection_id=coll_id,
+        name="reader-skill",
+        body="# Body\n\nVisible body.\n",
+    )
+
+    resp = c.get(
+        f"/api/skill/{skill_id}",
+        headers={"Authorization": f"Bearer {user['api_key']}"},
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["id"] == skill_id
+    assert data["name"] == "reader-skill"
+    assert data["body"] == "# Body\n\nVisible body.\n"
+    assert data["frontmatter"]["name"] == "reader-skill"
+
+
+def test_api_skill_forbidden_when_inaccessible(client, db_path, user):
+    c, _ = client
+    d = DuggDB(db_path)
+    outsider = d.create_user("Outsider")
+    outsider_coll = d.create_collection("Outsider Collection", outsider["id"])
+    d.close()
+    skill_id = _seed_skill(
+        db_path,
+        user=outsider,
+        collection_id=outsider_coll["id"],
+        name="private-skill",
+    )
+
+    resp = c.get(f"/api/skill/{skill_id}", headers={"X-Dugg-Key": user["api_key"]})
+
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "Forbidden"
 
 
 def test_api_feed_returns_structured_resources(client, db_path, user):

@@ -141,13 +141,20 @@ def create_app(db_path: Optional[Path] = None, mode: str = "local") -> Starlette
     COOKIE_MAX_AGE = 60 * 60 * 24 * 30  # 30 days
 
     def _resolve_user_from_cookie_or_header(request: Request) -> Optional[dict]:
-        """Cookie > X-Dugg-Key header. Returns None if neither resolves to a user."""
+        """Cookie > Bearer token > X-Dugg-Key header. Returns None if no match."""
         d = get_db()
         cookie_key = request.cookies.get(COOKIE_NAME, "")
         if cookie_key:
             user = d.get_user_by_api_key(cookie_key)
             if user:
                 return user
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.lower().startswith("bearer "):
+            bearer_key = auth_header[7:].strip()
+            if bearer_key:
+                user = d.get_user_by_api_key(bearer_key)
+                if user:
+                    return user
         header_key = request.headers.get("x-dugg-key", "")
         if header_key:
             user = d.get_user_by_api_key(header_key)
@@ -157,7 +164,13 @@ def create_app(db_path: Optional[Path] = None, mode: str = "local") -> Starlette
 
     def _cookie_key_from_request(request: Request) -> str:
         """Return the cookie-or-header key string (empty if neither set)."""
-        return request.cookies.get(COOKIE_NAME, "") or request.headers.get("x-dugg-key", "")
+        cookie_key = request.cookies.get(COOKIE_NAME, "")
+        if cookie_key:
+            return cookie_key
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.lower().startswith("bearer "):
+            return auth_header[7:].strip()
+        return request.headers.get("x-dugg-key", "")
 
     def _set_session_cookie(resp, key: str, request: Request) -> None:
         """Attach a 30-day dugg_key cookie to a response. HttpOnly+Secure(when TLS)+SameSite=Lax."""
@@ -178,13 +191,15 @@ def create_app(db_path: Optional[Path] = None, mode: str = "local") -> Starlette
         return raw
 
     def resolve_user_from_request(request: Request) -> dict:
-        """Resolve user from dugg_key cookie or X-Dugg-Key header."""
+        """Resolve user from dugg_key cookie, Authorization Bearer, or X-Dugg-Key."""
         user = _resolve_user_from_cookie_or_header(request)
         if user:
             return user
-        if request.cookies.get(COOKIE_NAME) or request.headers.get("x-dugg-key"):
+        auth_header = request.headers.get("authorization", "")
+        has_bearer = auth_header.lower().startswith("bearer ")
+        if request.cookies.get(COOKIE_NAME) or request.headers.get("x-dugg-key") or has_bearer:
             raise ValueError("Invalid API key")
-        raise ValueError("Missing credentials — dugg_key cookie or X-Dugg-Key header required")
+        raise ValueError("Missing credentials — dugg_key cookie, Authorization Bearer, or X-Dugg-Key header required")
 
     def _query_flag(request: Request, name: str) -> bool:
         return (request.query_params.get(name) or "").strip().lower() == "true"
@@ -2184,11 +2199,29 @@ loadReadStateCache();
     def _accessible_skill_collections(d: DuggDB, user_id: str) -> dict[str, dict]:
         return {c["id"]: c for c in d.list_collections(user_id)}
 
-    def _list_accessible_skills(d: DuggDB, user_id: str, limit: int = 50) -> list[dict]:
+    def _list_accessible_skills(
+        d: DuggDB,
+        user_id: str,
+        *,
+        collection_id: Optional[str] = None,
+        author_user_id: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict]:
         accessible = d._accessible_collection_ids(user_id)
         if not accessible:
             return []
+        if collection_id:
+            if collection_id not in accessible:
+                return []
+            accessible = [collection_id]
         placeholders = ",".join("?" for _ in accessible)
+        params: list[object] = [*accessible]
+        author_sql = ""
+        if author_user_id:
+            author_sql = " AND r.submitted_by = ?"
+            params.append(author_user_id)
+        params.extend([limit, offset])
         rows = d.conn.execute(
             f"""SELECT r.id, r.title, r.description, r.author, r.collection_id,
                        r.submitted_by, r.created_at, r.updated_at,
@@ -2197,9 +2230,10 @@ loadReadStateCache();
                 JOIN skills s ON s.resource_id = r.id
                 WHERE r.source_type = 'skill'
                   AND r.collection_id IN ({placeholders})
+                  {author_sql}
                 ORDER BY r.created_at DESC
-                LIMIT ?""",
-            [*accessible, limit],
+                LIMIT ? OFFSET ?""",
+            params,
         ).fetchall()
         skills = []
         for row in rows:
@@ -2461,6 +2495,27 @@ loadReadStateCache();
             })
         return entries
 
+    def _serialize_skill_metadata(skill: dict) -> dict:
+        return {
+            "id": skill["id"],
+            "title": skill.get("title") or "",
+            "description": skill.get("description") or "",
+            "author": skill.get("author") or "",
+            "collection_id": skill.get("collection_id") or "",
+            "submitted_by": skill.get("submitted_by") or "",
+            "created_at": skill.get("created_at") or "",
+            "updated_at": skill.get("updated_at") or "",
+            "name": skill.get("name") or "",
+            "supersedes_id": skill.get("supersedes_id"),
+            "is_exportable": bool(skill.get("is_exportable", True)),
+        }
+
+    def _serialize_skill(skill: dict) -> dict:
+        payload = _serialize_skill_metadata(skill)
+        payload["body"] = skill.get("body") or ""
+        payload["frontmatter"] = skill.get("frontmatter") or {}
+        return payload
+
     async def handle_api_feed(request: Request):
         """GET /api/feed — structured JSON feed for typed clients (iOS, etc.).
 
@@ -2527,6 +2582,61 @@ loadReadStateCache();
         )
         entries = _serialize_feed_url_entries(d, user["id"], feed)
         return JSONResponse({"urls": entries, "count": len(entries)})
+
+    async def handle_api_skills(request: Request):
+        """GET /api/skills — list visible skill metadata for typed clients."""
+        try:
+            user = resolve_user_from_request(request)
+        except ValueError as e:
+            return _problem_response(401, str(e))
+
+        try:
+            limit = int(request.query_params.get("limit", "50"))
+        except ValueError:
+            limit = 50
+        try:
+            offset = int(request.query_params.get("offset", "0"))
+        except ValueError:
+            offset = 0
+        limit = max(1, min(limit, 200))
+        offset = max(0, offset)
+        collection_id = (request.query_params.get("collection_id") or "").strip() or None
+        author_user_id = (request.query_params.get("author_user_id") or "").strip() or None
+
+        d = get_db()
+        skills = _list_accessible_skills(
+            collection_id=collection_id,
+            d=d,
+            user_id=user["id"],
+            author_user_id=author_user_id,
+            limit=limit + 1,
+            offset=offset,
+        )
+        next_offset = None
+        if len(skills) > limit:
+            skills = skills[:limit]
+            next_offset = offset + len(skills)
+
+        return JSONResponse({
+            "skills": [_serialize_skill_metadata(skill) for skill in skills],
+            "next_offset": next_offset,
+        })
+
+    async def handle_api_skill(request: Request):
+        """GET /api/skill/{id} — return a visible skill including its body."""
+        try:
+            user = resolve_user_from_request(request)
+        except ValueError as e:
+            return _problem_response(401, str(e))
+
+        skill_id = request.path_params["id"]
+        d = get_db()
+        skill = d.get_skill(skill_id)
+        if not skill:
+            return _problem_response(404, "Skill not found")
+        if skill.get("collection_id") not in d._accessible_collection_ids(user["id"]):
+            return _problem_response(403, "Forbidden")
+        return JSONResponse(_serialize_skill(skill))
 
     async def handle_api_read(request: Request):
         try:
@@ -4581,6 +4691,8 @@ loadReadStateCache();
         Route("/feed/{key}", endpoint=handle_feed),
         Route("/api/feed", endpoint=handle_api_feed),
         Route("/api/feed/urls", endpoint=handle_api_feed_urls),
+        Route("/api/skills", endpoint=handle_api_skills),
+        Route("/api/skill/{id}", endpoint=handle_api_skill),
         Route("/api/read", endpoint=handle_api_read, methods=["GET"]),
         Route("/api/read/{resource_id}", endpoint=handle_api_read, methods=["POST", "DELETE"]),
         Route("/api/react", endpoint=handle_api_react, methods=["POST"]),
@@ -4633,7 +4745,7 @@ loadReadStateCache();
                 CORSMiddleware,
                 allow_origins=["*"],
                 allow_methods=["GET", "POST", "OPTIONS"],
-                allow_headers=["Content-Type", "X-Dugg-Key", "X-Dugg-Format", "X-Dugg-Signature"],
+                allow_headers=["Authorization", "Content-Type", "X-Dugg-Key", "X-Dugg-Format", "X-Dugg-Signature"],
             ),
         ],
     )
