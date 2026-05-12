@@ -1989,6 +1989,88 @@ def test_resource_page_marks_read_on_render(client, db_path, user):
     assert read_state["source"] == "web_detail"
 
 
+def test_resource_page_detail_renders_interactive_controls(client, db_path, user):
+    c, _ = client
+    d = DuggDB(db_path)
+    coll_id = d.ensure_default_collection(user["id"])
+    resource = d.add_resource(
+        url="https://example.com/detail",
+        collection_id=coll_id,
+        submitted_by=user["id"],
+        title="Detail Page",
+        note="primary note",
+        description="Detailed description",
+        transcript="first line\nsecond line",
+        source_type="article",
+        author="Ada",
+    )
+    d.add_resource_note(
+        resource["id"],
+        "sibling note",
+        submitter_user_id=user["id"],
+        submitter_name=user["name"],
+    )
+    hidden = d.add_resource(
+        url="dugg://content/secret-detail",
+        collection_id=coll_id,
+        submitted_by=user["id"],
+        title="Secret Detail",
+        description="Private description",
+        transcript="private line",
+        source_type="email",
+        author="Ada",
+    )
+    d.close()
+
+    c.cookies.set("dugg_key", user["api_key"])
+    resp = c.get(f"/r/{resource['id']}")
+    assert resp.status_code == 200
+    html = resp.text
+    assert 'data-reaction-type="star"' in html
+    assert 'data-reaction-type="thumbsup"' in html
+    assert 'shareResource(' in html
+    assert 'class="add-note-form"' in html
+    assert 'class="note-action-btn note-action-del"' in html
+
+    hidden_resp = c.get(f"/r/{hidden['id']}")
+    assert hidden_resp.status_code == 200
+    hidden_html = hidden_resp.text
+    assert "Open Original" not in hidden_html
+    assert 'onclick="shareResource(' not in hidden_html
+
+
+def test_resource_page_detail_title_links_only_for_external_urls(client, db_path, user):
+    c, _ = client
+    d = DuggDB(db_path)
+    coll_id = d.ensure_default_collection(user["id"])
+    external = d.add_resource(
+        url="https://example.com/detail-title-link",
+        collection_id=coll_id,
+        submitted_by=user["id"],
+        title="External Detail",
+        source_type="article",
+    )
+    internal = d.add_resource(
+        url="dugg://content/local-detail-title",
+        collection_id=coll_id,
+        submitted_by=user["id"],
+        title="Local Detail",
+        source_type="paste",
+    )
+    d.close()
+
+    c.cookies.set("dugg_key", user["api_key"])
+
+    external_resp = c.get(f"/r/{external['id']}")
+    assert external_resp.status_code == 200
+    assert '<h1><a class="detail-title-link" href="https://example.com/detail-title-link"' in external_resp.text
+
+    internal_resp = c.get(f"/r/{internal['id']}")
+    assert internal_resp.status_code == 200
+    assert "<h1>Local Detail</h1>" in internal_resp.text
+    assert '<h1><a class="detail-title-link"' not in internal_resp.text
+
+
 def test_resource_unlock_invalid_key(client, db_path, user):
     c, _ = client
     res_id = _make_pasted_resource(db_path, user)
@@ -2261,12 +2343,34 @@ def test_feed_html_includes_read_state_markup_and_reaction_buttons(client, db_pa
     assert 'navigator.sendBeacon(\'/api/read/\'' in resp.text
     assert 'markRead(this)' in resp.text
     assert 'markUnread(this)' in resp.text
+    assert 'function renderReadStateButton(resourceId, isRead, isPending)' in resp.text
     assert 'web_button' in resp.text
     assert 'class="action-btn reaction-btn read-state-btn mark-read-btn' in resp.text
-    assert 'class="action-btn reaction-btn read-state-btn mark-unread-btn' in resp.text
+    assert 'class="action-btn reaction-btn read-state-btn mark-unread-btn' not in resp.text
     assert 'data-reaction-type="star"' in resp.text
+    assert '<span class="reaction-icon" aria-hidden="true">⭐</span>' in resp.text
+    assert '☆' not in resp.text
     assert 'data-reaction-type="thumbsup"' in resp.text
     assert '>Thumbs Up<' in resp.text
+
+
+def test_feed_html_renders_multiline_primary_note_with_note_text_span(client, db_path, user):
+    c, _ = client
+    _seed_resource(
+        db_path,
+        user,
+        url="https://example.com/feed-multiline-note",
+        title="Feed Multiline Note",
+        note="Step 1: foo\nStep 2: bar",
+    )
+
+    c.cookies.set("dugg_key", user["api_key"])
+    resp = c.get("/feed")
+    assert resp.status_code == 200
+    html = resp.text
+    assert 'class="note-text"' in html
+    assert "Step 1: foo" in html
+    assert "Step 2: bar" in html
 
 
 def test_feed_html_q_and_filter_render_server_side_results(client, db_path, user):
@@ -2289,6 +2393,40 @@ def test_feed_html_q_and_filter_render_server_side_results(client, db_path, user
     assert "rust systems" in html
     assert "rust plain" not in html
     assert "go starred" not in html
+
+
+def test_feed_html_category_row_uses_unfiltered_source_types_across_filters(client, db_path, user):
+    c, _ = client
+    starred_article_id = _seed_resource(
+        db_path,
+        user,
+        url="https://example.com/feed-category-article",
+        title="Starred article",
+        note="",
+        source_type="article",
+    )
+    youtube_id = _seed_resource(
+        db_path,
+        user,
+        url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        title="Read video",
+        note="",
+        source_type="youtube",
+    )
+
+    d = DuggDB(db_path)
+    d.react_to_resource(starred_article_id, user["id"], "star")
+    d.mark_read(user["id"], youtube_id, "cli")
+    d.close()
+
+    c.cookies.set("dugg_key", user["api_key"])
+    resp = c.get("/feed?filter=starred")
+    assert resp.status_code == 200
+    html = resp.text
+    assert f'data-resource-id="{starred_article_id}"' in html
+    assert f'data-resource-id="{youtube_id}"' not in html
+    assert 'data-category="article"' in html
+    assert 'data-category="youtube"' in html
 
 
 # --- /paste: silent migration + cookie auth ---
