@@ -5,12 +5,16 @@
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
-    width: 300px;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-    background: #0a0a0a;
-    color: #e0e0e0;
+    width: 340px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background:
+      radial-gradient(circle at top right, rgba(99, 102, 241, 0.18), transparent 42%),
+      linear-gradient(180deg, #101114 0%, #090a0d 100%);
+    color: #e8e8ea;
     padding: 16px;
   }
+  a { color: #93c5fd; text-decoration: none; }
+  a:hover { color: #bfdbfe; }
   .title-row {
     display: flex;
     align-items: center;
@@ -29,8 +33,8 @@
     font-size: 11px !important;
     background: #1a1033 !important;
     border: 1px solid #6366f1 !important;
-    color: #a78bfa !important;
-    border-radius: 12px !important;
+    color: #c4b5fd !important;
+    border-radius: 999px !important;
     cursor: pointer;
     font-weight: 500 !important;
     white-space: nowrap;
@@ -38,134 +42,230 @@
   .surprise-btn:hover { background: #2a1a4a !important; }
   .page-title {
     font-size: 12px;
-    color: #888;
+    color: #f3f4f6;
+    margin-bottom: 4px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .page-url {
+    font-size: 11px;
+    color: #7f8694;
     margin-bottom: 12px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .match-info {
-    background: rgba(99, 102, 241, 0.1);
-    border: 1px solid rgba(99, 102, 241, 0.25);
-    border-radius: 8px;
-    padding: 10px;
+  .panel {
+    background: rgba(17, 24, 39, 0.72);
+    border: 1px solid rgba(148, 163, 184, 0.18);
+    border-radius: 12px;
+    padding: 12px;
     margin-bottom: 12px;
-    font-size: 12px;
   }
-  .match-info .match-label {
-    color: #a78bfa;
+  .status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border-radius: 999px;
+    padding: 4px 10px;
+    font-size: 11px;
     font-weight: 600;
-    margin-bottom: 4px;
+    letter-spacing: 0.02em;
+    margin-bottom: 10px;
   }
-  .match-info .match-server {
-    color: #93c5fd;
-    font-size: 11px;
+  .status-badge.in-feed {
+    background: rgba(34, 197, 94, 0.14);
+    color: #86efac;
+    border: 1px solid rgba(34, 197, 94, 0.25);
   }
-  .match-info .match-by {
-    color: #888;
-    font-size: 11px;
+  .status-badge.add {
+    background: rgba(99, 102, 241, 0.14);
+    color: #c4b5fd;
+    border: 1px solid rgba(99, 102, 241, 0.25);
   }
-  .note-input {
-    width: 100%;
-    padding: 8px;
-    background: #111;
-    border: 1px solid #333;
-    border-radius: 6px;
+  .resource-title {
+    font-size: 13px;
+    font-weight: 600;
     color: #fff;
-    font-size: 12px;
-    margin-bottom: 12px;
-    resize: vertical;
-    min-height: 36px;
-    max-height: 80px;
-    font-family: inherit;
+    margin-bottom: 4px;
+    line-height: 1.35;
   }
-  .note-input::placeholder { color: #555; }
-  .note-input:focus { outline: none; border-color: #6366f1; }
-  .distribute-section {
-    margin-bottom: 12px;
-  }
-  .distribute-label {
+  .resource-url {
     font-size: 11px;
-    color: #888;
+    color: #8b95a7;
+    margin-bottom: 10px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .meta-line {
+    font-size: 11px;
+    color: #9ca3af;
+    margin-bottom: 10px;
+  }
+  .selection-note {
+    font-size: 11px;
+    color: #a5b4fc;
+    margin-bottom: 8px;
+  }
+  .field-label {
+    display: block;
+    font-size: 11px;
+    color: #9ca3af;
     margin-bottom: 6px;
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: 0.04em;
   }
+  .text-input,
+  .note-input {
+    width: 100%;
+    padding: 8px 10px;
+    background: rgba(15, 23, 42, 0.9);
+    border: 1px solid #374151;
+    border-radius: 8px;
+    color: #fff;
+    font-size: 12px;
+    font-family: inherit;
+    margin-bottom: 12px;
+  }
+  .text-input:focus,
+  .note-input:focus {
+    outline: none;
+    border-color: #818cf8;
+    box-shadow: 0 0 0 1px rgba(129, 140, 248, 0.3);
+  }
+  .note-input {
+    resize: vertical;
+    min-height: 72px;
+    max-height: 140px;
+  }
+  .reaction-row,
+  .inline-actions,
   .distribute-list {
     display: flex;
+    gap: 8px;
+  }
+  .reaction-row {
+    margin-bottom: 12px;
+  }
+  .reaction-btn {
+    flex: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 9px 10px;
+    background: rgba(15, 23, 42, 0.78);
+    border: 1px solid #334155;
+    border-radius: 999px;
+    color: #d1d5db;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .reaction-btn:hover { border-color: #64748b; }
+  .reaction-btn.is-active {
+    background: rgba(99, 102, 241, 0.18);
+    border-color: rgba(129, 140, 248, 0.7);
+    color: #eef2ff;
+  }
+  .reaction-btn:disabled,
+  button:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+  .notes-preview {
+    margin-bottom: 12px;
+    border-radius: 10px;
+    background: rgba(2, 6, 23, 0.55);
+    border: 1px solid rgba(71, 85, 105, 0.35);
+    padding: 10px;
+  }
+  .notes-preview summary {
+    cursor: pointer;
+    font-size: 12px;
+    color: #d1d5db;
+    font-weight: 500;
+  }
+  .notes-preview p {
+    margin-top: 8px;
+    color: #9ca3af;
+    font-size: 12px;
+    line-height: 1.4;
+  }
+  .notes-preview.empty {
+    font-size: 12px;
+    color: #6b7280;
+  }
+  .distribute-section { margin-bottom: 12px; }
+  .distribute-list {
     flex-direction: column;
-    gap: 4px;
+    gap: 6px;
   }
   .distribute-item {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
     font-size: 12px;
-    color: #ccc;
+    color: #d1d5db;
   }
   .distribute-item input[type="checkbox"] {
-    accent-color: #6366f1;
+    accent-color: #818cf8;
   }
-  .distribute-item .inst-name {
-    font-weight: 500;
-  }
-  button {
+  .primary-btn,
+  .secondary-btn {
     width: 100%;
     padding: 10px;
-    background: #6366f1;
-    color: #fff;
-    border: none;
-    border-radius: 6px;
+    border-radius: 8px;
     font-size: 13px;
     font-weight: 600;
     cursor: pointer;
+    border: none;
   }
-  button:hover { background: #5558e6; }
-  button:disabled { background: #333; cursor: default; }
+  .primary-btn {
+    background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
+    color: #fff;
+  }
+  .primary-btn:hover { filter: brightness(1.05); }
+  .secondary-btn {
+    background: rgba(30, 41, 59, 0.88);
+    color: #e5e7eb;
+    border: 1px solid rgba(100, 116, 139, 0.45);
+  }
   .toast {
     margin-top: 10px;
-    padding: 8px;
-    border-radius: 6px;
+    padding: 8px 10px;
+    border-radius: 8px;
     font-size: 12px;
     text-align: center;
     display: none;
   }
   .toast.success { display: block; background: #052e16; color: #4ade80; border: 1px solid #166534; }
-  .toast.error { display: block; background: #2a0a0a; color: #f87171; border: 1px solid #7f1d1d; }
+  .toast.error { display: block; background: #2a0a0a; color: #fca5a5; border: 1px solid #7f1d1d; }
   .setup-link {
     display: block;
     text-align: center;
     margin-top: 10px;
     font-size: 11px;
-    color: #666;
+    color: #6b7280;
     text-decoration: none;
   }
-  .setup-link:hover { color: #888; }
+  .setup-link:hover { color: #9ca3af; }
+  .sync-info {
+    text-align: center;
+    font-size: 10px;
+    color: #4b5563;
+    margin-top: 8px;
+  }
   .not-configured {
     text-align: center;
     padding: 12px 0;
   }
   .not-configured p {
     font-size: 12px;
-    color: #888;
+    color: #9ca3af;
     margin-bottom: 10px;
-  }
-  .not-configured a {
-    color: #6366f1;
-    text-decoration: none;
-    font-size: 12px;
-  }
-  .selection-note {
-    font-size: 11px;
-    color: #555;
-    margin-bottom: 8px;
-    font-style: italic;
-  }
-  .sync-info {
-    text-align: center;
-    font-size: 10px;
-    color: #444;
-    margin-top: 8px;
   }
 </style>
 </head>
@@ -176,27 +276,65 @@
       <button class="surprise-btn" id="surpriseBtn" title="Open a random page from your feeds">Surprise me</button>
     </div>
     <div class="page-title" id="pageTitle"></div>
-    <div class="match-info" id="matchInfo" style="display:none;">
-      <div class="match-label">Already Dugg</div>
-      <div id="matchDetails"></div>
-    </div>
-    <div class="selection-note" id="selectionNote" style="display:none;">Selected text will be included as a note.</div>
-    <textarea class="note-input" id="note" placeholder="Why this matters... (optional)" rows="2"></textarea>
-    <div class="distribute-section" id="distributeSection" style="display:none;">
-      <div class="distribute-label">Distribute to:</div>
-      <div class="distribute-list" id="distributeList"></div>
-    </div>
-    <button id="digBtn">Dugg it</button>
+    <div class="page-url" id="pageUrl"></div>
+
+    <section class="panel" id="existingState" style="display:none;">
+      <div class="status-badge in-feed">In your feed</div>
+      <div class="resource-title" id="resourceTitle"></div>
+      <div class="resource-url" id="resourceUrl"></div>
+      <div class="reaction-row">
+        <button class="reaction-btn" id="starBtn" data-reaction-type="star" aria-pressed="false">
+          <span>⭐</span>
+          <span>Star</span>
+          <span id="starCount">0</span>
+        </button>
+        <button class="reaction-btn" id="thumbBtn" data-reaction-type="thumbsup" aria-pressed="false">
+          <span>👍</span>
+          <span>Thumbs Up</span>
+          <span id="thumbCount">0</span>
+        </button>
+      </div>
+      <details class="notes-preview" id="notesPreview">
+        <summary id="notesSummary">Notes</summary>
+        <p id="notesSnippet"></p>
+      </details>
+      <div class="selection-note" id="existingSelectionNote" style="display:none;">Selected text will be appended to the note.</div>
+      <label class="field-label" for="existingNote">Add note</label>
+      <textarea class="note-input" id="existingNote" placeholder="Add context for this page..."></textarea>
+      <div class="inline-actions">
+        <button class="primary-btn" id="addExistingNoteBtn">Add Note</button>
+      </div>
+      <div class="meta-line" style="margin-top:10px; margin-bottom:0;">
+        <a href="#" id="openFeedLink" target="_blank" rel="noreferrer">Open in feed</a>
+      </div>
+    </section>
+
+    <section class="panel" id="addState" style="display:none;">
+      <div class="status-badge add">Not in feed yet</div>
+      <label class="field-label" for="addUrl">URL</label>
+      <input class="text-input" id="addUrl" type="text">
+      <div class="selection-note" id="selectionNote" style="display:none;">Selected text will be included with the note.</div>
+      <label class="field-label" for="addNote">Note (optional)</label>
+      <textarea class="note-input" id="addNote" placeholder="Why this matters..."></textarea>
+      <div class="distribute-section" id="distributeSection" style="display:none;">
+        <div class="field-label">Distribute to</div>
+        <div class="distribute-list" id="distributeList"></div>
+      </div>
+      <button class="primary-btn" id="digBtn">Dugg it</button>
+    </section>
+
     <div class="toast" id="toast"></div>
     <a href="#" class="setup-link" id="settingsLink">Settings</a>
     <div class="sync-info" id="syncInfo"></div>
   </div>
+
   <div id="setup" style="display:none;">
     <div class="not-configured">
       <p>Set up your agent connection first.</p>
       <a href="#" id="openSettings">Open Settings</a>
     </div>
   </div>
+
   <script src="popup.js"></script>
 </body>
 </html>
