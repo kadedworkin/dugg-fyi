@@ -1661,6 +1661,60 @@ def test_reaction_webhook_enriches_payload(db):
     assert breakdown["thumbsup"] == 1
 
 
+def test_add_resource_note_emits_note_added_event(db):
+    kade = db.create_user("Kade")
+    rocco = db.create_user("Rocco")
+    coll = db.create_collection("Shared", kade["id"], visibility="shared")
+    db.add_collection_member(coll["id"], rocco["id"])
+    res = db.add_resource(
+        url="https://example.com/note-event",
+        collection_id=coll["id"],
+        submitted_by=kade["id"],
+        title="Article",
+    )
+
+    note = db.add_resource_note(
+        res["id"],
+        "nice writeup",
+        submitter_user_id=rocco["id"],
+        submitter_name=rocco["name"],
+    )
+
+    events = db.get_events(kade["id"], event_types=["note_added"])
+    assert note is not None
+    assert len(events) == 1
+    payload = events[0]["payload"]
+    assert payload["resource_id"] == res["id"]
+    assert payload["resource_owner_id"] == kade["id"]
+    assert payload["note_id"] == note["id"]
+    assert payload["actor_id"] == rocco["id"]
+    assert payload["actor_name"] == rocco["name"]
+    assert payload["resource_title"] == "Article"
+    assert payload["resource_url"] == "https://example.com/note-event"
+
+
+def test_note_webhook_targets_author_only(db):
+    kade = db.create_user("Kade")
+    rocco = db.create_user("Rocco")
+    coll = db.create_collection("Shared", kade["id"], visibility="shared")
+    db.add_collection_member(coll["id"], rocco["id"])
+    res = db.add_resource(
+        url="https://example.com/note-webhook",
+        collection_id=coll["id"],
+        submitted_by=kade["id"],
+        title="Webhook Article",
+    )
+
+    db.subscribe_webhook(kade["id"], "https://hooks.example.com/kade")
+    db.subscribe_webhook(rocco["id"], "https://hooks.example.com/rocco")
+
+    all_hooks = db.get_webhooks_for_event("note_added", collection_id=coll["id"])
+    assert len(all_hooks) == 2
+    filtered = [hook for hook in all_hooks if hook["user_id"] == kade["id"]]
+    assert len(filtered) == 1
+    assert filtered[0]["callback_url"] == "https://hooks.example.com/kade"
+
+
 def test_mark_read_emits_read_added_once(db, monkeypatch):
     kade = db.create_user("Kade")
     rocco = db.create_user("Rocco")
@@ -2646,4 +2700,34 @@ def test_publish_scope_migration_adds_column_to_existing_db():
         fresh = d2.get_collection(coll["id"])
         assert fresh is not None
         assert fresh["publish_scope"] == "auto"
+        d2.close()
+
+
+def test_notifications_seen_migration_adds_column_to_existing_db():
+    import sqlite3
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "legacy.db"
+        d = DuggDB(path)
+        user = d.create_user("Legacy")
+        d.close()
+
+        conn = sqlite3.connect(str(path))
+        conn.execute(
+            "CREATE TABLE users_legacy (id TEXT PRIMARY KEY, name TEXT NOT NULL, api_key TEXT UNIQUE NOT NULL, created_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO users_legacy (id, name, api_key, created_at) SELECT id, name, api_key, created_at FROM users"
+        )
+        conn.execute("DROP TABLE users")
+        conn.execute("ALTER TABLE users_legacy RENAME TO users")
+        conn.commit()
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+        assert "notifications_seen_at" not in cols
+        conn.close()
+
+        d2 = DuggDB(path)
+        fresh = d2.get_user(user["id"])
+        assert fresh is not None
+        assert "notifications_seen_at" in fresh
+        assert fresh["notifications_seen_at"] is None
         d2.close()
