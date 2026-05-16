@@ -142,6 +142,13 @@ def _resource_pub_date(resource: dict) -> str:
     return _short_date(raw.get("published_at") or raw.get("updated_at"))
 
 
+def _looks_like_http_url(value: str) -> bool:
+    if not value:
+        return False
+    parsed = urlparse(value.strip())
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
 def create_app(db_path: Optional[Path] = None, mode: str = "local") -> Starlette:
     """Create the Starlette ASGI app with MCP SSE transport and REST endpoints.
 
@@ -357,6 +364,58 @@ def create_app(db_path: Optional[Path] = None, mode: str = "local") -> Starlette
         reaction_state = _batch_feed_reactions(d, resource_ids, user["id"])
         filtered = _filter_resources_for_viewer(d, candidates, user["id"], feed_filter, read_states, reaction_state)
         return filtered[:limit], read_states, reaction_state
+
+    def _resolve_collection_for_add(
+        d: DuggDB,
+        user_id: str,
+        requested_collection_id: str = "",
+    ) -> tuple[Optional[str], Optional[str]]:
+        accessible = {c["id"]: c for c in d.list_collections(user_id)}
+        default_collection_id = _ensure_default_collection(d, user_id)
+        if default_collection_id:
+            accessible = {c["id"]: c for c in d.list_collections(user_id)}
+        if requested_collection_id:
+            if requested_collection_id not in accessible:
+                return None, "Collection not found"
+            return requested_collection_id, None
+        return default_collection_id, None
+
+    async def _add_url_resource(
+        d: DuggDB,
+        *,
+        user: dict,
+        url: str,
+        note: str = "",
+        collection_id: str = "",
+    ) -> tuple[Optional[dict], Optional[str]]:
+        target_collection_id, error = _resolve_collection_for_add(
+            d, user["id"], requested_collection_id=collection_id
+        )
+        if error:
+            return None, error
+        if not _looks_like_http_url(url):
+            return None, "Invalid URL"
+
+        try:
+            from dugg.enrichment import enrich_url
+            enriched = await enrich_url(url)
+        except Exception:
+            enriched = {}
+
+        resource = d.add_resource(
+            url=url,
+            collection_id=target_collection_id or "",
+            submitted_by=user["id"],
+            note=note,
+            title=enriched.get("title", ""),
+            description=enriched.get("description", ""),
+            thumbnail=enriched.get("thumbnail", ""),
+            source_type=enriched.get("source_type", "unknown"),
+            author=enriched.get("raw_metadata", {}).get("author", ""),
+            transcript=enriched.get("transcript", ""),
+            raw_metadata=enriched.get("raw_metadata"),
+        )
+        return d.get_resource(resource["id"]) or resource, None
 
     def _feed_query_filter(request: Request) -> str:
         feed_filter = _normalize_feed_filter(request.query_params.get("filter"))
@@ -858,6 +917,28 @@ async function doSetup() {{
                  font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }}
   .type-badge.yt {{ background: #dc2626; }}
   .type-badge.article {{ background: #2563eb; }}
+  .feed-composer {{ position: sticky; top: 0; z-index: 20; margin-bottom: 1rem; padding-top: 0.25rem;
+                    background: linear-gradient(180deg, rgba(10,10,10,0.97) 0%, rgba(10,10,10,0.92) 80%, rgba(10,10,10,0) 100%); }}
+  .feed-composer .card {{ margin-bottom: 0; border-color: #333; box-shadow: 0 12px 32px rgba(0,0,0,0.22); }}
+  .composer-form {{ display: flex; flex-direction: column; gap: 0.75rem; }}
+  .composer-starter {{ margin: 0; }}
+  .composer-starter input {{ width: 100%; margin-bottom: 0; padding: 0.85rem 0.95rem; border-radius: 10px;
+                             border-color: #333; font-size: 0.95rem; }}
+  .composer-fields {{ display: none; }}
+  .feed-composer.is-expanded .composer-starter {{ display: none; }}
+  .feed-composer.is-expanded .composer-fields {{ display: block; }}
+  .composer-grid {{ display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.75rem; }}
+  .composer-field {{ display: flex; flex-direction: column; gap: 0.35rem; }}
+  .composer-field label {{ font-size: 0.76rem; color: #888; text-transform: uppercase; letter-spacing: 0.05em; }}
+  .composer-field input, .composer-field textarea, .composer-field select {{ width: 100%; margin-bottom: 0; padding: 0.7rem 0.8rem;
+                                                                               background: #111; border: 1px solid #333; border-radius: 8px;
+                                                                               color: #fff; font-size: 0.9rem; font-family: inherit; }}
+  .composer-field textarea {{ min-height: 7rem; resize: vertical; }}
+  .composer-field input:focus, .composer-field textarea:focus, .composer-field select:focus {{ outline: none; border-color: #6366f1; }}
+  .composer-actions {{ display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }}
+  .composer-actions .action-btn {{ padding: 0.55rem 1rem; font-size: 0.85rem; border-radius: 8px; }}
+  .composer-inline-error {{ display: none; margin: 0; color: #fca5a5; font-size: 0.82rem; }}
+  .composer-inline-error.is-visible {{ display: block; }}
   .search-bar {{ margin-bottom: 0.85rem; display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }}
   .search-input-wrap {{ flex: 1 1 320px; position: relative; min-width: 0; }}
   .search-bar input {{ width: 100%; padding: 0.6rem 2.2rem 0.6rem 0.8rem; background: #111; border: 1px solid #333;
@@ -930,6 +1011,9 @@ async function doSetup() {{
   .filter-row.category-row {{ margin-top: -0.25rem; margin-bottom: 1.25rem; }}
   .filter-row.category-row .filter-pill {{ font-size: 0.78rem; padding: 0.3rem 0.7rem; }}
   .filter-row.category-row + .filter-row {{ margin-top: -0.85rem; }}
+  @media (min-width: 720px) {{
+    .composer-grid.with-collections {{ grid-template-columns: minmax(0, 1.6fr) minmax(180px, 0.7fr); align-items: start; }}
+  }}
   .detail {{ max-width: 760px; margin: 0 auto; padding: 0 0.5rem; }}
   .card.detail {{ max-width: 760px; margin: 0 auto; cursor: default; }}
   .card.detail .card-body {{ padding: 1.35rem; }}
@@ -1090,6 +1174,8 @@ function markCardUnreadLocal(resourceId) {
 
 function attachOutboundReadBeacons() {
   document.querySelectorAll('a[data-dugg-resource-id]').forEach(link => {
+    if (link.dataset.outboundReadBound === '1') return;
+    link.dataset.outboundReadBound = '1';
     link.addEventListener('click', function() {
       const resourceId = this.dataset.duggResourceId;
       if (!resourceId) return;
@@ -1116,6 +1202,153 @@ async function loadReadStateCache() {
     applyActiveFeedFilter();
   } catch (e) {
     // Keep the page usable even if read-state sync fails.
+  }
+}
+
+function looksLikeHttpUrl(value) {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch (e) {
+    return false;
+  }
+}
+
+function setComposerError(message) {
+  const error = document.getElementById('composerError');
+  if (!error) return;
+  error.textContent = message || '';
+  error.classList.toggle('is-visible', !!message);
+}
+
+function getComposerElements() {
+  return {
+    shell: document.getElementById('feedComposer'),
+    starter: document.getElementById('composerStarterInput'),
+    url: document.getElementById('composerUrl'),
+    note: document.getElementById('composerNote'),
+    collection: document.getElementById('composerCollection'),
+    submit: document.getElementById('composerSubmit'),
+  };
+}
+
+function expandComposer(options) {
+  const elements = getComposerElements();
+  if (!elements.shell) return;
+  const shouldFocusUrl = !options || options.focusUrl !== false;
+  const seed = elements.starter ? (elements.starter.value || '').trim() : '';
+  elements.shell.classList.add('is-expanded');
+  if (seed && elements.url && elements.note && !elements.url.value && !elements.note.value) {
+    if (looksLikeHttpUrl(seed)) {
+      elements.url.value = seed;
+    } else {
+      elements.note.value = seed;
+    }
+  }
+  setComposerError('');
+  if (shouldFocusUrl && elements.url) {
+    elements.url.focus();
+  }
+}
+
+function collapseComposer() {
+  const elements = getComposerElements();
+  if (!elements.shell) return;
+  const nextStarterValue = elements.url && elements.url.value.trim()
+    ? elements.url.value.trim()
+    : ((elements.note && elements.note.value.trim()) || '');
+  if (elements.starter) {
+    elements.starter.value = nextStarterValue;
+  }
+  elements.shell.classList.remove('is-expanded');
+  setComposerError('');
+}
+
+async function submitComposer(event) {
+  event.preventDefault();
+  const elements = getComposerElements();
+  if (!elements.shell || !elements.url || !elements.submit) return;
+  const url = (elements.url.value || '').trim();
+  const note = elements.note ? (elements.note.value || '').trim() : '';
+  const collectionId = elements.collection ? (elements.collection.value || '').trim() : '';
+  if (!url) {
+    setComposerError('URL is required.');
+    elements.url.focus();
+    return;
+  }
+  elements.submit.disabled = true;
+  setComposerError('');
+  try {
+    const res = await fetch(BASE + '/api/add', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Dugg-Surface': 'web',
+      },
+      body: JSON.stringify({ url: url, note: note, collection_id: collectionId }),
+    });
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setComposerError(payload.detail || 'Failed to add item.');
+      return;
+    }
+    const resource = payload.resource || {};
+    const cardHtml = payload.card_html || '';
+    if (resource.id) {
+      readResourceIds.delete(resource.id);
+    }
+    if (cardHtml) {
+      const existing = resource.id ? document.getElementById('item-' + resource.id) : null;
+      if (existing) existing.remove();
+      const itemsRoot = document.getElementById('feedItems');
+      if (itemsRoot) {
+        const emptyState = document.getElementById('feedEmptyState');
+        if (emptyState) emptyState.remove();
+        const template = document.createElement('template');
+        template.innerHTML = cardHtml.trim();
+        const node = template.content.firstElementChild;
+        if (node) {
+          itemsRoot.prepend(node);
+          updateCardReadUi(node);
+          node.querySelectorAll('.reaction-btn').forEach(updateReactionButton);
+          attachCardDetailNavigation();
+          attachOutboundReadBeacons();
+        }
+      }
+    }
+    if (elements.starter) elements.starter.value = '';
+    elements.url.value = '';
+    if (elements.note) elements.note.value = '';
+    if (elements.collection) elements.collection.selectedIndex = 0;
+    elements.shell.classList.remove('is-expanded');
+    applyActiveFeedFilter();
+  } catch (e) {
+    setComposerError('Error: ' + e.message);
+  } finally {
+    elements.submit.disabled = false;
+  }
+}
+
+function attachComposer() {
+  const elements = getComposerElements();
+  if (!elements.shell || !elements.starter) return;
+  elements.starter.addEventListener('focus', () => expandComposer({ focusUrl: true }));
+  elements.starter.addEventListener('input', () => {
+    const value = (elements.starter.value || '').trim();
+    if (looksLikeHttpUrl(value)) {
+      expandComposer({ focusUrl: false });
+    }
+  });
+  const cancel = document.getElementById('composerCancel');
+  const form = document.getElementById('composerForm');
+  if (cancel) {
+    cancel.addEventListener('click', function(event) {
+      event.preventDefault();
+      collapseComposer();
+    });
+  }
+  if (form) {
+    form.addEventListener('submit', submitComposer);
   }
 }
 
@@ -1432,6 +1665,7 @@ async function syncNow(e) {
 }
 
 attachOutboundReadBeacons();
+attachComposer();
 function attachCardDetailNavigation() {
   getFeedCards().forEach(card => {
     if (card.classList.contains('detail')) return;
@@ -1953,8 +2187,10 @@ loadReadStateCache();
     def _render_feed_html(request: Request, user: dict) -> HTMLResponse:
         """Render the HTML feed for a cookie-authed user. No key appears in URLs or JS."""
         d = get_db()
+        _ensure_default_collection(d, user["id"])
         query = (request.query_params.get("q") or "").strip()
         feed_filter = _feed_query_filter(request)
+        accessible_collections = d.list_collections(user["id"])
         feed, read_states, feed_reactions = _load_feed_resources(
             d,
             user,
@@ -1973,162 +2209,19 @@ loadReadStateCache();
 
         submitter_cache: dict[str, str] = {}
         if not feed:
-            items_html = '<p class="empty">Nothing here yet. Check back later.</p>'
+            items_html = '<p class="empty" id="feedEmptyState">Nothing here yet. Check back later.</p>'
         else:
-            items_html = ""
-            for r in feed:
-                title = r.get("title") or r["url"]
-                sibling_notes = d.list_resource_notes(r["id"])
-                # Submitter name
-                sub_id = r.get("submitted_by", "")
-                if sub_id and sub_id not in submitter_cache:
-                    u = d.get_user(sub_id)
-                    submitter_cache[sub_id] = u["name"] if u else sub_id
-                submitter_name = submitter_cache.get(sub_id, "")
-                meta_bits: list[str] = []
-                if r.get("author"):
-                    meta_bits.append(f'<span class="author">{_xml_escape(r["author"])}</span>')
-                if submitter_name:
-                    meta_bits.append(f'<span class="submitted-by">{_xml_escape(submitter_name)}</span>')
-                added_date = _short_date(r.get("created_at"))
-                pub_date = _resource_pub_date(r)
-                pub_html = f" (published {pub_date})" if pub_date and pub_date != added_date else ""
-                meta_bits.append(f"{added_date}{pub_html}")
-                meta_html = " · ".join(bit for bit in meta_bits if bit)
-                source_type = r.get("source_type", "")
-                url = r["url"]
-                if url.startswith("dugg://content/"):
-                    url = "/r/" + url.removeprefix("dugg://content/")
-                coll_id = r.get("collection_id", "")
-                source_srv = r.get("source_server") or ""
-                is_submitter = sub_id == user["id"]
-                is_local = not source_srv
-
-                # Render notes (primary + siblings) as individual rows with
-                # per-note edit/delete buttons gated on ownership. The JS
-                # side routes primary (data-note-kind=primary) through
-                # /api/edit and siblings through /api/note/edit.
-                def _render_note_row(note_id: str, kind: str,
-                                     who: str, text: str, origin: str,
-                                     can_mutate: bool, color_class: str) -> str:
-                    who_html = ""
-                    if kind == "sibling":
-                        origin_label = f' <span class="sib-origin">via {_xml_escape(origin)}</span>' if origin else ""
-                        who_html = f'<span class="sib-who">{_xml_escape(who)}{origin_label}:</span> '
-                    actions = ""
-                    if can_mutate:
-                        actions = (
-                            '<span class="note-actions">'
-                            '<button class="note-action-btn" onclick="beginNoteEdit(this)">edit</button>'
-                            '<button class="note-action-btn note-action-del" onclick="deleteNoteRow(this)">delete</button>'
-                            '</span>'
-                        )
-                    return (
-                        f'<div class="note {color_class}" '
-                        f'data-note-id="{_xml_escape(note_id)}" '
-                        f'data-note-kind="{kind}" '
-                        f'data-resource-id="{r["id"]}">'
-                        '<span class="note-icon" aria-hidden="true">'
-                        '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" '
-                        'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
-                        'stroke-linejoin="round">'
-                        '<path d="M12 20h9"/>'
-                        '<path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>'
-                        '</svg>'
-                        '</span>'
-                        f'<span class="note-body">{who_html}<span class="note-text">{_xml_escape(text)}</span></span>'
-                        f'{actions}'
-                        f'</div>'
-                    )
-
-                notes_html_parts: list[str] = []
-                if r.get("note"):
-                    primary_class = "note-local-mine" if is_submitter and is_local else ("note-remote-mine" if is_submitter else "note-other")
-                    notes_html_parts.append(_render_note_row(
-                        note_id="", kind="primary",
-                        who=submitter_name, text=r["note"],
-                        origin="", can_mutate=is_submitter,
-                        color_class=primary_class,
-                    ))
-                for sn in sibling_notes:
-                    # Direct submitter match OR remote-identity link match.
-                    sib_is_mine = d.viewer_owns_note(sn, user["id"])
-                    sib_class = "sibling note-local-mine" if sib_is_mine else "sibling note-other"
-                    notes_html_parts.append(_render_note_row(
-                        note_id=sn.get("id", ""), kind="sibling",
-                        who=sn.get("submitter_name") or "someone",
-                        text=sn.get("note") or "",
-                        origin=sn.get("source_server") or "",
-                        can_mutate=sib_is_mine,
-                        color_class=sib_class,
-                    ))
-                notes_html = "".join(notes_html_parts)
-
-                # Thumbnail
-                thumb = r.get("thumbnail") or ""
-                thumb_html = f'<img src="{_xml_escape(thumb)}" alt="" class="card-thumb" loading="lazy">' if thumb else ""
-                # Description preview
-                desc = r.get("description") or ""
-                desc_html = f'<p class="card-desc">{_xml_escape(desc[:280])}</p>' if desc else ""
-                # Tags
-                tags = r.get("tags", [])
-                tags_html = ""
-                if tags:
-                    tag_labels = [t["label"] if isinstance(t, dict) else t for t in tags]
-                    tags_html = '<div class="card-tags">' + "".join(f'<span class="tag">{_xml_escape(t)}</span>' for t in tag_labels[:6]) + "</div>"
-                # Source type badge
-                type_badge = ""
-                if source_type == "youtube":
-                    type_badge = '<span class="type-badge yt">YouTube</span>'
-                elif source_type == "article":
-                    type_badge = '<span class="type-badge article">Article</span>'
-                reaction_state = feed_reactions.get(r["id"], {})
-                star_count = int(reaction_state.get("star_count", 0))
-                thumbsup_count = int(reaction_state.get("thumbsup_count", 0))
-                viewer_starred = "true" if reaction_state.get("viewer_starred") else "false"
-                viewer_thumbsup = "true" if reaction_state.get("viewer_thumbsup") else "false"
-                is_read = r["id"] in read_states
-                read_state = "read" if is_read else "unread"
-                read_card_class = " is-read" if is_read else ""
-                read_button_html = (
-                    f"""<button class="action-btn reaction-btn read-state-btn mark-unread-btn" onclick="markUnread(this)" data-resource-id="{r["id"]}" data-active="true" aria-pressed="true">
-        <span class="reaction-icon" aria-hidden="true">📚</span>
-        <span class="reaction-label">Mark Unread</span>
-      </button>"""
-                    if is_read
-                    else f"""<button class="action-btn reaction-btn read-state-btn mark-read-btn" onclick="markRead(this)" data-resource-id="{r["id"]}" data-active="false" aria-pressed="false">
-        <span class="reaction-icon" aria-hidden="true">📖</span>
-        <span class="reaction-label">Mark Read</span>
-      </button>"""
+            items_html = "".join(
+                _render_feed_card_html(
+                    d,
+                    r,
+                    user,
+                    submitter_cache=submitter_cache,
+                    reaction_state=feed_reactions.get(r["id"], {}),
+                    read_states=read_states,
                 )
-
-                items_html += f"""<div class="card{read_card_class}" id="r-{r["id"]}" data-legacy-id="item-{r["id"]}" data-collection="{coll_id}" data-source-server="{_xml_escape(source_srv)}" data-url="{_xml_escape(r['url'])}" data-resource-id="{r["id"]}" data-read-state="{read_state}" data-source-type="{_xml_escape(source_type or "other")}">
-  {f'<div class="card-media">{thumb_html}</div>' if thumb_html else ""}
-  <div class="card-body">
-    <h3><a href="{url}" target="_blank" rel="noopener" data-dugg-resource-id="{r["id"]}">{_xml_escape(title)}</a> {type_badge}</h3>
-    <p class="meta"><span class="meta-read-state" data-state="{read_state}"><span class="unread-dot" aria-hidden="true"></span><span class="read-pill">✓ read</span></span>{meta_html}</p>
-    {desc_html}
-    <div class="notes-block">{notes_html}</div>
-    {tags_html}
-    <div class="item-actions">
-      {read_button_html}
-      <button class="action-btn reaction-btn" onclick="toggleReaction(this)" data-resource-id="{r["id"]}" data-reaction-type="star" data-active="{viewer_starred}" data-count="{star_count}" aria-pressed="{viewer_starred}">
-        <span class="reaction-icon" aria-hidden="true">⭐</span>
-        <span class="reaction-label">Star</span>
-        <span class="reaction-count">{star_count}</span>
-      </button>
-      <button class="action-btn reaction-btn" onclick="toggleReaction(this)" data-resource-id="{r["id"]}" data-reaction-type="thumbsup" data-active="{viewer_thumbsup}" data-count="{thumbsup_count}" aria-pressed="{viewer_thumbsup}">
-        <span class="reaction-icon" aria-hidden="true">👍</span>
-        <span class="reaction-label">Thumbs Up</span>
-        <span class="reaction-count">{thumbsup_count}</span>
-      </button>
-    </div>
-    <div class="item-actions item-actions-secondary">
-      <button class="action-btn add-note-btn" onclick="beginAddNote(this)" data-resource-id="{r["id"]}">add note</button>
-      <button class="action-btn delete-btn" onclick="deleteItem('{r["id"]}')">delete item</button>
-    </div>
-  </div>
-</div>\n"""
+                for r in feed
+            )
 
         # RSS subscription status
         subs = d.list_rss_subscriptions(user["id"])
@@ -2169,6 +2262,46 @@ loadReadStateCache();
             classes = "filter-pill is-active" if is_active else "filter-pill"
             filter_pills.append(f'<a class="{classes}" href="{href}">{filter_label}</a>')
         filter_row = f'<div class="filter-row">{"".join(filter_pills)}</div>'
+        collection_field_html = ""
+        if len(accessible_collections) > 1:
+            options = "".join(
+                f'<option value="{_xml_escape(coll["id"])}">{_xml_escape(coll.get("name") or coll["id"])}</option>'
+                for coll in accessible_collections
+            )
+            collection_field_html = f"""<div class="composer-field">
+    <label for="composerCollection">Collection</label>
+    <select id="composerCollection" name="collection_id">{options}</select>
+  </div>"""
+        composer_grid_class = "composer-grid with-collections" if collection_field_html else "composer-grid"
+        composer_html = f"""<section class="feed-composer" id="feedComposer">
+  <div class="card">
+    <div class="card-body">
+      <form class="composer-form" id="composerForm">
+        <p class="composer-starter">
+          <input type="text" id="composerStarterInput" placeholder="Paste a URL or drop a note…" autocomplete="off">
+        </p>
+        <div class="composer-fields">
+          <div class="{composer_grid_class}">
+            <div class="composer-field">
+              <label for="composerUrl">URL</label>
+              <input type="url" id="composerUrl" name="url" placeholder="https://example.com" required>
+            </div>
+            {collection_field_html}
+          </div>
+          <div class="composer-field">
+            <label for="composerNote">Note</label>
+            <textarea id="composerNote" name="note" rows="4" placeholder="Why this matters..."></textarea>
+          </div>
+          <p class="composer-inline-error" id="composerError" role="alert"></p>
+          <div class="composer-actions">
+            <button type="submit" class="action-btn save-btn" id="composerSubmit">Add</button>
+            <button type="button" class="action-btn" id="composerCancel">Cancel</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+</section>"""
 
         # Source-type category row (mirrors iOS): "All" + one pill per source_type
         # present in the current query scope before read/starred/thumbsup/noted
@@ -2218,12 +2351,169 @@ loadReadStateCache();
 {stats_html}
 {sync_html}
 {topic_html}
+{composer_html}
 {search_bar}
 {category_row}
 {filter_row}
-{items_html}
+<div id="feedItems">{items_html}</div>
 {feed_js}"""
         return HTMLResponse(_html_page(page_title, body, wide=True))
+
+    def _render_feed_card_html(
+        d: DuggDB,
+        resource: dict,
+        user: dict,
+        *,
+        submitter_cache: Optional[dict[str, str]] = None,
+        reaction_state: Optional[dict] = None,
+        read_states: Optional[dict[str, dict]] = None,
+    ) -> str:
+        submitter_cache = submitter_cache or {}
+        reaction_state = reaction_state or {}
+        read_states = read_states or {}
+        title = resource.get("title") or resource["url"]
+        sibling_notes = d.list_resource_notes(resource["id"])
+        sub_id = resource.get("submitted_by", "")
+        if sub_id and sub_id not in submitter_cache:
+            submitter = d.get_user(sub_id)
+            submitter_cache[sub_id] = submitter["name"] if submitter else sub_id
+        submitter_name = submitter_cache.get(sub_id, "")
+        meta_bits: list[str] = []
+        if resource.get("author"):
+            meta_bits.append(f'<span class="author">{_xml_escape(resource["author"])}</span>')
+        if submitter_name:
+            meta_bits.append(f'<span class="submitted-by">{_xml_escape(submitter_name)}</span>')
+        added_date = _short_date(resource.get("created_at"))
+        pub_date = _resource_pub_date(resource)
+        pub_html = f" (published {pub_date})" if pub_date and pub_date != added_date else ""
+        meta_bits.append(f"{added_date}{pub_html}")
+        meta_html = " · ".join(bit for bit in meta_bits if bit)
+        source_type = resource.get("source_type", "")
+        url = resource["url"]
+        if url.startswith("dugg://content/"):
+            url = "/r/" + url.removeprefix("dugg://content/")
+        coll_id = resource.get("collection_id", "")
+        source_srv = resource.get("source_server") or ""
+        is_submitter = sub_id == user["id"]
+        is_local = not source_srv
+
+        def _render_note_row(
+            note_id: str,
+            kind: str,
+            who: str,
+            text: str,
+            origin: str,
+            can_mutate: bool,
+            color_class: str,
+        ) -> str:
+            who_html = ""
+            if kind == "sibling":
+                origin_label = f' <span class="sib-origin">via {_xml_escape(origin)}</span>' if origin else ""
+                who_html = f'<span class="sib-who">{_xml_escape(who)}{origin_label}:</span> '
+            actions = ""
+            if can_mutate:
+                actions = (
+                    '<span class="note-actions">'
+                    '<button class="note-action-btn" onclick="beginNoteEdit(this)">edit</button>'
+                    '<button class="note-action-btn note-action-del" onclick="deleteNoteRow(this)">delete</button>'
+                    '</span>'
+                )
+            return (
+                f'<div class="note {color_class}" '
+                f'data-note-id="{_xml_escape(note_id)}" '
+                f'data-note-kind="{kind}" '
+                f'data-resource-id="{resource["id"]}">'
+                f'<span class="note-body">{who_html}<span class="note-text">{_xml_escape(text)}</span></span>'
+                f"{actions}"
+                f"</div>"
+            )
+
+        notes_html_parts: list[str] = []
+        if resource.get("note"):
+            primary_class = "note-local-mine" if is_submitter and is_local else ("note-remote-mine" if is_submitter else "note-other")
+            notes_html_parts.append(_render_note_row(
+                note_id="",
+                kind="primary",
+                who=submitter_name,
+                text=resource["note"],
+                origin="",
+                can_mutate=is_submitter,
+                color_class=primary_class,
+            ))
+        for sibling_note in sibling_notes:
+            sibling_is_mine = d.viewer_owns_note(sibling_note, user["id"])
+            sibling_class = "sibling note-local-mine" if sibling_is_mine else "sibling note-other"
+            notes_html_parts.append(_render_note_row(
+                note_id=sibling_note.get("id", ""),
+                kind="sibling",
+                who=sibling_note.get("submitter_name") or "someone",
+                text=sibling_note.get("note") or "",
+                origin=sibling_note.get("source_server") or "",
+                can_mutate=sibling_is_mine,
+                color_class=sibling_class,
+            ))
+        notes_html = "".join(notes_html_parts)
+
+        thumb = resource.get("thumbnail") or ""
+        thumb_html = f'<img src="{_xml_escape(thumb)}" alt="" class="card-thumb" loading="lazy">' if thumb else ""
+        desc = resource.get("description") or ""
+        desc_html = f'<p class="card-desc">{_xml_escape(desc[:280])}</p>' if desc else ""
+        tags = resource.get("tags", [])
+        tags_html = ""
+        if tags:
+            tag_labels = [t["label"] if isinstance(t, dict) else t for t in tags]
+            tags_html = '<div class="card-tags">' + "".join(f'<span class="tag">{_xml_escape(t)}</span>' for t in tag_labels[:6]) + "</div>"
+        type_badge = ""
+        if source_type == "youtube":
+            type_badge = '<span class="type-badge yt">YouTube</span>'
+        elif source_type == "article":
+            type_badge = '<span class="type-badge article">Article</span>'
+        star_count = int(reaction_state.get("star_count", 0))
+        thumbsup_count = int(reaction_state.get("thumbsup_count", 0))
+        viewer_starred = "true" if reaction_state.get("viewer_starred") else "false"
+        viewer_thumbsup = "true" if reaction_state.get("viewer_thumbsup") else "false"
+        is_read = resource["id"] in read_states
+        read_state = "read" if is_read else "unread"
+        read_card_class = " is-read" if is_read else ""
+        read_button_html = (
+            f"""<button class="action-btn reaction-btn read-state-btn mark-unread-btn" onclick="markUnread(this)" data-resource-id="{resource["id"]}" data-active="true" aria-pressed="true">
+        <span class="reaction-icon" aria-hidden="true">📚</span>
+        <span class="reaction-label">Mark Unread</span>
+      </button>"""
+            if is_read
+            else f"""<button class="action-btn reaction-btn read-state-btn mark-read-btn" onclick="markRead(this)" data-resource-id="{resource["id"]}" data-active="false" aria-pressed="false">
+        <span class="reaction-icon" aria-hidden="true">📖</span>
+        <span class="reaction-label">Mark Read</span>
+      </button>"""
+        )
+
+        return f"""<div class="card{read_card_class}" id="r-{resource["id"]}" data-legacy-id="item-{resource["id"]}" data-collection="{coll_id}" data-source-server="{_xml_escape(source_srv)}" data-url="{_xml_escape(resource['url'])}" data-resource-id="{resource["id"]}" data-read-state="{read_state}" data-source-type="{_xml_escape(source_type or "other")}">
+  {f'<div class="card-media">{thumb_html}</div>' if thumb_html else ""}
+  <div class="card-body">
+    <h3><a href="{url}" target="_blank" rel="noopener" data-dugg-resource-id="{resource["id"]}">{_xml_escape(title)}</a> {type_badge}</h3>
+    <p class="meta"><span class="meta-read-state" data-state="{read_state}"><span class="unread-dot" aria-hidden="true"></span><span class="read-pill">✓ read</span></span>{meta_html}</p>
+    {desc_html}
+    <div class="notes-block">{notes_html}</div>
+    {tags_html}
+    <div class="item-actions">
+      {read_button_html}
+      <button class="action-btn reaction-btn" onclick="toggleReaction(this)" data-resource-id="{resource["id"]}" data-reaction-type="star" data-active="{viewer_starred}" data-count="{star_count}" aria-pressed="{viewer_starred}">
+        <span class="reaction-icon" aria-hidden="true">⭐</span>
+        <span class="reaction-label">Star</span>
+        <span class="reaction-count">{star_count}</span>
+      </button>
+      <button class="action-btn reaction-btn" onclick="toggleReaction(this)" data-resource-id="{resource["id"]}" data-reaction-type="thumbsup" data-active="{viewer_thumbsup}" data-count="{thumbsup_count}" aria-pressed="{viewer_thumbsup}">
+        <span class="reaction-icon" aria-hidden="true">👍</span>
+        <span class="reaction-label">Thumbs Up</span>
+        <span class="reaction-count">{thumbsup_count}</span>
+      </button>
+    </div>
+    <div class="item-actions item-actions-secondary">
+      <button class="action-btn add-note-btn" onclick="beginAddNote(this)" data-resource-id="{resource["id"]}">add note</button>
+      <button class="action-btn delete-btn" onclick="deleteItem('{resource["id"]}')">delete item</button>
+    </div>
+  </div>
+</div>\n"""
 
     def _skill_view_path(skill_id: str, server_url: str = "") -> str:
         if server_url:
@@ -2496,12 +2786,17 @@ loadReadStateCache();
             "note": r.get("note") or "",
             "notes": notes,
             "tags": tags,
+            "author": r.get("author") or "",
+            "collection_id": r.get("collection_id") or "",
+            "submitted_by": sub_id,
             "submitter": submitter_cache.get(sub_id, ""),
             "added_at": r.get("created_at") or "",
             "published_at": published_at,
             "source_type": source_type,
             "source_label": r.get("source_server") or "",
+            "source_server": r.get("source_server") or "",
             "thumbnail": r.get("thumbnail") or "",
+            "raw_metadata": raw if isinstance(raw, dict) else {},
         }
         hints = hints_for(source_type, r["url"])
         if hints is not None:
@@ -2790,6 +3085,7 @@ loadReadStateCache();
         return JSONResponse({"reaction": reaction})
 
     async def handle_api_notifications(request: Request):
+
         try:
             user = resolve_user_from_request(request)
         except ValueError as e:
@@ -2865,6 +3161,61 @@ loadReadStateCache();
         d = get_db()
         updated_seen_at = d.set_notifications_seen_at(user["id"], seen_at or None)
         return JSONResponse({"status": "ok", "seen_at": updated_seen_at})
+
+    async def handle_api_add(request: Request):
+        try:
+            user = resolve_user_from_request(request)
+        except ValueError as e:
+            return _problem_response(401, str(e))
+        try:
+            body = await request.json()
+        except Exception:
+            return _problem_response(400, "Invalid JSON payload")
+
+        url = (body.get("url") or "").strip()
+        note = (body.get("note") or "").strip()
+        collection_id = (body.get("collection_id") or "").strip()
+        if not url:
+            return _problem_response(400, "Missing url")
+
+        d = get_db()
+        resource, error = await _add_url_resource(
+            d,
+            user=user,
+            url=url,
+            note=note,
+            collection_id=collection_id,
+        )
+        if error == "Collection not found":
+            return _problem_response(404, error)
+        if error:
+            return _problem_response(400, error)
+
+        submitter_cache: dict[str, str] = {}
+        sibling_notes = d.list_resource_notes(resource["id"])
+        read_states = d.batch_read_states(user["id"], [resource["id"]])
+        reaction_state = _batch_feed_reactions(d, [resource["id"]], user["id"]).get(resource["id"], {})
+        serialized = _serialize_resource(
+            d,
+            resource,
+            submitter_cache,
+            sibling_notes,
+            viewer_id=user["id"],
+            edit_count=len(d.list_resource_edits(resource["id"])),
+        )
+        card_html = _render_feed_card_html(
+            d,
+            resource,
+            user,
+            submitter_cache=submitter_cache,
+            reaction_state=reaction_state,
+            read_states=read_states,
+        )
+        status_code = 200 if resource.get("status") == "sibling_note_added" else 201
+        return JSONResponse(
+            {"resource": serialized, "card_html": card_html},
+            status_code=status_code,
+        )
 
     async def handle_api_search(request: Request):
         """GET /api/search?q=... — structured JSON search for typed clients.
@@ -4846,6 +5197,7 @@ loadReadStateCache();
         Route("/api/react", endpoint=handle_api_react, methods=["POST"]),
         Route("/api/react/{resource_id}", endpoint=handle_api_react, methods=["POST"]),
         Route("/api/react/{resource_id}", endpoint=handle_api_react, methods=["DELETE"]),
+        Route("/api/add", endpoint=handle_api_add, methods=["POST"]),
         Route("/api/search", endpoint=handle_api_search),
         Route("/api/resource/{id}", endpoint=handle_api_resource),
         Route("/api/note", endpoint=handle_api_note, methods=["POST"]),

@@ -734,6 +734,65 @@ def test_api_react_marks_read_implicitly_for_web_surface(client, db_path, user):
     assert reactions["breakdown"]["thumbsup"] == 1
 
 
+def test_api_add_requires_auth(client):
+    c, _ = client
+
+    resp = c.post("/api/add", json={"url": "https://example.com/new"})
+    assert resp.status_code == 401
+
+
+def test_api_add_validates_url(client, user):
+    c, _ = client
+
+    resp = c.post(
+        "/api/add",
+        json={"url": "not-a-url"},
+        headers={"X-Dugg-Key": user["api_key"]},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "Invalid URL"
+
+
+def test_api_add_returns_resource_and_card_html(client, db_path, user, monkeypatch):
+    c, _ = client
+
+    async def _fake_enrich(url: str):
+        assert url == "https://example.com/composer"
+        return {
+            "title": "Composer Link",
+            "description": "Added from the feed composer",
+            "thumbnail": "https://example.com/thumb.jpg",
+            "source_type": "article",
+            "raw_metadata": {"author": "Ada Lovelace", "published_at": "2026-04-27T08:00:00+00:00"},
+        }
+
+    monkeypatch.setattr("dugg.enrichment.enrich_url", _fake_enrich)
+    c.cookies.set("dugg_key", user["api_key"])
+
+    resp = c.post(
+        "/api/add",
+        json={
+            "url": "https://example.com/composer",
+            "note": "worth reading",
+        },
+    )
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["resource"]["url"] == "https://example.com/composer"
+    assert data["resource"]["title"] == "Composer Link"
+    assert data["resource"]["note"] == "worth reading"
+    assert data["resource"]["author"] == "Ada Lovelace"
+    assert data["resource"]["raw_metadata"]["published_at"] == "2026-04-27T08:00:00+00:00"
+    assert 'id="r-' in data["card_html"]
+    assert "Composer Link" in data["card_html"]
+
+    d = DuggDB(db_path)
+    stored = d.get_resource(data["resource"]["id"])
+    d.close()
+    assert stored is not None
+    assert stored["url"] == "https://example.com/composer"
+
+
 def test_api_unreact_removes_existing_reaction(client, db_path, user):
     c, _ = client
     res_id = _seed_resource(db_path, user, url="https://example.com/unreact-http")
@@ -2665,6 +2724,49 @@ def test_feed_bare_with_cookie_renders_html(client, user):
     assert "window.location.pathname.split('/feed/')" not in resp.text
     # Key must not appear in the rendered HTML
     assert user["api_key"] not in resp.text
+
+
+def test_feed_html_includes_composer_above_search_and_filters(client, user):
+    c, _ = client
+    c.cookies.set("dugg_key", user["api_key"])
+
+    resp = c.get("/feed")
+    assert resp.status_code == 200
+    html = resp.text
+    assert 'id="feedComposer"' in html
+    assert 'id="composerStarterInput"' in html
+    assert 'placeholder="Paste a URL or drop a note…"' in html
+    assert 'id="composerUrl"' in html
+    assert 'id="composerNote"' in html
+    assert 'id="composerSubmit">Add<' in html
+    assert 'id="composerCancel">Cancel<' in html
+    assert 'id="composerError"' in html
+    assert 'fetch(BASE + \'/api/add\'' in html
+    assert html.index('id="feedComposer"') < html.index('class="search-bar"')
+    assert html.index('class="search-bar"') < html.index('class="filter-row"')
+
+
+def test_feed_html_hides_collection_picker_with_single_collection(client, user):
+    c, _ = client
+    c.cookies.set("dugg_key", user["api_key"])
+
+    resp = c.get("/feed")
+    assert resp.status_code == 200
+    assert 'id="composerCollection"' not in resp.text
+
+
+def test_feed_html_shows_collection_picker_for_multiple_collections(client, db_path, user):
+    c, _ = client
+    d = DuggDB(db_path)
+    shared = d.create_collection("Shared Finds", user["id"], visibility="shared")
+    d.add_collection_member(shared["id"], user["id"], role="member")
+    d.close()
+
+    c.cookies.set("dugg_key", user["api_key"])
+    resp = c.get("/feed")
+    assert resp.status_code == 200
+    assert 'id="composerCollection"' in resp.text
+    assert "Shared Finds" in resp.text
 
 
 def test_feed_html_includes_read_state_markup_and_reaction_buttons(client, db_path, user):
