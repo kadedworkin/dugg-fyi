@@ -32,6 +32,7 @@ from starlette.routing import Route
 from mcp.server.sse import SseServerTransport
 
 from dugg.db import DuggDB, READ_STATE_SOURCES
+from dugg.potential_actions import build_potential_actions
 from dugg.source_registry import hints_for
 from dugg.sync import start_sync_daemon
 from dugg.rss import start_rss_daemon
@@ -639,12 +640,24 @@ def create_app(db_path: Optional[Path] = None, mode: str = "local") -> Starlette
         if result.get("error"):
             return _problem_response(500, result["error"])
 
-        return JSONResponse({
+        response = {
             "status": "deleted",
             "id": resource["id"],
             "url": url,
             "title": resource.get("title", ""),
-        }, status_code=200)
+        }
+        potential_action = build_potential_actions(
+            "operation_result",
+            "delete",
+            {
+                "agent_user_id": user["id"],
+                "home_server_url": d.get_config("server_url", "") or "",
+                "current_server_url": d.get_config("server_url", "") or "",
+            },
+        )
+        if potential_action:
+            response["potentialAction"] = potential_action
+        return JSONResponse(response, status_code=200)
 
     async def handle_health(request: Request):
         """GET /health — liveness check."""
@@ -815,7 +828,22 @@ async function doSetup() {{
         try:
             results = await call_tool(tool_name, args)
             texts = [r.text for r in results if hasattr(r, "text")]
-            full_result = "\n".join(texts)
+            structured_payload = None
+            raw_result_texts = list(texts)
+            if raw_result_texts:
+                try:
+                    candidate = json.loads(raw_result_texts[-1])
+                except (TypeError, ValueError):
+                    candidate = None
+                if isinstance(candidate, dict) and "result" in candidate:
+                    structured_payload = candidate
+                    raw_result_texts = raw_result_texts[:-1]
+
+            full_result = "\n".join(raw_result_texts)
+            if structured_payload:
+                if full_result:
+                    structured_payload["result"] = f"{full_result}\n\n{structured_payload['result']}"
+                full_result = structured_payload["result"]
 
             # RFC 6585: return 429 with Retry-After when rate-limited
             if full_result.startswith("Rate limit exceeded"):
@@ -830,12 +858,19 @@ async function doSetup() {{
             if format_mode == "compact":
                 lines = [ln for ln in full_result.split("\n") if ln.strip()]
                 full_result = "\n".join(lines)
-
-            return JSONResponse({
+                if structured_payload:
+                    structured_payload["result"] = full_result
+            response_data = {
                 "tool": tool_name,
                 "result": full_result,
                 "format": format_mode,
-            })
+            }
+            if structured_payload:
+                response_data.update({
+                    k: v for k, v in structured_payload.items()
+                    if k not in {"result"}
+                })
+            return JSONResponse(response_data)
         except Exception as e:
             return _problem_response(500, str(e))
 
@@ -2802,6 +2837,35 @@ initFeedEmailWidget();
         member = d.get_member_status(r.get("collection_id", ""), user_id)
         return bool(member and member["role"] == "owner")
 
+    def _resource_origin(r: dict) -> str:
+        if not r.get("source_server"):
+            return "local"
+        if r.get("source_type") == "rss":
+            return "rss"
+        return "broadcast"
+
+    def _agent_has_reaction(resource_id: str, user_id: str, reaction_type: str) -> bool:
+        row = get_db().conn.execute(
+            """SELECT 1
+               FROM reactions
+               WHERE resource_id = ? AND user_id = ? AND reaction_type = ?
+               LIMIT 1""",
+            (resource_id, user_id, reaction_type),
+        ).fetchone()
+        return bool(row)
+
+    def _resource_action_state(r: dict, user_id: str, *, reaction_type: str = "star") -> dict:
+        current_server_url = get_db().get_config("server_url", "") or ""
+        return {
+            "agent_user_id": user_id,
+            "resource_owner_id": r.get("submitted_by") or "",
+            "resource_origin": _resource_origin(r),
+            "source_server_url": r.get("source_server") or "",
+            "home_server_url": current_server_url,
+            "current_server_url": current_server_url,
+            "agent_already_reacted": _agent_has_reaction(r["id"], user_id, reaction_type),
+        }
+
     def _serialize_resource(
         d: DuggDB,
         r: dict,
@@ -2985,7 +3049,19 @@ initFeedEmailWidget();
             _serialize_resource(d, r, submitter_cache, notes_by_id.get(r["id"]))
             for r in feed
         ]
-        return JSONResponse({"resources": resources, "count": len(resources)})
+        response = {"resources": resources, "count": len(resources)}
+        potential_action = build_potential_actions(
+            "list",
+            "list",
+            {
+                "agent_user_id": user["id"],
+                "home_server_url": d.get_config("server_url", "") or "",
+                "current_server_url": d.get_config("server_url", "") or "",
+            },
+        )
+        if potential_action:
+            response["potentialAction"] = potential_action
+        return JSONResponse(response)
 
     async def handle_api_feed_urls(request: Request):
         """GET /api/feed/urls — compact JSON feed for typed clients."""
@@ -3178,7 +3254,15 @@ initFeedEmailWidget();
 
         reaction = d.react_to_resource(resource_id, user["id"], reaction_type)
         d.mark_read(user["id"], resource_id, _reaction_implicit_source(request))
-        return JSONResponse({"reaction": reaction})
+        response = {"reaction": reaction}
+        potential_action = build_potential_actions(
+            "operation_result",
+            "react",
+            _resource_action_state(resource, user["id"], reaction_type=reaction_type),
+        )
+        if potential_action:
+            response["potentialAction"] = potential_action
+        return JSONResponse(response)
 
     async def handle_api_notifications(request: Request):
 
@@ -3352,7 +3436,19 @@ initFeedEmailWidget();
             _serialize_resource(d, r, submitter_cache, notes_by_id.get(r["id"]))
             for r in hits
         ]
-        return JSONResponse({"resources": resources, "count": len(resources)})
+        response = {"resources": resources, "count": len(resources)}
+        potential_action = build_potential_actions(
+            "list",
+            "search",
+            {
+                "agent_user_id": user["id"],
+                "home_server_url": d.get_config("server_url", "") or "",
+                "current_server_url": d.get_config("server_url", "") or "",
+            },
+        )
+        if potential_action:
+            response["potentialAction"] = potential_action
+        return JSONResponse(response)
 
     async def handle_api_resource(request: Request):
         """GET /api/resource/{id} — structured JSON for a single resource.
@@ -3379,10 +3475,18 @@ initFeedEmailWidget();
         submitter_cache: dict[str, str] = {}
         sibs = d.list_resource_notes(resource_id)
         edit_count = len(d.list_resource_edits(resource_id))
-        return JSONResponse({"resource": _serialize_resource(
+        response = {"resource": _serialize_resource(
             d, r, submitter_cache, sibs,
             viewer_id=user["id"], edit_count=edit_count,
-        )})
+        )}
+        potential_action = build_potential_actions(
+            "resource",
+            "get",
+            _resource_action_state(r, user["id"]),
+        )
+        if potential_action:
+            response["potentialAction"] = potential_action
+        return JSONResponse(response)
 
     async def handle_api_note(request: Request):
         """POST /api/note — attach a sibling note to an existing resource.
@@ -3434,7 +3538,7 @@ initFeedEmailWidget();
         if not result:
             return _problem_response(400, "Empty note")
 
-        return JSONResponse({
+        response = {
             "note": {
                 "id": result.get("id", ""),
                 "author": user.get("name", ""),
@@ -3444,7 +3548,15 @@ initFeedEmailWidget();
                 "can_edit": True,
                 "can_delete": True,
             }
-        }, status_code=201)
+        }
+        potential_action = build_potential_actions(
+            "operation_result",
+            "note",
+            _resource_action_state(resource, user["id"]),
+        )
+        if potential_action:
+            response["potentialAction"] = potential_action
+        return JSONResponse(response, status_code=201)
 
     async def handle_api_note_edit(request: Request):
         """POST /api/note/edit — edit a sibling note you authored.
@@ -3488,7 +3600,7 @@ initFeedEmailWidget();
         if not updated:
             return _problem_response(400, "Empty note")
 
-        return JSONResponse({
+        response = {
             "note": {
                 "id": updated["id"],
                 "author": updated.get("submitter_name") or "",
@@ -3498,7 +3610,15 @@ initFeedEmailWidget();
                 "can_edit": True,
                 "can_delete": True,
             }
-        })
+        }
+        potential_action = build_potential_actions(
+            "operation_result",
+            "note",
+            _resource_action_state(resource, user["id"]),
+        )
+        if potential_action:
+            response["potentialAction"] = potential_action
+        return JSONResponse(response)
 
     async def handle_api_note_delete(request: Request):
         """POST /api/note/delete — delete a sibling note you authored.
@@ -3590,10 +3710,18 @@ initFeedEmailWidget();
         submitter_cache: dict[str, str] = {}
         sibs = d.list_resource_notes(resource_id)
         edit_count = len(d.list_resource_edits(resource_id))
-        return JSONResponse({"resource": _serialize_resource(
+        response = {"resource": _serialize_resource(
             d, updated, submitter_cache, sibs,
             viewer_id=user["id"], edit_count=edit_count,
-        )})
+        )}
+        potential_action = build_potential_actions(
+            "resource",
+            "edit",
+            _resource_action_state(updated, user["id"]),
+        )
+        if potential_action:
+            response["potentialAction"] = potential_action
+        return JSONResponse(response)
 
     async def handle_api_resource_edits(request: Request):
         """GET /api/resource/{id}/edits — audit trail for a resource.

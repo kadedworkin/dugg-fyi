@@ -13,6 +13,7 @@ from mcp.types import TextContent, Tool
 
 from dugg.db import DuggDB, _now
 from dugg.enrichment import enrich_url
+from dugg.potential_actions import build_potential_actions
 from dugg.sync import start_sync_daemon
 
 
@@ -1260,7 +1261,20 @@ async def _handle_add(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
     if enriched.get("transcript") and resource.get("status") != "sibling_note_added":
         word_count = len(enriched["transcript"].split())
         summary += f"Transcript: {word_count} words captured\n"
-    return [TextContent(type="text", text=summary)]
+    full_resource = d.get_resource(resource["id"])
+    potential_action = None
+    if full_resource:
+        potential_action = build_potential_actions(
+            "resource",
+            "add",
+            _resource_action_state(d, user_id, full_resource),
+        )
+    return _tool_payload(
+        summary=summary,
+        operation="add",
+        resource=full_resource or resource,
+        potential_action=potential_action,
+    )
 
 
 def _handle_paste(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
@@ -1341,7 +1355,20 @@ def _handle_paste(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
     summary += f"Content: {word_count} words\n"
     if resource.get("tags"):
         summary += f"Tags: {', '.join(resource['tags'])}\n"
-    return [TextContent(type="text", text=summary)]
+    full_resource = d.get_resource(resource["id"])
+    potential_action = None
+    if full_resource:
+        potential_action = build_potential_actions(
+            "resource",
+            "paste",
+            _resource_action_state(d, user_id, full_resource),
+        )
+    return _tool_payload(
+        summary=summary,
+        operation="paste",
+        resource=full_resource or resource,
+        potential_action=potential_action,
+    )
 
 
 def _handle_edit(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
@@ -1396,7 +1423,18 @@ def _handle_edit(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
         lines.append(f"Summary: {result['summary'][:200]}")
     if result.get("enriched_at"):
         lines.append(f"Enriched: {result['enriched_at']}")
-    return [TextContent(type="text", text="\n".join(lines))]
+    summary = "\n".join(lines)
+    potential_action = build_potential_actions(
+        "resource",
+        "edit",
+        _resource_action_state(d, user_id, result),
+    )
+    return _tool_payload(
+        summary=summary,
+        operation="edit",
+        resource=result,
+        potential_action=potential_action,
+    )
 
 
 def _handle_my_servers(d: DuggDB, user_id: str) -> list[TextContent]:
@@ -1632,6 +1670,98 @@ def _json_result(payload: object) -> list[TextContent]:
 
 def _json_error(message: str) -> list[TextContent]:
     return _json_result({"error": message})
+
+
+def _resource_origin(resource: dict) -> str:
+    if not resource.get("source_server"):
+        return "local"
+    if resource.get("source_type") == "rss":
+        return "rss"
+    return "broadcast"
+
+
+def _agent_has_reaction(
+    d: DuggDB,
+    resource_id: str,
+    user_id: str,
+    reaction_type: str,
+) -> bool:
+    row = d.conn.execute(
+        """SELECT 1
+           FROM reactions
+           WHERE resource_id = ? AND user_id = ? AND reaction_type = ?
+           LIMIT 1""",
+        (resource_id, user_id, reaction_type),
+    ).fetchone()
+    return bool(row)
+
+
+def _resource_json(resource: dict) -> dict:
+    raw_metadata = resource.get("raw_metadata")
+    if isinstance(raw_metadata, str):
+        try:
+            raw_metadata = json.loads(raw_metadata)
+        except (TypeError, ValueError):
+            pass
+    return {
+        "id": resource["id"],
+        "url": resource.get("url") or "",
+        "title": resource.get("title") or "",
+        "description": resource.get("description") or "",
+        "note": resource.get("note") or "",
+        "summary": resource.get("summary") or "",
+        "source_type": resource.get("source_type") or "",
+        "source_server": resource.get("source_server") or "",
+        "submitted_by": resource.get("submitted_by") or "",
+        "collection_id": resource.get("collection_id") or "",
+        "tags": [t["label"] for t in resource.get("tags", []) if isinstance(t, dict) and t.get("label")],
+        "created_at": resource.get("created_at") or "",
+        "updated_at": resource.get("updated_at") or "",
+        "raw_metadata": raw_metadata,
+    }
+
+
+def _resource_action_state(
+    d: DuggDB,
+    user_id: str,
+    resource: dict,
+    *,
+    reaction_type: str = "star",
+) -> dict:
+    current_server_url = d.get_config("server_url", "") or ""
+    return {
+        "agent_user_id": user_id,
+        "resource_owner_id": resource.get("submitted_by") or "",
+        "resource_origin": _resource_origin(resource),
+        "source_server_url": resource.get("source_server") or "",
+        "home_server_url": current_server_url,
+        "current_server_url": current_server_url,
+        "agent_already_reacted": _agent_has_reaction(d, resource["id"], user_id, reaction_type),
+    }
+
+
+def _tool_payload(
+    *,
+    summary: str,
+    operation: str,
+    resource: Optional[dict] = None,
+    resources: Optional[list[dict]] = None,
+    potential_action: Optional[list[dict]] = None,
+    extra: Optional[dict] = None,
+) -> list[TextContent]:
+    payload: dict = {}
+    if potential_action:
+        payload["potentialAction"] = potential_action
+    payload["result"] = summary
+    if resource is not None:
+        payload["resource"] = _resource_json(resource)
+    if resources is not None:
+        payload["resources"] = [_resource_json(item) for item in resources]
+        payload["count"] = len(resources)
+    if extra:
+        payload.update(extra)
+    payload["operation"] = operation
+    return _json_result(payload)
 
 
 def _skill_metadata(skill: dict) -> dict:
@@ -2108,7 +2238,24 @@ def _handle_search(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
         if pub_date:
             lines.append(f"  Published: {pub_date}")
         lines.append("")
-    return [TextContent(type="text", text="\n".join(lines))]
+    summary = "\n".join(lines)
+    server_url = d.get_config("server_url", "") or ""
+    potential_action = build_potential_actions(
+        "list",
+        "search",
+        {
+            "agent_user_id": user_id,
+            "home_server_url": server_url,
+            "current_server_url": server_url,
+        },
+    )
+    return _tool_payload(
+        summary=summary,
+        operation="search",
+        resources=results,
+        potential_action=potential_action,
+        extra={"query": query},
+    )
 
 
 def _handle_feed(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
@@ -2146,7 +2293,23 @@ def _handle_feed(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
         if pub_date:
             lines.append(f"  Published: {pub_date}")
         lines.append("")
-    return [TextContent(type="text", text="\n".join(lines))]
+    summary = "\n".join(lines)
+    server_url = d.get_config("server_url", "") or ""
+    potential_action = build_potential_actions(
+        "list",
+        "list",
+        {
+            "agent_user_id": user_id,
+            "home_server_url": server_url,
+            "current_server_url": server_url,
+        },
+    )
+    return _tool_payload(
+        summary=summary,
+        operation="list",
+        resources=results,
+        potential_action=potential_action,
+    )
 
 
 def _handle_tag(d: DuggDB, args: dict) -> list[TextContent]:
@@ -2494,7 +2657,19 @@ def _handle_react(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
         return [TextContent(type="text", text=f"Access denied to resource {resource_id}")]
     d.react_to_resource(resource_id, user_id, reaction_type)
     d.mark_read(user_id, resource_id, "mcp_react_implicit")
-    return [TextContent(type="text", text=f"Reacted to {resource_id} with {reaction_type}")]
+    summary = f"Reacted to {resource_id} with {reaction_type}"
+    potential_action = build_potential_actions(
+        "operation_result",
+        "react",
+        _resource_action_state(d, user_id, resource, reaction_type=reaction_type),
+    )
+    return _tool_payload(
+        summary=summary,
+        operation="react",
+        resource=resource,
+        potential_action=potential_action,
+        extra={"reaction_type": reaction_type},
+    )
 
 
 def _handle_unreact(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
@@ -3031,7 +3206,26 @@ async def _handle_delete_resource(d: DuggDB, user_id: str, args: dict) -> list[T
     msg = f"Deleted resource {result['deleted']}: {result.get('title') or result['url']}"
     if upstream_results:
         msg += f"\nUpstream deletes: {', '.join(upstream_results)}"
-    return [TextContent(type="text", text=msg)]
+    server_url = d.get_config("server_url", "") or ""
+    potential_action = build_potential_actions(
+        "operation_result",
+        "delete",
+        {
+            "agent_user_id": user_id,
+            "home_server_url": server_url,
+            "current_server_url": server_url,
+        },
+    )
+    return _tool_payload(
+        summary=msg,
+        operation="delete",
+        potential_action=potential_action,
+        extra={
+            "deleted_resource_id": result["deleted"],
+            "deleted_resource_url": result.get("url") or resource_url,
+            "upstream_results": upstream_results,
+        },
+    )
 
 
 def _handle_get(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
@@ -3077,7 +3271,18 @@ def _handle_get(d: DuggDB, user_id: str, args: dict) -> list[TextContent]:
         # Show first 500 chars of transcript
         preview = resource["transcript"][:500]
         lines.append(f"\nTranscript ({word_count} words): {preview}...")
-    return [TextContent(type="text", text="\n".join(lines))]
+    summary = "\n".join(lines)
+    potential_action = build_potential_actions(
+        "resource",
+        "get",
+        _resource_action_state(d, user_id, resource),
+    )
+    return _tool_payload(
+        summary=summary,
+        operation="get",
+        resource=resource,
+        potential_action=potential_action,
+    )
 
 
 # Track which API keys have already seen the first-call banner
@@ -3101,8 +3306,12 @@ def _maybe_prepend_banner(user: dict, api_key: Optional[str], result: list[TextC
         banner += "Run dugg_welcome for full orientation."
     else:
         banner = f"Welcome to Dugg, {user['name']}. Run dugg_welcome for orientation."
-
-    return [TextContent(type="text", text=f"[{banner}]\n\n{result[0].text}")] + result[1:]
+    if result:
+        try:
+            json.loads(result[0].text)
+        except (TypeError, ValueError):
+            return [TextContent(type="text", text=f"[{banner}]\n\n{result[0].text}")] + result[1:]
+    return [TextContent(type="text", text=f"[{banner}]")] + result
 
 
 def _handle_welcome(d: DuggDB, user_id: str, user: dict) -> list[TextContent]:
