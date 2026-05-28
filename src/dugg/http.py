@@ -2357,7 +2357,7 @@ initFeedEmailWidget();
   </details>
 </div>"""
 
-        topic_html = f'<p class="topic">{page_topic}</p>' if page_topic else ""
+        topic_html = ""
         clear_href = _feed_query_path(feed_filter=feed_filter)
         hidden_filter = f'<input type="hidden" name="filter" value="{feed_filter}">' if feed_filter else ""
         search_bar = f"""<form class="search-bar" method="get" action="/feed">
