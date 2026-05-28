@@ -1209,14 +1209,14 @@ function updateReactionButton(btn) {
 function markCardRead(resourceId) {
   if (!resourceId) return;
   readResourceIds.add(resourceId);
-  updateCardReadUi(document.getElementById('item-' + resourceId));
+  updateCardReadUi(document.querySelector('.card[data-resource-id="' + resourceId + '"]'));
   applyActiveFeedFilter();
 }
 
 function markCardUnreadLocal(resourceId) {
   if (!resourceId) return;
   readResourceIds.delete(resourceId);
-  updateCardReadUi(document.getElementById('item-' + resourceId));
+  updateCardReadUi(document.querySelector('.card[data-resource-id="' + resourceId + '"]'));
   applyActiveFeedFilter();
 }
 
@@ -1611,7 +1611,7 @@ async function setReadState(btn, shouldRead) {
     wasRead ? markCardRead(resourceId) : markCardUnreadLocal(resourceId);
     alert('Error: ' + e.message);
   } finally {
-    const currentBtn = document.querySelector('#item-' + resourceId + ' .read-state-btn');
+    const currentBtn = document.querySelector('.read-state-btn[data-resource-id="' + resourceId + '"]');
     if (currentBtn) {
       currentBtn.dataset.pending = 'false';
       currentBtn.disabled = false;
