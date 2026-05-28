@@ -2205,7 +2205,8 @@ initFeedEmailWidget();
         """Render the Atom feed for a resolved user. `api_key` is embedded in self-link."""
         d = get_db()
         feed = d.get_feed(user["id"], limit=50)
-        page_title = f"{user['name']}'s Dugg"
+        server_name = d.get_config("server_name", "")
+        page_title = f"{server_name}'s Dugg" if server_name else f"{user['name']}'s Dugg"
         srv_url = d.get_config("server_url", "")
         accessible = d._accessible_collection_ids(user["id"])
         def _skill_link(resource_id: str) -> str:
@@ -2314,7 +2315,8 @@ initFeedEmailWidget();
             limit=50,
         )
         category_candidates = _load_feed_candidates(d, user, query=query, limit=50)
-        page_title = f"{user['name']}'s Dugg"
+        server_name = d.get_config("server_name", "")
+        page_title = f"{server_name}'s Dugg" if server_name else f"{user['name']}'s Dugg"
         topic_parts: list[str] = []
         if query:
             topic_parts.append(f'Search results for "{_xml_escape(query)}"')
