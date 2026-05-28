@@ -75,6 +75,22 @@ def cmd_set_config(args):
     print(f"Config set: {args.key} = {args.value}")
 
 
+def cmd_get_config(args):
+    """Read a server config value. Prints empty when unset."""
+    from pathlib import Path
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = DuggDB(db_path)
+    if args.key:
+        value = db.get_config(args.key, "")
+        db.close()
+        print(value)
+    else:
+        rows = db.conn.execute("SELECT key, value FROM server_config ORDER BY key").fetchall()
+        db.close()
+        for row in rows:
+            print(f"{row['key']}={row['value']}")
+
+
 def cmd_enable_shared_default(args):
     """Mark a collection as the server's shared default. All existing users are
     auto-added as members, and new invite-redeemers will be added automatically."""
@@ -1863,6 +1879,9 @@ def main():
     p_setconf.add_argument("key", help="Config key (e.g. slack_signing_secret)")
     p_setconf.add_argument("value", help="Config value")
 
+    p_getconf = sub.add_parser("get-config", help="Read a server config value (or list all when no key)")
+    p_getconf.add_argument("key", nargs="?", default="", help="Config key. Omit to list all keys.")
+
     p_shared = sub.add_parser(
         "enable-shared-default",
         help="Mark a collection as the server's shared Default (hosted-instance mode)",
@@ -2148,6 +2167,8 @@ def main():
         cmd_set_url(args)
     elif args.command == "set-config":
         cmd_set_config(args)
+    elif args.command == "get-config":
+        cmd_get_config(args)
     elif args.command == "enable-shared-default":
         cmd_enable_shared_default(args)
     elif args.command == "add-user":
